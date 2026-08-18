@@ -55,3 +55,4 @@ cargo audit --file Cargo.lock
 
 - `notify 8.2.0`은 Windows/macOS/Linux의 OS 파일 변경 event를 사용합니다.
 - `global-hotkey 0.6.4`는 Windows/macOS/X11에서 전역 표시·포커스 단축키를 등록합니다. 등록 충돌 시 창 숨김 없이 Tier 1 접기로 제한됩니다.
+- Windows 100k/2GiB ignored gate의 기준은 Windows 11 Pro 10.0.26200 x64, Ryzen 7 8845HS, RAM 27.8GiB, rustc 1.96.0 debug test profile이며 peak working set 상한은 128MiB입니다.

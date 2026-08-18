@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 패키지 SemVer는 `0.1.0`이며 이 항목은 그 개발 스냅샷이다.
 
 ### Fixed
+- **[IMP-F004] Verified answer projection:** cloud `direct_answer`와 schema 위반 원문을 주요 UI에서 제거하고 검증된 claims로만 canonical 답변을 합성한다.
+- **[DBG-F002] Snapshot lineage:** watcher에 scanner 동등 ignore/event scope를 적용하고 Stale 신규 분석과 scan-to-egress live hash mismatch를 차단한다.
+- **[SEC-F004] Gemini client fail-closed:** redirect 차단 client builder 실패 시 기본 client fallback 없이 모든 operation을 `GEMINI_CLIENT_INIT_FAILED`로 종료한다.
+- **[DBG-F003] Peak memory gate:** Windows 기준 장비와 128MiB peak working set 상한을 문서화하고 실제 100k/2GiB ignored test에서 강제한다.
+- **[IMP-F006] Hotkey terminology:** roadmap의 hide/show 표현을 display/focus/non-hide fallback lifecycle로 통일한다.
 - **[SEC-F001] Canonical egress seal:** question, validation text digest, snapshot/ref, redaction/token 계수와 provider endpoint/model identity를 단일 digest로 결속하고 tamper matrix를 추가했다.
 - **[IMP-F001] Baseline authority:** FR-013/FR-017 원문을 복구하고 provider activation을 `DR-FR-001`로 분리했다.
 - **[DBG-F003] Incomplete snapshot:** 취소·한도 누락 scan을 `Incomplete`로 표시해 DB 저장과 로컬/클라우드 분석을 차단하고 repository switch 시 이전 scan을 취소한다.

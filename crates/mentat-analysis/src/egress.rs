@@ -883,36 +883,50 @@ impl EgressFilter {
             if (is_doc || summary.entry_points.contains(&file.relative_path))
                 && included_files.len() < 8
             {
-                if let Ok(content) = reader.read_file_content(&file.relative_path).await {
-                    let lines: Vec<&str> = content.lines().take(60).collect();
-                    let line_count = lines.len();
-                    let truncated = lines.join("\n");
-                    let (redacted, count) = Self::scan_and_redact_secrets(&truncated);
-                    total_redactions += count;
-
-                    context_buffer.push_str(&format!(
-                        "| {} | {} | 1-{} |\n",
-                        file.relative_path.display(),
-                        file.content_hash,
-                        line_count
-                    ));
-                    context_buffer.push_str(&format!(
-                        "### File: {}\nhash: {}\nallowed_lines: 1-{}\n```\n{}\n```\n\n",
-                        file.relative_path.display(),
-                        file.content_hash,
-                        line_count,
-                        redacted
-                    ));
-
-                    included_files.push(file.relative_path.clone());
-                    included_file_refs.push(IncludedFileRef {
-                        relative_path: file.relative_path.clone(),
-                        line_start: 1,
-                        line_end: line_count,
-                        line_count,
-                    });
-                    included_file_texts.insert(file.relative_path.clone(), redacted);
+                let content = reader
+                    .read_file_content(&file.relative_path)
+                    .await
+                    .map_err(|_| {
+                        MentatError::EgressViolation(format!(
+                            "스캔 이후 파일을 다시 읽을 수 없어 egress를 차단했습니다: {}",
+                            file.relative_path.display()
+                        ))
+                    })?;
+                let live_hash = format!("{:x}", Sha256::digest(content.as_bytes()));
+                if live_hash != file.content_hash {
+                    return Err(MentatError::EgressViolation(format!(
+                        "스캔 이후 파일 내용이 변경되어 egress를 차단했습니다: {}",
+                        file.relative_path.display()
+                    )));
                 }
+                let lines: Vec<&str> = content.lines().take(60).collect();
+                let line_count = lines.len();
+                let truncated = lines.join("\n");
+                let (redacted, count) = Self::scan_and_redact_secrets(&truncated);
+                total_redactions += count;
+
+                context_buffer.push_str(&format!(
+                    "| {} | {} | 1-{} |\n",
+                    file.relative_path.display(),
+                    file.content_hash,
+                    line_count
+                ));
+                context_buffer.push_str(&format!(
+                    "### File: {}\nhash: {}\nallowed_lines: 1-{}\n```\n{}\n```\n\n",
+                    file.relative_path.display(),
+                    file.content_hash,
+                    line_count,
+                    redacted
+                ));
+
+                included_files.push(file.relative_path.clone());
+                included_file_refs.push(IncludedFileRef {
+                    relative_path: file.relative_path.clone(),
+                    line_start: 1,
+                    line_end: line_count,
+                    line_count,
+                });
+                included_file_texts.insert(file.relative_path.clone(), redacted);
             }
         }
 
@@ -1308,13 +1322,15 @@ pub mod tests {
 
         let unrelated = PathBuf::from("docs/unrelated_notes.md");
         let entry = PathBuf::from("src/main.rs");
+        let entry_content = "fn main() { authentication(); }";
+        let entry_hash = format!("{:x}", Sha256::digest(entry_content.as_bytes()));
         let reader = MapReader {
             files: HashMap::from([
                 (
                     unrelated.clone(),
                     "totally unrelated gardening notes".into(),
                 ),
-                (entry.clone(), "fn main() { authentication(); }".into()),
+                (entry.clone(), entry_content.into()),
             ]),
         };
         let files = vec![
@@ -1331,7 +1347,7 @@ pub mod tests {
                 relative_path: entry.clone(),
                 kind: FileKind::SourceCode,
                 size_bytes: 30,
-                content_hash: "b".into(),
+                content_hash: entry_hash,
                 is_text: true,
                 line_count: Some(1),
                 text_preview: None,
@@ -1353,5 +1369,19 @@ pub mod tests {
         assert!(packet.excluded_sensitive_files.contains(&unrelated));
         assert!(packet.included_files.contains(&entry));
         assert!(!packet.prompt_context.contains("gardening"));
+
+        let mut stale_files = files;
+        stale_files[1].content_hash = "stale-scan-hash".to_string();
+        let stale_summary = crate::ProjectDetector::summarize(&stale_files);
+        let stale_result = EgressFilter::assemble_packet(
+            &reader,
+            &stale_files,
+            &stale_summary,
+            "authentication middleware",
+            Uuid::new_v4(),
+            &BackendProfile::default(),
+        )
+        .await;
+        assert!(matches!(stale_result, Err(MentatError::EgressViolation(_))));
     }
 }

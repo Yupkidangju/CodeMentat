@@ -1,6 +1,6 @@
 use ignore::WalkBuilder;
 use mentat_core::error::MentatError;
-use notify::{RecursiveMode, Watcher};
+use notify::{EventKind, RecursiveMode, Watcher};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,6 +11,13 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 pub const WATCHER_THROTTLE_INTERVAL: Duration = Duration::from_millis(1000);
+
+pub(crate) fn event_kind_is_relevant(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+    )
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TreeSignature {
@@ -76,12 +83,16 @@ impl RepositoryWatcher {
                 while !stop_flag.load(Ordering::Relaxed) {
                     match event_rx.recv_timeout(Duration::from_millis(50)) {
                         Ok(Ok(event)) => {
+                            if !event_kind_is_relevant(&event.kind) {
+                                continue;
+                            }
                             let mut changed = false;
                             for path in event.paths {
-                                if path
-                                    .components()
-                                    .any(|component| component.as_os_str() == ".git")
-                                {
+                                if crate::scanner::FileScanner::is_ignored_path(
+                                    &root,
+                                    &path,
+                                    path.is_dir(),
+                                ) {
                                     continue;
                                 }
                                 if path.is_file() {

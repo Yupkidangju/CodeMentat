@@ -50,6 +50,12 @@
 - **불변조건:** packet 생성, receipt 발급, `ApprovedInferenceRequest::new`, consume-time 검증은 동일 함수만 사용한다. 별도 부분 해시나 필드별 fallback은 허용하지 않는다.
 - **결과:** 같은 길이 question, validation map, snapshot/ref, profile endpoint/model 중 하나라도 바뀌면 승인 요청 생성 또는 소비가 실패 폐쇄된다.
 
+### [DEC-SEC-009] 검증된 claim에서만 주요 답변 합성 (IMP-F004)
+- **배경:** 모델의 `direct_answer`와 schema 위반 원문은 claim/evidence validator를 통과하지 않고도 UI의 가장 눈에 띄는 본문에 표시될 수 있다.
+- **결정:** cloud 응답의 주요 답변은 validation 이후 `Unknown`이 아닌 claim의 classification, statement, confidence와 evidence cardinality로만 결정적으로 합성한다. 검증 가능한 claim이 없으면 고정된 경고 문구를 표시한다.
+- **격리:** 모델 원문과 제출한 `direct_answer`는 `raw_model_response`에만 보존하며 주요 UI 본문으로 전달하지 않는다.
+- **결과:** schema 위반 또는 claims와 불일치하는 모델 narrative가 evidence product의 검증된 답변으로 보이지 않는다.
+
 ### [DEC-SEC-002] 내용 인식 비밀정보 스캐너 및 다층 필터링 (SEC-F002)
 - **배경:** 파일명 블랙리스트만으로는 일반 파일(README, 코드) 내 API 키, 인증서, 토큰 유출을 막을 수 없음.
 - **결정:**
@@ -128,8 +134,16 @@
 
 ### [DEC-DBG-003] OS watcher event + changed-path full hash (DBG-F002)
 - **배경:** 3초마다 전 파일 첫 8KiB를 읽는 방식은 tail edit를 놓치면서 100k 파일 I/O를 반복한다.
-- **결정:** `notify 8.2.0` RecommendedWatcher를 primary로 사용하고 이벤트가 발생한 경로만 전체 SHA-256한다. 동기 강제 검증도 파일 전체를 읽으며 worker stop은 50ms polling과 join으로 제한한다.
-- **결과:** 16KiB 파일의 후반부 동일크기·mtime 복원 변경을 검출하고 정상 상태에서는 전수 content rehash를 수행하지 않는다.
+- **결정:** `notify 8.2.0` RecommendedWatcher를 primary로 사용하고 scanner와 같은 gitignore/global/exclude matcher 및 의미 있는 Create/Modify/Remove event만 통과시킨다. 이벤트가 발생한 경로만 전체 SHA-256하며 worker stop은 50ms polling과 join으로 제한한다.
+- **Lineage 경계:** 신규 분석은 `Ready` snapshot에서만 가능하다. Egress live read 직후 SHA-256이 scan 시점 `FileRecord.content_hash`와 다르면 packet assembly를 실패 폐쇄한다.
+- **결과:** ignored artifact false STALE, Stale 신규 분석, 이전 hash와 live body 혼합을 동시에 차단한다.
+
+### [DEC-PERF-001] 100k/2GiB Windows peak working set 상한 (DBG-F003)
+- **기준 장비:** Windows 11 Pro 10.0.26200 x64, AMD Ryzen 7 8845HS 16 logical processors, RAM 27.8GiB, rustc 1.96.0, debug test profile.
+- **fixture:** 100,000 files, 실제 text 2,147,483,648 bytes, global preview budget 8MiB.
+- **관측값:** peak working set 약 46.1MiB.
+- **결정:** 동일 Windows profile의 허용 peak working set 상한을 128MiB로 고정한다. 계측 불가 또는 `PeakWorkingSetSize > 128MiB`이면 ignored performance gate를 실패시킨다.
+- **근거:** 현재 관측값의 약 2.7배 여유를 두되, FileRecord/preview 무제한 회귀는 자동 차단한다.
 
 ### [DEC-REL-001] Cargo 0.1.0과 문서 0.1.0-dev (IMP-F002)
 - **결정:** 패키지 SemVer는 `0.1.0`이다. `0.1.0-dev`는 미릴리스 문서 상태이며 다른 제품을 가리키지 않는다.

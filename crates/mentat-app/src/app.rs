@@ -61,7 +61,7 @@ pub fn viewport_size_for(tier: ExpansionTier, settings_open: bool) -> egui::Vec2
 }
 
 fn snapshot_allows_analysis(status: SnapshotStatus) -> bool {
-    matches!(status, SnapshotStatus::Ready | SnapshotStatus::Stale)
+    status == SnapshotStatus::Ready
 }
 
 fn install_scan_token(slot: &mut Option<CancellationToken>, next: CancellationToken) {
@@ -1391,7 +1391,7 @@ mod tests {
     #[test]
     fn incomplete_or_indexing_snapshot_cannot_enter_analysis() {
         assert!(snapshot_allows_analysis(SnapshotStatus::Ready));
-        assert!(snapshot_allows_analysis(SnapshotStatus::Stale));
+        assert!(!snapshot_allows_analysis(SnapshotStatus::Stale));
         assert!(!snapshot_allows_analysis(SnapshotStatus::Indexing));
         assert!(!snapshot_allows_analysis(SnapshotStatus::Incomplete));
     }
@@ -1406,6 +1406,24 @@ mod tests {
 
         assert!(old_observer.is_cancelled());
         assert!(!next.is_cancelled());
+    }
+
+    #[test]
+    fn unverified_model_narrative_never_becomes_app_answer_preview() {
+        let raw = "unverified hallucinated conclusion";
+        let bundle = AnswerBundleNormalizer::from_model_text(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            raw,
+            &[],
+        );
+        let rendered = PersonaRenderer::render(&bundle, PersonaKind::DefaultAnalyst);
+
+        assert!(!rendered.direct_answer.contains(raw));
+        assert!(rendered
+            .direct_answer
+            .contains("검증된 근거 기반 답변을 생성할 수 없습니다"));
+        assert_eq!(rendered.raw_model_response.as_deref(), Some(raw));
     }
 
     #[test]

@@ -2,9 +2,9 @@
 
 - **문서 버전:** 1.1.0
 - **참조 표준:** `AI_AUDIT_DOC_STANDARD.md`
-- **최신 독립 감사:** `docs/audit/audit_report_13.md` — Re-audit #11, **HOLD**
+- **최신 독립 감사:** `docs/audit/audit_report_14.md` — Re-audit #12, **HOLD**
 - **적용 대상:** Code Mentat 10-Crate Workspace
-- **갱신 기준:** Re-audit #11 remediation working tree, clean commit 재검증 전
+- **갱신 기준:** Re-audit #12 remediation working tree, clean commit 재검증 전
 
 ---
 
@@ -23,22 +23,22 @@
 | Phase | 현재 상태 | 근거와 남은 게이트 |
 |---|---|---|
 | Phase 1 — Workspace / Read-Only | Verified | 저장소 경계, AppData 격리, canonical direct-open 테스트 유지 |
-| Phase 2 — Detection / Evidence / Watcher | Remediated, Re-audit Pending | changed-path full hash, tail-edit, incomplete snapshot 차단, claim invariant의 수정 commit 검증 필요 |
-| Phase 3 — Provider / Streaming / Egress | Remediated, Re-audit Pending | canonical egress seal과 Gemini redirect zero-leak 수정. 실계정 API 시험은 자격 증명 부재로 미실행 |
+| Phase 2 — Detection / Evidence / Watcher | Remediated, Re-audit Pending | verified answer projection, ignore-aware watcher, Stale query gate, live hash lineage 검증 필요 |
+| Phase 3 — Provider / Streaming / Egress | Remediated, Re-audit Pending | canonical seal, Gemini redirect zero-leak와 secure client fail-closed. 실계정 시험은 자격 증명 부재로 미실행 |
 | Phase 4 — Persona / Storage | Partial | persona 사실 보존과 SQLite 테스트는 통과하나 전체 세션 대화 복원·키체인 연동은 미완료 |
 | Phase 5 — Native Local / Stabilization | HOLD | 100k/2GiB profile은 통과했으나 네이티브 llama 실행 엔진은 비활성 계약만 존재하고 clean commit 전체 gate가 남음 |
 
-## 3. Re-audit #11 remediation gate
+## 3. Re-audit #12 remediation gate
 
 | Finding | 코더 상태 | 재감사 증거 |
 |---|---|---|
 | SEC-F001 canonical egress seal | Remediated | question/validation/snapshot/ref/profile tamper matrix |
 | IMP-F001 baseline 원문 복구 | Remediated | FR-013/FR-017 baseline 원문 1:1 대조, `DR-FR-001` 분리 |
-| DBG-F003 incomplete snapshot / memory | Remediated | Incomplete DB/query 차단, repository switch cancel, global preview budget, 100k/2GiB profile |
-| DBG-F002 watcher | Remediated | OS event primary, changed-path full hash, 16KiB tail edit, stop latency |
-| IMP-F004 claim invariant | Remediated | Observed/Conflict empty evidence, duplicate/missing ID, confidence 범위 |
-| SEC-F004 Gemini redirect | Remediated | 302 cross-origin target key 수신 0회 |
-| IMP-F003 global hotkey | Remediated | register/hide/show/unregister runtime smoke와 collision fallback |
+| DBG-F003 incomplete snapshot / memory | Remediated | Incomplete DB/query 차단, 8MiB preview, 128MiB Windows peak threshold, 100k/2GiB profile |
+| DBG-F002 watcher / lineage | Remediated | ignore/event scope, changed-path full hash, Stale query 차단, egress live hash 일치 |
+| IMP-F004 answer trust | Remediated | claim invariant와 verified claim-derived direct answer, raw narrative 격리 |
+| SEC-F004 Gemini redirect | Remediated | 302 target key 수신 0회, secure client builder failure network 0회 |
+| IMP-F003 global hotkey | Verified by Re-audit #12 | register/display/focus/non-hide fallback/unregister lifecycle과 collision fallback |
 | IMP-F006 roadmap 과대 판정 | Remediated | 본 문서의 HOLD/Partial 및 risk record 동기화 |
 
 모든 `Remediated` 표시는 구현자 판정이며, 독립 재감사에서 Verified로 재판정되기 전까지 release gate는 HOLD다.
@@ -56,7 +56,8 @@
 ### 대형 저장소 메모리 — Accepted Risk 아님
 
 - 100k/2GiB sparse corpus, peak working set, scan 시간, preview bytes를 ignored profile에서 측정한다.
-- 2026-08-19 실행 결과: 100,000 files, 2,147,483,648 bytes, preview 3,358,720 bytes, scan 106,477ms, peak working set 46,096,384 bytes — PASS.
+- 2026-08-19 Re-audit #12 remediation 실행 결과: 100,000 files, 2,147,483,648 bytes, preview 3,358,720 bytes, scan 81,582ms, peak working set 46,170,112 bytes — 128MiB threshold PASS.
+- Windows 기준 장비와 허용 peak working set 상한은 `DEC-PERF-001`에 따라 128MiB이며 테스트가 초과를 실패시킨다.
 - 향후 측정이 실행되지 않거나 상한을 넘으면 Phase 5는 HOLD이며 risk 수용으로 우회하지 않는다.
 
 ## 5. Clean commit 전체 게이트
@@ -67,7 +68,7 @@
 4. `cargo test -p mentat-repository --locked test_dbg_f003_100k_2gib_benchmark_profile -- --ignored --nocapture`
 5. `cargo build --release --locked -p mentat-app`
 6. `cargo audit --file Cargo.lock`
-7. Windows global hotkey hide/show runtime smoke
+7. Windows global hotkey display/focus/non-hide fallback lifecycle smoke
 8. `git diff --check`
 9. 수정 commit 생성 후 `git status --short --branch` clean 확인
 

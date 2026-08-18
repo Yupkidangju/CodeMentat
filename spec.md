@@ -51,7 +51,7 @@
 |---|---|---|---|---|
 | **NFR-001** | 권한 최소화 | 저장소 모듈은 읽기 인터페이스만 공개하고 쓰기·실행 능력을 주입받지 않는다. | Implemented | `test_read_only_session_scan_and_snapshot` |
 | **NFR-002** | UI 반응성 | 인덱싱·검색·네트워크·추론이 UI 스레드를 막지 않으며 사용자 입력 p95 처리 지연이 100ms 이하이다. | Partial | 비동기 논블로킹 채널 폴링(`try_recv`), 워처는 UI 스레드 밖 백그라운드 walk (`test_dbg_f008_background_watcher_poll_is_nonblocking`) |
-| **NFR-003** | 대형 저장소 대응 | 기본 벤치 저장소(100,000파일, 텍스트 2GiB, 제외 디렉터리 포함)에서 메모리 상한과 취소 가능성을 측정하고 전체 내용을 메모리에 동시에 보관하지 않는다. 구체 상한은 P2에서 기준 장비와 함께 기록한다. | Partial | 8MiB global preview budget, Incomplete gate, Windows peak working set 계측을 ignored 100k/2GiB profile에 연결; 최종 재실행 결과는 구현 요약 참조 |
+| **NFR-003** | 대형 저장소 대응 | 기본 벤치 저장소(100,000파일, 텍스트 2GiB, 제외 디렉터리 포함)에서 메모리 상한과 취소 가능성을 측정하고 전체 내용을 메모리에 동시에 보관하지 않는다. 구체 상한은 P2에서 기준 장비와 함께 기록한다. | Partial | 기준 Windows 장비의 peak working set 상한 128MiB, global preview 8MiB, Incomplete gate를 ignored 100k/2GiB profile에서 강제; 다른 OS 기준은 후속 |
 | **NFR-004** | 증거 추적성 | 답변 스냅샷의 모든 증거 참조는 원본 행 또는 `STALE/CHANGED` 상태로 해석 가능하다. | Partial | cloud citation은 snapshot/hash/excerpt/range 검증; STALE 재해석 및 클릭 점프는 후속 |
 | **NFR-005** | 프라이버시 | 외부 API 전송은 명시 동의·송신 범위 표시·민감정보 필터를 통과해야 하며 로그에 API 키와 원문 코드가 기본 기록되지 않는다. | Partial | 패턴+고엔트로피 마스킹, relevance threshold, consent generation 가드. 신규 provider 전용 포맷은 엔트로피 경로로 처리 |
 | **NFR-006** | 백엔드 격리 | 구체 API/모델 객체는 추론 어댑터 밖으로 노출되지 않고 백엔드 실패가 저장소 세션을 손상시키지 않는다. | Implemented | `InferenceBackend` trait 경계 |
@@ -109,4 +109,12 @@ Draft
 - 취소 또는 scan 한도 omission이 있는 결과는 `SnapshotStatus::Incomplete`이며 DB 저장과 로컬/클라우드 분석에 사용할 수 없다.
 - 새 저장소를 열기 전에 이전 scan token을 취소하고 receiver를 폐기한다.
 - text preview의 scan 전체 메모리 상한은 8MiB이며, 초과 파일은 preview를 지연 로드한다.
-- OS watcher event를 primary로 사용하고 변경된 경로만 전체 hash한다. 동일 크기·mtime 복원 tail edit도 STALE로 전환한다.
+- OS watcher event를 primary로 사용하고 scanner와 동일 ignore 범위 및 Create/Modify/Remove event만 처리한다. 동일 크기·mtime 복원 tail edit도 STALE로 전환한다.
+- 신규 로컬/클라우드 분석은 `Ready` snapshot에서만 허용한다. `Stale`은 기존 결과 열람만 가능하다.
+- Egress live read의 SHA-256이 scan 시점 `FileRecord.content_hash`와 다르면 snapshot lineage 위반으로 packet assembly를 중단한다.
+
+### 1.7 Verified Answer Projection 보강 요구사항
+
+- cloud `direct_answer`는 신뢰 입력이며 UI 주요 본문에 직접 표시하지 않는다.
+- citation/confidence invariant를 통과하고 `Unknown`이 아닌 claim만 canonical answer 합성에 참여한다.
+- 검증 가능한 claim이 없으면 고정된 “검증된 근거 기반 답변 없음” 상태를 표시하고 모델 원문은 `raw_model_response`로만 보존한다.

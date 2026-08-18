@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 pub struct GeminiAdapter {
-    client: reqwest::Client,
+    client: Option<reqwest::Client>,
 }
 
 impl GeminiAdapter {
@@ -59,8 +59,22 @@ impl GeminiAdapter {
                 // Gemini 자격 증명은 custom header이므로 redirect를 자동 추적하지 않는다.
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+                .ok(),
         }
+    }
+
+    fn client(&self) -> Result<&reqwest::Client, MentatError> {
+        self.client
+            .as_ref()
+            .ok_or_else(|| MentatError::BackendError {
+                code: "GEMINI_CLIENT_INIT_FAILED".to_string(),
+                message: "Gemini 보안 HTTP client를 초기화하지 못했습니다.".to_string(),
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_client_build_failure_for_test() -> Self {
+        Self { client: None }
     }
 }
 
@@ -98,7 +112,7 @@ impl GeminiAdapter {
         let start = Instant::now();
         let url = format!("{}/v1beta/models", profile.base_url.trim_end_matches('/'));
         let response = self
-            .client
+            .client()?
             .get(url)
             .headers(Self::api_key_header(profile)?)
             .timeout(Duration::from_secs(profile.timeout_secs.clamp(5, 300)))
@@ -182,7 +196,7 @@ impl GeminiAdapter {
             model
         );
         let response = self
-            .client
+            .client()?
             .post(url)
             .headers(Self::api_key_header(profile)?)
             .timeout(Duration::from_secs(profile.timeout_secs.clamp(5, 300)))
@@ -251,7 +265,7 @@ impl GeminiAdapter {
 
         let timeout = Duration::from_secs(profile.timeout_secs.clamp(5, 300));
         let res = self
-            .client
+            .client()?
             .get(&url)
             .headers(headers)
             .timeout(timeout)
@@ -345,7 +359,7 @@ impl GeminiAdapter {
 
         // SEC-F005: Pre-response cancellation check during connect and request dispatch
         let send_future = self
-            .client
+            .client()?
             .post(&endpoint)
             .headers(headers)
             .timeout(timeout)

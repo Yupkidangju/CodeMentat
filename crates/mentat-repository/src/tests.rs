@@ -5,6 +5,12 @@ use std::io::Write;
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 
+const WINDOWS_PEAK_WORKING_SET_LIMIT_BYTES: usize = 128 * 1024 * 1024;
+
+fn peak_working_set_within_limit(bytes: usize) -> bool {
+    bytes <= WINDOWS_PEAK_WORKING_SET_LIMIT_BYTES
+}
+
 #[tokio::test]
 async fn test_read_only_session_scan_and_snapshot() {
     let dir = tempdir().unwrap();
@@ -285,6 +291,16 @@ async fn test_dbg_f003_preview_memory_has_a_global_budget() {
     assert!(outcome.files.iter().any(|file| file.text_preview.is_none()));
 }
 
+#[test]
+fn test_dbg_f003_peak_working_set_threshold_boundary() {
+    assert!(peak_working_set_within_limit(
+        WINDOWS_PEAK_WORKING_SET_LIMIT_BYTES
+    ));
+    assert!(!peak_working_set_within_limit(
+        WINDOWS_PEAK_WORKING_SET_LIMIT_BYTES + 1
+    ));
+}
+
 #[tokio::test]
 async fn test_dbg_f003_representative_budget_profile() {
     assert_eq!(MAX_SCAN_FILES_LIMIT, 100_000);
@@ -356,6 +372,33 @@ fn test_dbg_f002_watcher_stop_latency_is_bounded() {
     let start = std::time::Instant::now();
     watcher.stop_background();
     assert!(start.elapsed() < std::time::Duration::from_millis(250));
+}
+
+#[test]
+fn test_dbg_f002_ignored_paths_and_access_events_do_not_mark_stale() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join(".gitignore"), "/target\n.env\n*.pdb\n").unwrap();
+    fs::create_dir(root.join("target")).unwrap();
+    let mut watcher = crate::watcher::RepositoryWatcher::new(root);
+    watcher.spawn_background();
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    fs::write(root.join("target/build.pdb"), "ignored").unwrap();
+    fs::write(root.join(".env"), "IGNORED=1").unwrap();
+    assert!(!has_change_within(
+        &mut watcher,
+        std::time::Duration::from_millis(600)
+    ));
+    assert!(!crate::watcher::event_kind_is_relevant(
+        &notify::EventKind::Access(notify::event::AccessKind::Any)
+    ));
+    assert!(!crate::watcher::event_kind_is_relevant(
+        &notify::EventKind::Any
+    ));
+
+    fs::write(root.join("tracked.rs"), "fn tracked() {}\n").unwrap();
+    assert!(wait_for_change(&mut watcher));
 }
 
 #[test]
@@ -448,6 +491,16 @@ fn test_dbg_f003_100k_2gib_benchmark_profile() {
             peak_before.unwrap_or(0),
             peak_after.unwrap_or(0),
         );
+        #[cfg(windows)]
+        {
+            let measured_peak = peak_after.expect("Windows peak working set 계측 필요");
+            assert!(
+                peak_working_set_within_limit(measured_peak),
+                "peak working set {} bytes exceeds {} bytes",
+                measured_peak,
+                WINDOWS_PEAK_WORKING_SET_LIMIT_BYTES
+            );
+        }
         assert!(elapsed.as_secs() < 180);
     });
 }
@@ -482,6 +535,20 @@ fn wait_for_change(watcher: &mut crate::watcher::RepositoryWatcher) -> bool {
             return true;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+fn has_change_within(
+    watcher: &mut crate::watcher::RepositoryWatcher,
+    duration: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + duration;
+    while std::time::Instant::now() < deadline {
+        if watcher.poll_changes().unwrap_or(false) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
     false
 }

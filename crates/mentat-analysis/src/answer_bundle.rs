@@ -69,13 +69,14 @@ If evidence is missing, classify the claim as Unknown. Do not invent files or ha
             bundle.snapshot_id = snapshot_id;
             bundle.raw_model_response = Some(full_text.to_string());
             Self::validate_citations(&mut bundle, snapshot_id, snapshot_files, file_texts);
+            bundle.direct_answer = Self::compose_verified_answer(&bundle.claims);
             return bundle;
         }
 
         AnswerBundle {
             request_id,
             snapshot_id,
-            direct_answer: full_text.to_string(),
+            direct_answer: "검증된 근거 기반 답변을 생성할 수 없습니다. 모델 원문은 검증되지 않은 진단 데이터로만 보존되었습니다.".to_string(),
             claims: vec![Claim {
                 id: Uuid::new_v4(),
                 classification: ClaimClassification::Unknown,
@@ -166,6 +167,34 @@ If evidence is missing, classify the claim as Unknown. Do not invent files or ha
                     .to_string(),
                 );
             }
+        }
+    }
+
+    fn compose_verified_answer(claims: &[Claim]) -> String {
+        let lines: Vec<String> = claims
+            .iter()
+            .filter(|claim| claim.classification != ClaimClassification::Unknown)
+            .map(|claim| {
+                let classification = match claim.classification {
+                    ClaimClassification::Observed => "OBSERVED",
+                    ClaimClassification::Inferred => "INFERRED",
+                    ClaimClassification::Proposed => "PROPOSED",
+                    ClaimClassification::Conflict => "CONFLICT",
+                    ClaimClassification::Unknown => unreachable!(),
+                };
+                format!(
+                    "- [{classification}] {} (신뢰도 {:.2}, 근거 {}건)",
+                    claim.statement,
+                    claim.confidence,
+                    claim.evidence_ids.len()
+                )
+            })
+            .collect();
+
+        if lines.is_empty() {
+            "검증된 근거 기반 답변을 생성할 수 없습니다. 모델 원문은 검증되지 않은 진단 데이터로만 보존되었습니다.".to_string()
+        } else {
+            format!("검증된 주장 기반 답변:\n{}", lines.join("\n"))
         }
     }
 }
@@ -353,6 +382,11 @@ mod tests {
             bundle.claims[0].rationale.as_deref(),
             Some("UNSTRUCTURED_RESPONSE")
         );
+        assert!(!bundle.direct_answer.contains("The API key is safe"));
+        assert!(bundle
+            .direct_answer
+            .contains("검증된 근거 기반 답변을 생성할 수 없습니다"));
+        assert_eq!(bundle.raw_model_response.as_deref(), Some(text));
     }
 
     #[test]
@@ -524,6 +558,9 @@ mod tests {
             ClaimClassification::Observed
         );
         assert_eq!(bundle.claims[0].evidence_ids, vec![ev_id]);
+        assert!(!bundle.direct_answer.contains("cited"));
+        assert!(bundle.direct_answer.contains("statement"));
+        assert!(bundle.direct_answer.contains("[OBSERVED]"));
         assert!(!bundle.evidence_map[0]
             .excerpt
             .starts_with("[INVALID_CITATION]"));

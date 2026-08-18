@@ -489,6 +489,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gemini_secure_client_build_failure_blocks_every_network_operation() {
+        let adapter = GeminiAdapter::with_client_build_failure_for_test();
+        let profile = BackendProfile {
+            provider: ProviderKind::GoogleGemini,
+            base_url: "http://127.0.0.1:9".to_string(),
+            model: "fixture-model".to_string(),
+            api_key: Some("fixture-key".to_string()),
+            ..Default::default()
+        };
+        let request = sample_request(profile.clone());
+
+        let errors = [
+            adapter.discover_models(&profile).await.err(),
+            adapter.verify_model(&profile).await.err(),
+            adapter.health_check(&profile).await.err(),
+            adapter
+                .infer_stream(request, CancellationToken::new())
+                .await
+                .err(),
+        ];
+        assert!(errors.into_iter().all(|error| matches!(
+            error,
+            Some(MentatError::BackendError { ref code, .. }) if code == "GEMINI_CLIENT_INIT_FAILED"
+        )));
+    }
+
+    #[tokio::test]
     async fn test_openai_wire_http_error_codes() {
         use tokio::io::AsyncWriteExt;
 

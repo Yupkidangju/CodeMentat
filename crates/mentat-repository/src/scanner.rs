@@ -1,3 +1,4 @@
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use mentat_core::error::MentatError;
 use mentat_core::models::{FileKind, FileRecord};
 use sha2::{Digest, Sha256};
@@ -8,6 +9,46 @@ use std::path::Path;
 pub struct FileScanner;
 
 impl FileScanner {
+    pub(crate) fn is_ignored_path(root: &Path, path: &Path, is_dir: bool) -> bool {
+        if !path.starts_with(root)
+            || path
+                .components()
+                .any(|component| component.as_os_str() == ".git")
+        {
+            return true;
+        }
+
+        let (global, _) = Gitignore::global();
+        let mut ignored = global.matched(path, is_dir).is_ignore();
+
+        let mut directories = vec![root.to_path_buf()];
+        if let Ok(relative) = path.strip_prefix(root) {
+            let mut current = root.to_path_buf();
+            for component in relative.parent().into_iter().flat_map(Path::components) {
+                current.push(component.as_os_str());
+                directories.push(current.clone());
+            }
+        }
+
+        for directory in directories {
+            let mut builder = GitignoreBuilder::new(&directory);
+            let _ = builder.add(directory.join(".gitignore"));
+            if directory == root {
+                let _ = builder.add(root.join(".git/info/exclude"));
+            }
+            if let Ok(matcher) = builder.build() {
+                let matched = matcher.matched_path_or_any_parents(path, is_dir);
+                if matched.is_ignore() {
+                    ignored = true;
+                } else if matched.is_whitelist() {
+                    ignored = false;
+                }
+            }
+        }
+
+        ignored
+    }
+
     pub fn classify_file(path: &Path) -> FileKind {
         let file_name = path
             .file_name()
