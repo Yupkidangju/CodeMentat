@@ -12,11 +12,39 @@ use std::time::{Duration, Instant, SystemTime};
 
 pub const WATCHER_THROTTLE_INTERVAL: Duration = Duration::from_millis(1000);
 
-pub(crate) fn event_kind_is_relevant(kind: &EventKind) -> bool {
-    matches!(
-        kind,
-        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-    )
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WatcherEventDisposition {
+    Ignore,
+    ChangedPaths,
+    Rescan,
+}
+
+fn is_ignore_control_path(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return true;
+    };
+    relative
+        .file_name()
+        .is_some_and(|name| name == ".gitignore")
+        || relative == Path::new(".git/info/exclude")
+}
+
+pub(crate) fn classify_event(root: &Path, event: &notify::Event) -> WatcherEventDisposition {
+    if event.need_rescan() || matches!(event.kind, EventKind::Any | EventKind::Other) {
+        return WatcherEventDisposition::Rescan;
+    }
+    if matches!(event.kind, EventKind::Access(_)) {
+        return WatcherEventDisposition::Ignore;
+    }
+    if event.paths.is_empty()
+        || event
+            .paths
+            .iter()
+            .any(|path| is_ignore_control_path(root, path))
+    {
+        return WatcherEventDisposition::Rescan;
+    }
+    WatcherEventDisposition::ChangedPaths
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,8 +111,15 @@ impl RepositoryWatcher {
                 while !stop_flag.load(Ordering::Relaxed) {
                     match event_rx.recv_timeout(Duration::from_millis(50)) {
                         Ok(Ok(event)) => {
-                            if !event_kind_is_relevant(&event.kind) {
-                                continue;
+                            match classify_event(&root, &event) {
+                                WatcherEventDisposition::Ignore => continue,
+                                WatcherEventDisposition::Rescan => {
+                                    if tx.send(true).is_err() {
+                                        break;
+                                    }
+                                    continue;
+                                }
+                                WatcherEventDisposition::ChangedPaths => {}
                             }
                             let mut changed = false;
                             for path in event.paths {

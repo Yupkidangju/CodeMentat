@@ -109,7 +109,7 @@ Draft
 - 취소 또는 scan 한도 omission이 있는 결과는 `SnapshotStatus::Incomplete`이며 DB 저장과 로컬/클라우드 분석에 사용할 수 없다.
 - 새 저장소를 열기 전에 이전 scan token을 취소하고 receiver를 폐기한다.
 - text preview의 scan 전체 메모리 상한은 8MiB이며, 초과 파일은 preview를 지연 로드한다.
-- OS watcher event를 primary로 사용하고 scanner와 동일 ignore 범위 및 Create/Modify/Remove event만 처리한다. 동일 크기·mtime 복원 tail edit도 STALE로 전환한다.
+- OS watcher event를 primary로 사용하고 scanner와 동일 ignore 범위를 적용한다. Access-only는 제외하지만 `need_rescan`, Any, Other, `.gitignore`, `.git/info/exclude` 변경은 전체 event loss/scope 변경으로 간주해 즉시 STALE로 전환한다.
 - 신규 로컬/클라우드 분석은 `Ready` snapshot에서만 허용한다. `Stale`은 기존 결과 열람만 가능하다.
 - Egress live read의 SHA-256이 scan 시점 `FileRecord.content_hash`와 다르면 snapshot lineage 위반으로 packet assembly를 중단한다.
 
@@ -117,4 +117,6 @@ Draft
 
 - cloud `direct_answer`는 신뢰 입력이며 UI 주요 본문에 직접 표시하지 않는다.
 - citation/confidence invariant를 통과하고 `Unknown`이 아닌 claim만 canonical answer 합성에 참여한다.
+- Cloud `Observed`/`Inferred`/`Proposed`/`Conflict` claim은 모두 최소 1개의 유효 evidence를 요구한다.
+- Cloud `ConflictItem`은 evidence가 비어 있거나 missing/invalid/duplicate이면 검증된 conflicts와 `[CONFLICT]` UI에서 제거한다.
 - 검증 가능한 claim이 없으면 고정된 “검증된 근거 기반 답변 없음” 상태를 표시하고 모델 원문은 `raw_model_response`로만 보존한다.

@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 패키지 SemVer는 `0.1.0`이며 이 항목은 그 개발 스냅샷이다.
 
 ### Fixed
+- **[IMP-F004] Complete cloud evidence invariant:** 모든 non-Unknown claim에 유효 evidence를 요구하고 invalid/missing/duplicate `ConflictItem`을 검증 UI에서 제거한다.
+- **[DBG-F002] Fail-closed watcher rescan:** notify `need_rescan`, Any, Other, 빈-path mutation과 `.gitignore`/`.git/info/exclude` scope 변경을 즉시 STALE로 처리하며 Access-only만 제외한다.
 - **[IMP-F004] Verified answer projection:** cloud `direct_answer`와 schema 위반 원문을 주요 UI에서 제거하고 검증된 claims로만 canonical 답변을 합성한다.
 - **[DBG-F002] Snapshot lineage:** watcher에 scanner 동등 ignore/event scope를 적용하고 Stale 신규 분석과 scan-to-egress live hash mismatch를 차단한다.
 - **[SEC-F004] Gemini client fail-closed:** redirect 차단 client builder 실패 시 기본 client fallback 없이 모든 operation을 `GEMINI_CLIENT_INIT_FAILED`로 종료한다.

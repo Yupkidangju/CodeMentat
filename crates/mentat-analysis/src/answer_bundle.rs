@@ -143,10 +143,7 @@ If evidence is missing, classify the claim as Unknown. Do not invent files or ha
             claim.evidence_ids.sort_unstable();
             claim.evidence_ids.dedup();
 
-            let evidence_required = matches!(
-                claim.classification,
-                ClaimClassification::Observed | ClaimClassification::Conflict
-            );
+            let evidence_required = claim.classification != ClaimClassification::Unknown;
             let missing_required_evidence = evidence_required && claim.evidence_ids.is_empty();
             let invalid_confidence =
                 !claim.confidence.is_finite() || !(0.0..=1.0).contains(&claim.confidence);
@@ -168,6 +165,21 @@ If evidence is missing, classify the claim as Unknown. Do not invent files or ha
                 );
             }
         }
+
+        bundle.conflicts.retain(|conflict| {
+            if conflict.evidence_ids.is_empty() {
+                return false;
+            }
+            let mut seen = HashSet::new();
+            conflict.evidence_ids.iter().all(|id| {
+                seen.insert(*id)
+                    && !invalid_ids.contains(id)
+                    && bundle
+                        .evidence_map
+                        .iter()
+                        .any(|evidence| evidence.id == *id)
+            })
+        });
     }
 
     fn compose_verified_answer(claims: &[Claim]) -> String {
@@ -595,6 +607,8 @@ mod tests {
             claims: vec![
                 make_claim(ClaimClassification::Observed, 0.9, vec![]),
                 make_claim(ClaimClassification::Conflict, 0.8, vec![]),
+                make_claim(ClaimClassification::Inferred, 0.8, vec![]),
+                make_claim(ClaimClassification::Proposed, 0.8, vec![]),
                 make_claim(
                     ClaimClassification::Observed,
                     0.9,
@@ -615,5 +629,50 @@ mod tests {
             .iter()
             .all(|claim| claim.classification == ClaimClassification::Unknown));
         assert!(bundle.claims.iter().all(|claim| claim.confidence == 0.0));
+    }
+
+    #[test]
+    fn test_imp_f004_cloud_conflict_items_require_unique_valid_evidence() {
+        let snapshot = Uuid::new_v4();
+        let evidence_id = Uuid::new_v4();
+        let valid_conflict_id = Uuid::new_v4();
+        let files = vec![sample_file("src/main.rs", 1, "hash", "fn main() {}\n")];
+        let evidence = EvidenceRef {
+            id: evidence_id,
+            snapshot_id: snapshot,
+            relative_path: PathBuf::from("src/main.rs"),
+            line_start: 1,
+            line_end: 1,
+            content_hash: "hash".to_string(),
+            excerpt: "fn main() {}".to_string(),
+        };
+        let make_conflict = |id, evidence_ids| mentat_core::models::ConflictItem {
+            id,
+            side_a: "A".to_string(),
+            side_b: "B".to_string(),
+            evidence_ids,
+            impact: "impact".to_string(),
+            unresolved_question: "question".to_string(),
+        };
+        let mut bundle = AnswerBundle {
+            request_id: Uuid::new_v4(),
+            snapshot_id: snapshot,
+            direct_answer: String::new(),
+            claims: vec![],
+            evidence_map: vec![evidence],
+            recommendations: vec![],
+            conflicts: vec![
+                make_conflict(valid_conflict_id, vec![evidence_id]),
+                make_conflict(Uuid::new_v4(), vec![]),
+                make_conflict(Uuid::new_v4(), vec![Uuid::new_v4()]),
+                make_conflict(Uuid::new_v4(), vec![evidence_id, evidence_id]),
+            ],
+            raw_model_response: None,
+        };
+
+        AnswerBundleNormalizer::validate_citations(&mut bundle, snapshot, &files, &HashMap::new());
+
+        assert_eq!(bundle.conflicts.len(), 1);
+        assert_eq!(bundle.conflicts[0].id, valid_conflict_id);
     }
 }

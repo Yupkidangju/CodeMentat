@@ -33,7 +33,9 @@ Code Mentat는 로컬 소프트웨어 저장소(Repository)를 **완전한 읽�
 6. **Egress Consent & 프라이버시 쉴드**
    - 클라우드 API 전송 전 `.env`, 키 파일, 인증서 등 민감정보 파일 자동 배제 및 1회 승인 시트 제공
    - 모델 narrative는 진단 데이터로만 보존하고, UI 주요 답변은 검증된 claim/evidence에서만 합성
+   - Cloud Inferred/Proposed/Conflict와 ConflictItem도 유효하고 중복 없는 evidence를 요구
    - 저장소가 `STALE`이면 신규 분석을 차단하고 재인덱싱 전 live file과 이전 hash 혼합을 허용하지 않음
+   - 파일 watcher의 event-loss/unknown 신호와 ignore 규칙 변경은 즉시 STALE로 실패 폐쇄
 
 ---
 

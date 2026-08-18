@@ -390,14 +390,56 @@ fn test_dbg_f002_ignored_paths_and_access_events_do_not_mark_stale() {
         &mut watcher,
         std::time::Duration::from_millis(600)
     ));
-    assert!(!crate::watcher::event_kind_is_relevant(
-        &notify::EventKind::Access(notify::event::AccessKind::Any)
-    ));
-    assert!(!crate::watcher::event_kind_is_relevant(
-        &notify::EventKind::Any
-    ));
-
     fs::write(root.join("tracked.rs"), "fn tracked() {}\n").unwrap();
+    assert!(wait_for_change(&mut watcher));
+}
+
+#[test]
+fn test_dbg_f002_rescan_unknown_and_ignore_control_events_fail_closed() {
+    use crate::watcher::{classify_event, WatcherEventDisposition};
+    use notify::event::{AccessKind, Flag, ModifyKind};
+    use notify::{Event, EventKind};
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let any = Event::new(EventKind::Any);
+    let rescan = Event::new(EventKind::Other).set_flag(Flag::Rescan);
+    let other = Event::new(EventKind::Other);
+    let access = Event::new(EventKind::Access(AccessKind::Any));
+    let exclude_change =
+        Event::new(EventKind::Modify(ModifyKind::Any)).add_path(root.join(".git/info/exclude"));
+
+    assert_eq!(classify_event(root, &any), WatcherEventDisposition::Rescan);
+    assert_eq!(
+        classify_event(root, &rescan),
+        WatcherEventDisposition::Rescan
+    );
+    assert_eq!(
+        classify_event(root, &other),
+        WatcherEventDisposition::Rescan
+    );
+    assert_eq!(
+        classify_event(root, &access),
+        WatcherEventDisposition::Ignore
+    );
+    assert_eq!(
+        classify_event(root, &exclude_change),
+        WatcherEventDisposition::Rescan
+    );
+}
+
+#[test]
+fn test_dbg_f002_git_info_exclude_change_marks_snapshot_stale() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".git/info")).unwrap();
+    let exclude = root.join(".git/info/exclude");
+    fs::write(&exclude, "*.tmp\n").unwrap();
+    let mut watcher = crate::watcher::RepositoryWatcher::new(root);
+    watcher.spawn_background();
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    fs::write(&exclude, "*.tmp\n*.cache\n").unwrap();
     assert!(wait_for_change(&mut watcher));
 }
 

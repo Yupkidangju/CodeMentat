@@ -52,7 +52,8 @@
 
 ### [DEC-SEC-009] 검증된 claim에서만 주요 답변 합성 (IMP-F004)
 - **배경:** 모델의 `direct_answer`와 schema 위반 원문은 claim/evidence validator를 통과하지 않고도 UI의 가장 눈에 띄는 본문에 표시될 수 있다.
-- **결정:** cloud 응답의 주요 답변은 validation 이후 `Unknown`이 아닌 claim의 classification, statement, confidence와 evidence cardinality로만 결정적으로 합성한다. 검증 가능한 claim이 없으면 고정된 경고 문구를 표시한다.
+- **결정:** cloud 응답의 주요 답변은 validation 이후 최소 1개의 유효 evidence를 가진 `Unknown`이 아닌 claim의 classification, statement, confidence와 evidence cardinality로만 결정적으로 합성한다. `Observed`, `Inferred`, `Proposed`, `Conflict` 모두 같은 evidence cardinality를 적용한다.
+- **Cloud conflict:** `ConflictItem`도 non-empty·존재·유효·중복 없음 evidence 조건을 모두 통과할 때만 `[CONFLICT]` UI로 전달한다. 실패 항목은 raw response에만 남기고 검증 결과에서 제거한다.
 - **격리:** 모델 원문과 제출한 `direct_answer`는 `raw_model_response`에만 보존하며 주요 UI 본문으로 전달하지 않는다.
 - **결과:** schema 위반 또는 claims와 불일치하는 모델 narrative가 evidence product의 검증된 답변으로 보이지 않는다.
 
@@ -134,7 +135,7 @@
 
 ### [DEC-DBG-003] OS watcher event + changed-path full hash (DBG-F002)
 - **배경:** 3초마다 전 파일 첫 8KiB를 읽는 방식은 tail edit를 놓치면서 100k 파일 I/O를 반복한다.
-- **결정:** `notify 8.2.0` RecommendedWatcher를 primary로 사용하고 scanner와 같은 gitignore/global/exclude matcher 및 의미 있는 Create/Modify/Remove event만 통과시킨다. 이벤트가 발생한 경로만 전체 SHA-256하며 worker stop은 50ms polling과 join으로 제한한다.
+- **결정:** `notify 8.2.0` RecommendedWatcher를 primary로 사용하고 event를 `Ignore`, `ChangedPaths`, `Rescan`으로 분류한다. Access-only는 Ignore, Create/Modify/Remove는 ignore-aware changed-path full hash, `need_rescan`·Any·Other·`.gitignore`·`.git/info/exclude` 변경은 경로 유무와 무관하게 Rescan/STale로 실패 폐쇄한다.
 - **Lineage 경계:** 신규 분석은 `Ready` snapshot에서만 가능하다. Egress live read 직후 SHA-256이 scan 시점 `FileRecord.content_hash`와 다르면 packet assembly를 실패 폐쇄한다.
 - **결과:** ignored artifact false STALE, Stale 신규 분석, 이전 hash와 live body 혼합을 동시에 차단한다.
 

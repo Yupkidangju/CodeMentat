@@ -65,9 +65,9 @@ sequenceDiagram
 |---|---|---|---|
 | `mentat-core` | 도메인 모델 & 포트 | `Claim`, `EvidenceRef`, `RepositoryProfile`, `RepositorySnapshot`, `MentatError` 정의 | - |
 | `mentat-platform` | OS 플랫폼 & 격리 가드 | 폴더 선택기, 클립보드 복사, `validate_storage_isolation` (AppData 상호 침범 방지) | `test_storage_isolation_detection` |
-| `mentat-repository` | 읽기 전용 저장소 엔진 | Incomplete snapshot, 8MiB preview, 128MiB Windows peak gate, ignore-aware OS watcher + changed-path full hash | `test_dbg_f002_ignored_paths_and_access_events_do_not_mark_stale`, `test_dbg_f003_peak_working_set_threshold_boundary` |
+| `mentat-repository` | 읽기 전용 저장소 엔진 | Incomplete snapshot, memory gate, ignore-aware watcher, Any/Other/Rescan과 ignore-control fail-closed | `test_dbg_f002_rescan_unknown_and_ignore_control_events_fail_closed`, `test_dbg_f002_git_info_exclude_change_marks_snapshot_stale` |
 | `mentat-storage` | AppData SQLite 영속화 | `SqliteStorage`, 최근 저장소, 프로필, 스냅샷, canonical root 조회 | `test_sqlite_storage_save_and_list_recent_repos`, `test_imp_f005_find_repo_by_canonical_root` |
-| `mentat-analysis` | 정적 분석 및 유출 통제 | verified claim answer projection, canonical seal, live content hash lineage, claim/citation invariant | `test_imp_f004_unstructured_response_does_not_invent_claims`, `test_sec_f002_zero_score_file_excluded_from_content` |
+| `mentat-analysis` | 정적 분석 및 유출 통제 | 모든 cloud claim과 ConflictItem evidence invariant, verified answer projection, canonical seal, live hash lineage | `test_imp_f004_cloud_conflict_items_require_unique_valid_evidence`, `test_imp_f004_claim_invariants_reject_empty_duplicate_and_invalid_confidence` |
 | `mentat-inference` | 추론 도메인 인터페이스 | 동적 `ModelCatalog`, `ModelVerification`, 하드코딩 없는 `BackendProfile`, URL 검증, 테스트 더블 | `production_profile_does_not_choose_a_hardcoded_model`, `model_catalog_rejects_empty_ids_and_deduplicates_provider_data` |
 | `mentat-inference-openai` | 멀티 프로바이더 스트리밍 | Gemini/OpenAI 동적 모델 검색, redirect 차단과 secure client fail-closed, SSE | `gemini_cross_origin_redirect_never_receives_api_key`, `gemini_secure_client_build_failure_blocks_every_network_operation` |
 | `mentat-inference-llama` | 미래 온디바이스 계약 | `NativeLlamaContract`, 하드웨어 탐지 스텁 | `test_native_llama_contract_isolated_context_and_kv_cleanup` 등 3개 |
@@ -84,8 +84,8 @@ sequenceDiagram
 
 ## 3. 품질 게이트 검증 결과 (Verification Results)
 
-- **단위/회귀 테스트:** `cargo test --workspace --locked` 실행 증거 (92 passed, 1 ignored 100k/2GiB profile)
-- **100k/2GiB profile:** 100,000 files / 2,147,483,648 bytes / preview 3,358,720 bytes / scan 81,582ms / Windows peak working set 46,170,112 bytes / 128MiB threshold (별도 ignored gate PASS)
+- **단위/회귀 테스트:** `cargo test --workspace --locked` 실행 증거 (96 passed, 1 ignored 100k/2GiB profile)
+- **100k/2GiB profile:** 100,000 files / 2,147,483,648 bytes / preview 3,358,720 bytes / scan 82,713ms / Windows peak working set 46,088,192 bytes / 128MiB threshold (별도 ignored gate PASS)
 - **포맷팅 검사:** `cargo fmt --all -- --check` (0 diffs)
 - **정적 분석:** `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` (0 errors, 0 warnings)
 - **릴리스 바이너리 빌드:** `cargo build --release -p mentat-app` (완료)

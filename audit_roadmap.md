@@ -2,9 +2,9 @@
 
 - **문서 버전:** 1.1.0
 - **참조 표준:** `AI_AUDIT_DOC_STANDARD.md`
-- **최신 독립 감사:** `docs/audit/audit_report_14.md` — Re-audit #12, **HOLD**
+- **최신 독립 감사:** `docs/audit/audit_report_15.md` — Re-audit #13, **HOLD**
 - **적용 대상:** Code Mentat 10-Crate Workspace
-- **갱신 기준:** Re-audit #12 remediation working tree, clean commit 재검증 전
+- **갱신 기준:** Re-audit #13 remediation working tree, clean commit 재검증 전
 
 ---
 
@@ -23,20 +23,20 @@
 | Phase | 현재 상태 | 근거와 남은 게이트 |
 |---|---|---|
 | Phase 1 — Workspace / Read-Only | Verified | 저장소 경계, AppData 격리, canonical direct-open 테스트 유지 |
-| Phase 2 — Detection / Evidence / Watcher | Remediated, Re-audit Pending | verified answer projection, ignore-aware watcher, Stale query gate, live hash lineage 검증 필요 |
+| Phase 2 — Detection / Evidence / Watcher | Remediated, Re-audit Pending | 모든 cloud claim/conflict evidence invariant와 Any/Other/Rescan watcher completeness 검증 필요 |
 | Phase 3 — Provider / Streaming / Egress | Remediated, Re-audit Pending | canonical seal, Gemini redirect zero-leak와 secure client fail-closed. 실계정 시험은 자격 증명 부재로 미실행 |
 | Phase 4 — Persona / Storage | Partial | persona 사실 보존과 SQLite 테스트는 통과하나 전체 세션 대화 복원·키체인 연동은 미완료 |
 | Phase 5 — Native Local / Stabilization | HOLD | 100k/2GiB profile은 통과했으나 네이티브 llama 실행 엔진은 비활성 계약만 존재하고 clean commit 전체 gate가 남음 |
 
-## 3. Re-audit #12 remediation gate
+## 3. Re-audit #13 remediation gate
 
 | Finding | 코더 상태 | 재감사 증거 |
 |---|---|---|
 | SEC-F001 canonical egress seal | Remediated | question/validation/snapshot/ref/profile tamper matrix |
 | IMP-F001 baseline 원문 복구 | Remediated | FR-013/FR-017 baseline 원문 1:1 대조, `DR-FR-001` 분리 |
 | DBG-F003 incomplete snapshot / memory | Remediated | Incomplete DB/query 차단, 8MiB preview, 128MiB Windows peak threshold, 100k/2GiB profile |
-| DBG-F002 watcher / lineage | Remediated | ignore/event scope, changed-path full hash, Stale query 차단, egress live hash 일치 |
-| IMP-F004 answer trust | Remediated | claim invariant와 verified claim-derived direct answer, raw narrative 격리 |
+| DBG-F002 watcher / lineage | Remediated | ignore/event scope, Any/Other/Rescan, ignore-control 변경, Stale query, egress live hash |
+| IMP-F004 answer trust | Remediated | 모든 non-Unknown claim과 Cloud ConflictItem evidence invariant, verified projection |
 | SEC-F004 Gemini redirect | Remediated | 302 target key 수신 0회, secure client builder failure network 0회 |
 | IMP-F003 global hotkey | Verified by Re-audit #12 | register/display/focus/non-hide fallback/unregister lifecycle과 collision fallback |
 | IMP-F006 roadmap 과대 판정 | Remediated | 본 문서의 HOLD/Partial 및 risk record 동기화 |
@@ -56,7 +56,7 @@
 ### 대형 저장소 메모리 — Accepted Risk 아님
 
 - 100k/2GiB sparse corpus, peak working set, scan 시간, preview bytes를 ignored profile에서 측정한다.
-- 2026-08-19 Re-audit #12 remediation 실행 결과: 100,000 files, 2,147,483,648 bytes, preview 3,358,720 bytes, scan 81,582ms, peak working set 46,170,112 bytes — 128MiB threshold PASS.
+- 2026-08-19 Re-audit #13 remediation 실행 결과: 100,000 files, 2,147,483,648 bytes, preview 3,358,720 bytes, scan 82,713ms, peak working set 46,088,192 bytes — 128MiB threshold PASS.
 - Windows 기준 장비와 허용 peak working set 상한은 `DEC-PERF-001`에 따라 128MiB이며 테스트가 초과를 실패시킨다.
 - 향후 측정이 실행되지 않거나 상한을 넘으면 Phase 5는 HOLD이며 risk 수용으로 우회하지 않는다.
 

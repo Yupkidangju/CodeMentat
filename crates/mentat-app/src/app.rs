@@ -1427,6 +1427,42 @@ mod tests {
     }
 
     #[test]
+    fn invalid_cloud_conflict_evidence_never_reaches_app_projection() {
+        let snapshot = uuid::Uuid::new_v4();
+        let conflict = uuid::Uuid::new_v4();
+        let missing_evidence = uuid::Uuid::new_v4();
+        let json = format!(
+            r#"{{
+                "request_id":"{}",
+                "snapshot_id":"{}",
+                "direct_answer":"unverified conflict",
+                "claims":[],
+                "evidence_map":[],
+                "recommendations":[],
+                "conflicts":[{{
+                    "id":"{}",
+                    "side_a":"A",
+                    "side_b":"B",
+                    "evidence_ids":["{}"],
+                    "impact":"impact",
+                    "unresolved_question":"question"
+                }}],
+                "raw_model_response":null
+            }}"#,
+            uuid::Uuid::new_v4(),
+            snapshot,
+            conflict,
+            missing_evidence,
+        );
+        let bundle =
+            AnswerBundleNormalizer::from_model_text(uuid::Uuid::new_v4(), snapshot, &json, &[]);
+        let rendered = PersonaRenderer::render(&bundle, PersonaKind::DefaultAnalyst);
+
+        assert!(rendered.conflicts.is_empty());
+        assert!(!rendered.direct_answer.contains("unverified conflict"));
+    }
+
+    #[test]
     fn test_tampered_egress_request_rejection_fail_closed() {
         use mentat_inference::{BackendProfile, ProviderKind};
 
