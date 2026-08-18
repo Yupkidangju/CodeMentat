@@ -19,3 +19,5 @@ async-trait.workspace = true
 
 [dev-dependencies]
 uuid.workspace = true
+mentat-analysis.workspace = true
+mentat-core.workspace = true

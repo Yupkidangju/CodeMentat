@@ -123,7 +123,11 @@ impl GeminiAdapter {
             },
             "contents": [{
                 "parts": [
-                    { "text": format!("{}\n\nQuestion:\n{}", request.prompt_context, request.user_question) }
+                    { "text": if request.user_question.is_empty() {
+                        request.prompt_context.clone()
+                    } else {
+                        format!("{}\n\n## User Question\n{}", request.prompt_context, request.user_question)
+                    } }
                 ]
             }],
             "generationConfig": {

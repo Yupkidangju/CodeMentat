@@ -140,6 +140,14 @@ impl FileScanner {
 
         let size_bytes = metadata.len();
 
+        // [DBG-F003] Skip hashing files that already exceed the single-file budget.
+        if size_bytes > crate::session::MAX_SINGLE_FILE_BYTES {
+            return Err(MentatError::IndexingError(format!(
+                "파일 크기({} bytes)가 단일 파일 한도를 초과합니다.",
+                size_bytes
+            )));
+        }
+
         // DBG-F003: Stream hash directly from the verified canonical file handle
         let mut file = File::open(&canonical_path)
             .map_err(|e| MentatError::IoError(format!("파일 열기 실패: {}", e)))?;
@@ -186,6 +194,14 @@ impl FileScanner {
         };
 
         let kind = Self::classify_file(rel_path);
+        let text_preview = if is_text {
+            let take = sample_buffer.len().min(16 * 1024);
+            std::str::from_utf8(&sample_buffer[..take])
+                .ok()
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
 
         Ok(FileRecord {
             relative_path: rel_path.to_path_buf(),
@@ -194,6 +210,7 @@ impl FileScanner {
             content_hash,
             is_text,
             line_count,
+            text_preview,
         })
     }
 }

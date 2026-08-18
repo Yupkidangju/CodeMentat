@@ -2,6 +2,8 @@
 
 > **"Evidence Before Advice"** — 엄격한 읽기 전용 경계에서 작동하는 스마트/컴팩트 데스크톱 소프트웨어 저장소 조언자
 
+패키지 버전은 Cargo workspace `0.1.0`이다. 문서의 `0.1.0-dev`는 같은 라인의 미릴리스 개발 상태를 뜻한다.
+
 Code Mentat는 로컬 소프트웨어 저장소(Repository)를 **완전한 읽기 전용(Read-Only)** 경계에서 조사하고, 프로젝트의 실제 구현, 설계 의도, 문서 간 정합성을 증거 기반으로 분석하여 조언을 제공하는 독립형 데스크톱 위젯 애플리케이션입니다.
 
 ---
@@ -9,7 +11,7 @@ Code Mentat는 로컬 소프트웨어 저장소(Repository)를 **완전한 읽�
 ## 🌟 주요 특징 (Key Features)
 
 1. **컴팩트 스마트 알약 위젯 (3-Tier Progressive Disclosure)**
-   - **Tier 1 (Smart Pill):** 개발자 화면을 가리지 않고 상단/모서리에 상주하는 초슬림 검색 바 (글로벌 단축키 `Alt+Space` 호출)
+   - **Tier 1 (Smart Pill, 580×52):** 개발자 화면을 가리지 않고 상단/모서리에 상주하는 초슬림 검색 바 (가능하면 `Alt+Space` / `Ctrl+Alt+M`으로 표시·숨김)
    - **Tier 2 (Smart Card):** 질문 시 스트리밍 답변과 핵심 주장 태그(`[OBSERVED]`, `[INFERRED]`, `[CONFLICT]`)를 요약 노출
    - **Tier 3 (Detailed Inspector):** 클릭 시 펼쳐지는 실제 소스코드 행 번호 뷰어 및 관련 파일 트리
 2. **엄격한 읽기 전용 불변조건 (Strict Read-Only Guarantee)**
@@ -34,9 +36,9 @@ Code Mentat는 로컬 소프트웨어 저장소(Repository)를 **완전한 읽�
 
 | 단축키 | 기능 |
 |---|---|
-| `Alt + Space` / `Ctrl + Alt + M` | 위젯 표시 / 숨김 토글 |
+| `Alt + Space` / `Ctrl + Alt + M` | 위젯 표시 / 숨김 토글 (OS 전역 등록, 실패 시 포커스된 창에서만) |
 | `/` 또는 `Ctrl + K` | 질문 입력창 포커스 |
-| `Esc` | 단계별 축소 (Inspector → Card → Pill) 및 스트리밍 즉시 취소 |
+| `Esc` | 단계별 축소 (Inspector → Card → Pill), 스트리밍·인덱싱 취소 |
 | `Ctrl + P` | Always-on-Top 최상위 핀 고정 토글 |
 | `Enter` | 질문 전송 및 Egress 승인 |
 

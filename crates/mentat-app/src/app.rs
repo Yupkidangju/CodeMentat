@@ -6,8 +6,9 @@ use egui::{
 };
 use futures_util::StreamExt;
 use mentat_analysis::{
-    ApprovedInferenceRequest, EgressFilter, EgressPacket, EgressReceipt, ProjectDetector,
-    ProjectStructureSummary, SemanticKernel, SemanticKernelBuilder,
+    AnswerBundleNormalizer, ApprovedInferenceRequest, ConsentAssemblyState, EgressFilter,
+    EgressPacket, EgressReceipt, ProjectDetector, ProjectStructureSummary, SemanticKernel,
+    SemanticKernelBuilder,
 };
 use mentat_core::error::MentatError;
 use mentat_core::models::{
@@ -19,8 +20,11 @@ use mentat_inference::{BackendProfile, InferenceBackend, InferenceEvent};
 use mentat_inference_openai::MultiProviderAdapter;
 use mentat_persona::{PersonaKind, PersonaRenderer};
 use mentat_platform::PlatformManager;
-use mentat_repository::{ReadOnlySession, RepositoryWatcher};
+use mentat_repository::{
+    ReadOnlySession, RepositoryWatcher, ScanLimits, ScanOmission, ScanOmitReason, ScanOutcome,
+};
 use mentat_storage::SqliteStorage;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
@@ -34,10 +38,11 @@ pub enum ExpansionTier {
     Tier3Inspector,
 }
 
-pub type ScanChannel = Receiver<(
-    Result<Vec<FileRecord>, MentatError>,
-    Result<RepositorySnapshot, MentatError>,
-)>;
+pub const TIER1_SIZE: [f32; 2] = [580.0, 52.0];
+pub const TIER2_SIZE: [f32; 2] = [580.0, 300.0];
+pub const TIER3_SIZE: [f32; 2] = [660.0, 480.0];
+
+pub type ScanChannel = Receiver<Result<(ScanOutcome, RepositorySnapshot), MentatError>>;
 
 pub struct MentatApp {
     pub session: Option<Arc<ReadOnlySession>>,
@@ -72,14 +77,13 @@ pub struct MentatApp {
     pub scan_rx: Option<ScanChannel>,
     pub ping_rx: Option<Receiver<Result<mentat_inference::HealthStatus, MentatError>>>,
     pub local_query_rx: Option<Receiver<Result<AnswerBundle, MentatError>>>,
-    pub egress_packet_rx: Option<Receiver<Result<EgressPacket, MentatError>>>,
+    pub egress_packet_rx: Option<Receiver<(u64, Result<EgressPacket, MentatError>)>>,
     pub preview_rx: Option<Receiver<Result<String, MentatError>>>,
 
-    // Egress Consent Sheet state (SEC-F001 Fail-Closed single-use receipt & SEC-F002 User Exclusions)
+    // Egress Consent Sheet state (SEC-F001 / SEC-F011 generation-guarded exclusions)
     pub repo_consent_given: bool,
-    pub pending_egress_packet: Option<EgressPacket>,
-    pub pending_query: Option<String>,
-    pub user_excluded_files: Vec<PathBuf>,
+    pub consent: ConsentAssemblyState,
+    pub restored_snapshot: Option<RepositorySnapshot>,
 
     // Analysis results
     pub recent_claims: Vec<Claim>,
@@ -90,6 +94,11 @@ pub struct MentatApp {
     pub watcher: Option<RepositoryWatcher>,
     pub selected_file_idx: Option<usize>,
     pub selected_file_content: Option<String>,
+    pub scan_cancel: Option<CancellationToken>,
+    pub scan_omissions: Vec<ScanOmission>,
+    pub citation_file_texts: HashMap<PathBuf, String>,
+    pub focus_query: bool,
+    pub window_visible: bool,
 }
 
 impl MentatApp {
@@ -143,9 +152,8 @@ impl MentatApp {
             egress_packet_rx: None,
             preview_rx: None,
             repo_consent_given: false,
-            pending_egress_packet: None,
-            pending_query: None,
-            user_excluded_files: Vec::new(),
+            consent: ConsentAssemblyState::default(),
+            restored_snapshot: None,
             recent_claims: Vec::new(),
             recent_recommendations: Vec::new(),
             recent_conflicts: Vec::new(),
@@ -154,6 +162,11 @@ impl MentatApp {
             watcher: None,
             selected_file_idx: None,
             selected_file_content: None,
+            scan_cancel: None,
+            scan_omissions: Vec::new(),
+            citation_file_texts: HashMap::new(),
+            focus_query: false,
+            window_visible: true,
         }
     }
 
@@ -161,9 +174,9 @@ impl MentatApp {
         if self.expansion_tier != tier {
             self.expansion_tier = tier;
             let size = match tier {
-                ExpansionTier::Tier1Pill => vec2(580.0, 52.0),
-                ExpansionTier::Tier2Card => vec2(580.0, 300.0),
-                ExpansionTier::Tier3Inspector => vec2(660.0, 480.0),
+                ExpansionTier::Tier1Pill => vec2(TIER1_SIZE[0], TIER1_SIZE[1]),
+                ExpansionTier::Tier2Card => vec2(TIER2_SIZE[0], TIER2_SIZE[1]),
+                ExpansionTier::Tier3Inspector => vec2(TIER3_SIZE[0], TIER3_SIZE[1]),
             };
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
         }
@@ -183,39 +196,56 @@ impl MentatApp {
             return;
         }
 
-        match ReadOnlySession::open(&path) {
+        let known_id = self
+            .storage
+            .as_ref()
+            .and_then(|s| s.find_repo_by_root(&path).ok().flatten())
+            .map(|p| p.id);
+
+        match ReadOnlySession::open_with_known_id(&path, known_id) {
             Ok(session) => {
                 let profile = session.profile().clone();
                 if let Some(ref s) = self.storage {
                     let _ = s.save_recent_repo(&profile);
                     self.recent_repos = s.list_recent_repos().unwrap_or_default();
-                    // [IMP-F005] Restore latest snapshot if known
-                    if let Ok(Some(last_snap)) = s.load_latest_snapshot(profile.id) {
+                    // [IMP-F005] Restore latest snapshot under the stable repo ID
+                    if let Ok(Some(mut last_snap)) = s.load_latest_snapshot(profile.id) {
+                        last_snap.status = SnapshotStatus::Indexing;
+                        self.restored_snapshot = Some(last_snap.clone());
                         self.snapshot = Some(last_snap);
                     }
                 }
 
                 let session_arc = Arc::new(session);
-                self.status_text = format!("저장소 인덱싱 중... {}", path.display());
-                self.watcher = Some(RepositoryWatcher::new(&path));
+                self.status_text = if self.restored_snapshot.is_some() {
+                    format!("이전 스냅샷 복원됨, 인덱싱 중... {}", path.display())
+                } else {
+                    format!("저장소 인덱싱 중... {}", path.display())
+                };
+                let mut watcher = RepositoryWatcher::new(&path);
+                watcher.spawn_background();
+                self.watcher = Some(watcher);
                 self.repo_consent_given = false;
-                self.pending_egress_packet = None;
-                self.pending_query = None;
-                self.user_excluded_files.clear();
+                self.consent.reset();
 
                 let rt = self.rt.clone();
                 let s = session_arc.clone();
+                let cancel = CancellationToken::new();
+                self.scan_cancel = Some(cancel.clone());
+                self.scan_omissions.clear();
 
-                // DBG-F001 & DBG-F002: Single-scan async indexing without double disk traversal
+                // DBG-F003: Cancellable ScanOutcome path
                 let (tx, rx) = std::sync::mpsc::channel();
                 self.scan_rx = Some(rx);
                 rt.spawn(async move {
-                    let files_res = s.scan_files().await;
-                    let snap_res = files_res
-                        .as_ref()
-                        .map(|files| s.create_snapshot_from_files(files))
-                        .map_err(|e| e.clone());
-                    let _ = tx.send((files_res, snap_res));
+                    let result = s
+                        .scan_files_with_limits(ScanLimits::default(), cancel)
+                        .await
+                        .map(|outcome| {
+                            let snap = s.create_snapshot_from_files(&outcome.files);
+                            (outcome, snap)
+                        });
+                    let _ = tx.send(result);
                 });
 
                 self.session = Some(session_arc);
@@ -291,27 +321,40 @@ impl MentatApp {
             return;
         }
 
-        // [SEC-F001 & SEC-F002] Fail-Closed Egress Consent Workflow with User Exclusions
+        // [SEC-F001 & SEC-F011] Fail-closed egress consent with generation-guarded exclusions
+        let generation = self.consent.begin_assembly(query);
+        self.spawn_egress_assembly(session, summary, generation);
+    }
+
+    fn spawn_egress_assembly(
+        &mut self,
+        session: Arc<ReadOnlySession>,
+        summary: ProjectStructureSummary,
+        generation: u64,
+    ) {
         let files = self.files.clone();
-        let sum = summary.clone();
-        let s = session.clone();
-        let q = query.clone();
-        let exclusions = self.user_excluded_files.clone();
+        let exclusions = self.consent.user_excluded_files.clone();
+        let q = self.consent.pending_query.clone().unwrap_or_default();
+        let snap_id = self
+            .snapshot
+            .as_ref()
+            .map(|s| s.id)
+            .unwrap_or_else(uuid::Uuid::new_v4);
 
         let (tx, rx) = std::sync::mpsc::channel();
         self.egress_packet_rx = Some(rx);
-        self.pending_query = Some(query);
 
         self.rt.spawn(async move {
             let packet = EgressFilter::assemble_packet_with_user_exclusions(
-                s.as_ref(),
+                session.as_ref(),
                 &files,
-                &sum,
+                &summary,
                 &q,
                 &exclusions,
+                snap_id,
             )
             .await;
-            let _ = tx.send(packet);
+            let _ = tx.send((generation, packet));
         });
     }
 
@@ -320,6 +363,7 @@ impl MentatApp {
         approved: ApprovedInferenceRequest,
     ) {
         // [SEC-F001] Strict cryptographic verification and consume-once execution
+        self.citation_file_texts = approved.citation_file_texts().clone();
         let request = match approved.into_inference_request() {
             Ok(req) => req,
             Err(e) => {
@@ -363,6 +407,13 @@ impl MentatApp {
         self.status_text = "추론이 취소되었습니다.".to_string();
     }
 
+    pub fn cancel_scan(&mut self) {
+        if let Some(cancel) = self.scan_cancel.take() {
+            cancel.cancel();
+        }
+        self.status_text = "인덱싱 취소를 요청했습니다.".to_string();
+    }
+
     /// [DBG-F001] Fully asynchronous preview loading with zero blocking on the UI thread
     pub fn load_file_preview(&mut self, idx: usize) {
         if let Some(file) = self.files.get(idx) {
@@ -401,16 +452,44 @@ impl eframe::App for MentatApp {
         // 1. Poll scanning task (Non-blocking & full terminal error state consumption)
         if let Some(ref rx) = self.scan_rx {
             match rx.try_recv() {
-                Ok((Ok(files), Ok(snap))) => {
+                Ok(Ok((outcome, snap))) => {
+                    let files = outcome.files;
+                    self.scan_omissions = outcome.omissions.clone();
                     let summary = ProjectDetector::summarize(&files);
                     let kernel = SemanticKernelBuilder::build(&summary);
 
-                    self.status_text = format!(
-                        "{}개 파일 ({} - {}) 인덱싱 완료",
-                        snap.file_count,
-                        summary.primary_language.as_deref().unwrap_or("General"),
-                        snap.tree_digest.chars().take(8).collect::<String>()
-                    );
+                    let omit_note = if self.scan_omissions.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" / 누락 {}건", self.scan_omissions.len())
+                    };
+                    self.status_text = if outcome.cancelled {
+                        format!("인덱싱 취소됨 ({}개 파일{})", files.len(), omit_note)
+                    } else {
+                        format!(
+                            "{}개 파일 ({} - {}) 인덱싱 완료{}",
+                            snap.file_count,
+                            summary.primary_language.as_deref().unwrap_or("General"),
+                            snap.tree_digest.chars().take(8).collect::<String>(),
+                            omit_note
+                        )
+                    };
+
+                    let snap = if let Some(restored) = self.restored_snapshot.take() {
+                        if restored.tree_digest == snap.tree_digest
+                            && restored.repo_id == snap.repo_id
+                        {
+                            let mut reused = restored;
+                            reused.status = SnapshotStatus::Ready;
+                            reused.file_count = snap.file_count;
+                            reused.total_bytes = snap.total_bytes;
+                            reused
+                        } else {
+                            snap
+                        }
+                    } else {
+                        snap
+                    };
 
                     if let Some(ref s) = self.storage {
                         let _ = s.save_snapshot_meta(&snap);
@@ -421,14 +500,17 @@ impl eframe::App for MentatApp {
                     self.kernel = Some(kernel);
                     self.snapshot = Some(snap);
                     self.scan_rx = None;
+                    self.scan_cancel = None;
                 }
-                Ok((Err(e), _)) | Ok((_, Err(e))) => {
+                Ok(Err(e)) => {
                     self.status_text = format!("인덱싱 실패: {}", e);
                     self.scan_rx = None;
+                    self.scan_cancel = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.status_text = "인덱싱 작업 채널이 중단되었습니다.".to_string();
                     self.scan_rx = None;
+                    self.scan_cancel = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
@@ -488,46 +570,55 @@ impl eframe::App for MentatApp {
             }
         }
 
-        // 4. Poll egress packet assembly (Non-blocking & full terminal error state consumption)
+        // 4. Poll egress packet assembly (generation-guarded; stale results discarded)
         if let Some(ref rx) = self.egress_packet_rx {
             match rx.try_recv() {
-                Ok(Ok(packet)) => {
-                    let snap_id = self
-                        .snapshot
-                        .as_ref()
-                        .map(|s| s.id)
-                        .unwrap_or_else(uuid::Uuid::new_v4);
-                    if !self.repo_consent_given {
-                        self.pending_egress_packet = Some(packet);
-                    } else {
-                        let receipt = EgressReceipt {
-                            receipt_id: uuid::Uuid::new_v4(),
-                            packet_hash: packet.packet_hash.clone(),
-                            snapshot_id: snap_id,
-                            token_count: packet.estimated_tokens,
-                            file_count: packet.included_files.len(),
-                            granted_at: chrono::Utc::now().to_rfc3339(),
-                        };
+                Ok((generation, Ok(packet))) => {
+                    let accepted = self.consent.accept_packet(generation, packet);
+                    if !accepted {
+                        self.status_text =
+                            "이전 제외 집합의 패킷을 폐기했습니다. 새 패킷을 기다립니다."
+                                .to_string();
+                    } else if let Some(p) = self.consent.display_packet() {
+                        self.citation_file_texts = p.included_file_texts.clone();
+                    }
+                    if accepted && self.repo_consent_given {
+                        if let Some((packet, q)) = self.consent.take_approved_packet() {
+                            let snap_id = self
+                                .snapshot
+                                .as_ref()
+                                .map(|s| s.id)
+                                .unwrap_or_else(uuid::Uuid::new_v4);
+                            let receipt = EgressReceipt {
+                                receipt_id: uuid::Uuid::new_v4(),
+                                packet_hash: packet.packet_hash.clone(),
+                                snapshot_id: snap_id,
+                                token_count: packet.estimated_tokens,
+                                file_count: packet.included_files.len(),
+                                granted_at: chrono::Utc::now().to_rfc3339(),
+                            };
 
-                        let q = self.pending_query.take().unwrap_or_default();
-                        if let Ok(approved_req) = ApprovedInferenceRequest::new(
-                            receipt,
-                            packet,
-                            q,
-                            snap_id,
-                            self.profile.clone(),
-                        ) {
-                            self.start_inference_stream_with_approved_request(approved_req);
+                            if let Ok(approved_req) = ApprovedInferenceRequest::new(
+                                receipt,
+                                packet,
+                                q,
+                                snap_id,
+                                self.profile.clone(),
+                            ) {
+                                self.start_inference_stream_with_approved_request(approved_req);
+                            }
                         }
                     }
                     self.egress_packet_rx = None;
                 }
-                Ok(Err(e)) => {
+                Ok((_, Err(e))) => {
                     self.status_text = format!("🛡️ 컨텍스트 조립 실패: {}", e);
+                    self.consent.rebuilding = false;
                     self.egress_packet_rx = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.status_text = "컨텍스트 조립 채널이 중단되었습니다.".to_string();
+                    self.consent.rebuilding = false;
                     self.egress_packet_rx = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -572,37 +663,25 @@ impl eframe::App for MentatApp {
                                 }
                             }
                             InferenceEvent::Completed { full_text } => {
-                                self.answer_preview = Some(full_text.clone());
+                                let snap_id = self
+                                    .snapshot
+                                    .as_ref()
+                                    .map(|s| s.id)
+                                    .unwrap_or_else(uuid::Uuid::new_v4);
+                                let bundle = AnswerBundleNormalizer::from_model_text_with_contents(
+                                    uuid::Uuid::new_v4(),
+                                    snap_id,
+                                    &full_text,
+                                    &self.files,
+                                    &self.citation_file_texts,
+                                );
+                                let rendered = PersonaRenderer::render(&bundle, self.persona);
+                                self.answer_preview = Some(rendered.direct_answer);
+                                self.recent_claims = rendered.claims;
+                                self.recent_recommendations = rendered.recommendations;
+                                self.recent_conflicts = rendered.conflicts;
+                                self.evidence_map = rendered.evidence_map;
                                 self.status_text = "완료됨".to_string();
-
-                                // [IMP-F004] Normalize cloud response bullets into Inferred Claims
-                                for line in full_text.lines() {
-                                    let trimmed = line.trim();
-                                    if trimmed.starts_with('#')
-                                        || trimmed.starts_with('-')
-                                        || trimmed.starts_with('*')
-                                    {
-                                        let statement = trimmed
-                                            .trim_start_matches(|c: char| {
-                                                c == '#'
-                                                    || c == '-'
-                                                    || c == '*'
-                                                    || c.is_whitespace()
-                                            })
-                                            .to_string();
-                                        if statement.len() > 5 {
-                                            self.recent_claims.push(Claim {
-                                                id: uuid::Uuid::new_v4(),
-                                                classification: ClaimClassification::Inferred,
-                                                statement,
-                                                confidence: 0.85,
-                                                evidence_ids: vec![],
-                                                rationale: Some("AI 모델 추론 결과".to_string()),
-                                            });
-                                        }
-                                    }
-                                }
-
                                 finished = true;
                                 break;
                             }
@@ -640,9 +719,9 @@ impl eframe::App for MentatApp {
             }
         }
 
-        // Periodic file watcher check for STALE transitions (Throttled for DBG-F008)
+        // Periodic file watcher check for STALE transitions (background poll only)
         if let Some(ref mut watcher) = self.watcher {
-            if let Ok(true) = watcher.check_for_changes() {
+            if let Ok(true) = watcher.poll_changes() {
                 if let Some(ref mut snap) = self.snapshot {
                     snap.status = SnapshotStatus::Stale;
                     self.status_text =
@@ -651,10 +730,40 @@ impl eframe::App for MentatApp {
             }
         }
 
+        // In-app shortcuts: Ctrl+K focus, Ctrl+P pin, Alt+Space / Ctrl+Alt+M hide
+        let (focus_query, toggle_pin, toggle_visible) = ctx.input(|i| {
+            let ctrl = i.modifiers.ctrl;
+            let alt = i.modifiers.alt;
+            (
+                (ctrl && i.key_pressed(egui::Key::K)) || i.key_pressed(egui::Key::Slash),
+                ctrl && i.key_pressed(egui::Key::P),
+                (alt && i.key_pressed(egui::Key::Space))
+                    || (ctrl && alt && i.key_pressed(egui::Key::M)),
+            )
+        });
+        if focus_query {
+            self.focus_query = true;
+        }
+        if toggle_pin {
+            self.is_pinned = !self.is_pinned;
+            let level = if self.is_pinned {
+                egui::viewport::WindowLevel::AlwaysOnTop
+            } else {
+                egui::viewport::WindowLevel::Normal
+            };
+            ctx.send_viewport_cmd(ViewportCommand::WindowLevel(level));
+        }
+        if toggle_visible {
+            self.window_visible = !self.window_visible;
+            ctx.send_viewport_cmd(ViewportCommand::Visible(self.window_visible));
+        }
+
         // Global Keyboard Shortcut Esc to cancel or collapse tiers
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             if self.is_streaming {
                 self.cancel_inference();
+            } else if self.scan_rx.is_some() {
+                self.cancel_scan();
             } else if self.settings_open {
                 self.settings_open = false;
             } else {
@@ -684,6 +793,8 @@ impl eframe::App for MentatApp {
         CentralPanel::default().frame(frame).show(ctx, |ui| {
             // Render Tier 1 Pill Bar (SEC-F008: dynamic read-only indicator)
             let is_read_only = self.session.is_some();
+            let request_focus = self.focus_query;
+            self.focus_query = false;
             let action = PillBar::new(
                 repo_display_name.as_deref(),
                 is_read_only,
@@ -691,6 +802,7 @@ impl eframe::App for MentatApp {
                 self.is_pinned,
                 &self.status_text,
             )
+            .request_focus(request_focus)
             .show(ui);
 
             if action.open_repo_clicked {
@@ -759,29 +871,82 @@ impl eframe::App for MentatApp {
                 }
             }
 
-            // Render Egress Consent Sheet (if pending)
+            if self.scan_rx.is_some() {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("인덱싱 진행 중")
+                            .color(MentatTheme::STATUS_INFERENCING)
+                            .size(12.0),
+                    );
+                    if ui.button("⏹️ 인덱싱 취소").clicked() {
+                        self.cancel_scan();
+                    }
+                });
+            }
+            if !self.scan_omissions.is_empty() {
+                ui.collapsing(
+                    format!("스캔에서 건너뛴 항목 {}건", self.scan_omissions.len()),
+                    |ui| {
+                        for omission in &self.scan_omissions {
+                            let reason = match omission.reason {
+                                ScanOmitReason::FileTooLarge => "FileTooLarge",
+                                ScanOmitReason::TotalBytesLimit => "TotalBytesLimit",
+                                ScanOmitReason::FileCountLimit => "FileCountLimit",
+                                ScanOmitReason::Cancelled => "Cancelled",
+                            };
+                            ui.label(format!("{} — {}", omission.relative_path.display(), reason));
+                        }
+                    },
+                );
+            }
+
+            // Render Egress Consent Sheet (shown while assembling or awaiting approval)
             let mut consent_granted = false;
             let mut consent_cancelled = false;
             let mut exclusion_toggled = None;
 
-            if let Some(ref packet) = self.pending_egress_packet {
+            if self.consent.should_show_sheet() {
                 ui.add_space(8.0);
                 ui.group(|ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("🛡️ 외부 데이터 전송 승인 (Egress Consent)").color(MentatTheme::STATUS_CONFLICT).strong().size(13.0));
                     });
-                    ui.label(RichText::new(format!(
-                        "선택된 공급자({})로 문맥을 전송합니다. (포함: {}개 파일 / 약 {} 토큰 / 해시: {})",
-                        self.profile.model,
-                        packet.included_files.len(),
-                        packet.estimated_tokens,
-                        packet.packet_hash.chars().take(8).collect::<String>()
-                    )).size(12.0));
 
-                    // SEC-F002: Exact file preview with interactive user exclusion toggle
+                    if self.consent.rebuilding || !self.consent.can_approve() {
+                        ui.label(RichText::new("제외 집합을 반영하는 중입니다. 새 패킷이 도착하기 전까지 승인할 수 없습니다.")
+                            .color(MentatTheme::STATUS_INFERENCING)
+                            .size(12.0));
+                    }
+
+                    if let Some(packet) = self.consent.display_packet() {
+                        ui.label(RichText::new(format!(
+                            "선택된 공급자({})로 문맥을 전송합니다. (포함: {}개 파일 / 약 {} 토큰 / 해시: {})",
+                            self.profile.model,
+                            packet.included_files.len(),
+                            packet.estimated_tokens,
+                            packet.packet_hash.chars().take(8).collect::<String>()
+                        )).size(12.0));
+
+                        if !packet.excluded_sensitive_files.is_empty() {
+                            ui.label(RichText::new(format!(
+                                "🔒 자동 제외된 파일: {}건 (.env, 인증서, 사용자 제외 파일 등)",
+                                packet.excluded_sensitive_files.len()
+                            )).color(MentatTheme::STATUS_READ_ONLY).size(11.5));
+                        }
+
+                        if packet.redacted_secret_occurrences > 0 {
+                            ui.label(RichText::new(format!(
+                                "✂️ 내용 중 마스킹된 비밀정보: {}건",
+                                packet.redacted_secret_occurrences
+                            )).color(MentatTheme::STATUS_INFERENCING).size(11.5));
+                        }
+                    }
+
                     ui.collapsing("📄 포함될 파일 및 행 범위 미리보기 (체크 해제 시 제외)", |ui| {
-                        for ref_item in &packet.included_file_refs {
-                            let mut is_included = !self.user_excluded_files.contains(&ref_item.relative_path);
+                        let preview_refs = self.consent.preview_refs().to_vec();
+                        for ref_item in &preview_refs {
+                            let mut is_included = !self.consent.user_excluded_files.contains(&ref_item.relative_path);
                             let label = format!(
                                 "{} (1..{}행, 총 {}행)",
                                 ref_item.relative_path.display(),
@@ -794,23 +959,13 @@ impl eframe::App for MentatApp {
                         }
                     });
 
-                    if !packet.excluded_sensitive_files.is_empty() {
-                        ui.label(RichText::new(format!(
-                            "🔒 자동 제외된 파일: {}건 (.env, 인증서, 사용자 제외 파일 등)",
-                            packet.excluded_sensitive_files.len()
-                        )).color(MentatTheme::STATUS_READ_ONLY).size(11.5));
-                    }
-
-                    if packet.redacted_secret_occurrences > 0 {
-                        ui.label(RichText::new(format!(
-                            "✂️ 내용 중 마스킹된 비밀정보: {}건",
-                            packet.redacted_secret_occurrences
-                        )).color(MentatTheme::STATUS_INFERENCING).size(11.5));
-                    }
-
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        if ui.button(RichText::new("✅ 전송 승인 및 실행").strong()).clicked() {
+                        let approve = ui.add_enabled(
+                            self.consent.can_approve(),
+                            egui::Button::new(RichText::new("✅ 전송 승인 및 실행").strong()),
+                        );
+                        if approve.clicked() {
                             consent_granted = true;
                         }
                         if ui.button("✖ 취소").clicked() {
@@ -820,23 +975,16 @@ impl eframe::App for MentatApp {
                 });
             }
 
-            // Handle user file exclusion toggle in Consent Sheet
+            // [SEC-F011] Exclusion immediately invalidates the old packet
             if let Some((path, exclude)) = exclusion_toggled {
-                if exclude {
-                    if !self.user_excluded_files.contains(&path) {
-                        self.user_excluded_files.push(path);
-                    }
-                } else {
-                    self.user_excluded_files.retain(|p| p != &path);
-                }
-                if let Some(ref q) = self.pending_query.clone() {
-                    self.handle_query(ctx, q.clone());
+                let generation = self.consent.apply_exclusion_toggle(path, exclude);
+                if let (Some(session), Some(summary)) = (self.session.clone(), self.summary.clone()) {
+                    self.spawn_egress_assembly(session, summary, generation);
                 }
             }
 
             if consent_granted {
-                if let Some(packet) = self.pending_egress_packet.take() {
-                    let q = self.pending_query.take().unwrap_or_default();
+                if let Some((packet, q)) = self.consent.take_approved_packet() {
                     self.repo_consent_given = true;
                     let snap_id = self.snapshot.as_ref().map(|s| s.id).unwrap_or_else(uuid::Uuid::new_v4);
 
@@ -861,8 +1009,7 @@ impl eframe::App for MentatApp {
                 }
             }
             if consent_cancelled {
-                self.pending_egress_packet = None;
-                self.pending_query = None;
+                self.consent.cancel();
                 self.status_text = "전송이 사용자에 의해 취소되었습니다.".to_string();
             }
 
@@ -1018,6 +1165,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_imp_f003_viewport_and_theme_tokens() {
+        assert_eq!(TIER1_SIZE, [580.0, 52.0]);
+        assert_eq!(TIER2_SIZE, [580.0, 300.0]);
+        assert_eq!(TIER3_SIZE, [660.0, 480.0]);
+        assert_eq!(MentatTheme::BG_BASE, Color32::from_rgb(18, 21, 26));
+        assert_eq!(
+            MentatTheme::STATUS_CONFLICT,
+            Color32::from_rgb(245, 158, 11)
+        );
+        assert_eq!(MentatTheme::TEXT_PRIMARY, Color32::from_rgb(243, 244, 246));
+    }
+
+    #[test]
     fn test_app_expansion_tier_transitions() {
         let mut tier = ExpansionTier::Tier1Pill;
         assert_eq!(tier, ExpansionTier::Tier1Pill);
@@ -1049,6 +1209,9 @@ mod tests {
             redacted_secret_occurrences: 0,
             estimated_tokens: 10,
             prompt_context: prompt_context.clone(),
+            snapshot_id: snap_id,
+            redacted_user_question: "query".to_string(),
+            included_file_texts: std::collections::HashMap::new(),
         };
 
         let receipt = EgressReceipt {
@@ -1098,6 +1261,9 @@ mod tests {
             redacted_secret_occurrences: 0,
             estimated_tokens: 10,
             prompt_context: "tampered context".to_string(),
+            snapshot_id: snap_id,
+            redacted_user_question: "query".to_string(),
+            included_file_texts: std::collections::HashMap::new(),
         };
 
         let err = ApprovedInferenceRequest::new(

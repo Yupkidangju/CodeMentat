@@ -162,7 +162,14 @@ impl OpenAiAdapter {
                 },
                 {
                     "role": "user",
-                    "content": format!("{}\n\nQuestion:\n{}", request.prompt_context, request.user_question)
+                    "content": if request.user_question.is_empty() {
+                        request.prompt_context.clone()
+                    } else {
+                        format!(
+                            "{}\n\n## User Question\n{}",
+                            request.prompt_context, request.user_question
+                        )
+                    }
                 }
             ]
         });

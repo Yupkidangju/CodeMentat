@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.0-dev] - 2026-08-19 (Re-audit #10 Remediation)
+
+패키지 SemVer는 `0.1.0`이며 이 항목은 그 개발 스냅샷이다.
+
+### Fixed
+- **[IMP-F004] Cloud evidence contract:**
+  - Approved requests now include AnswerBundle JSON schema, current snapshot ID, and per-file path/hash/line range.
+  - The app validates model output with included file contents via `from_model_text_with_contents`.
+- **[SEC-F002] Outbound question filtering:**
+  - `user_question` is scanned with the same secret filter as file content.
+  - The question is sent once; adapters no longer append a second raw copy.
+- **[DBG-F003] App-level scan cancellation:**
+  - Indexing uses `scan_files_with_limits` and shows omission reasons.
+- **[DBG-F002] Preserved-mtime same-size edits:**
+  - Periodic content fingerprint rehash marks the snapshot STALE.
+- **[IMP-F003] UI contract:**
+  - `designs.md` / README now match implemented viewport sizes, theme tokens, and registered shortcuts.
+- **[IMP-F002] Version policy:**
+  - Cargo `0.1.0` is the package version; `0.1.0-dev` is the unreleased document status.
+
+---
+
+## [0.1.0-dev] - 2026-08-19 (Re-audit #9 Remediation)
+
+### Fixed
+- **[IMP-F004] Strict cloud citation validation and real conflict fixture:**
+  - Current snapshot ID is forced; FileRecord hash, excerpt, and line_end are checked.
+  - Any invalid evidence in a claim downgrades the claim to `Unknown`.
+  - `/conflicts` compares document-claimed language/paths against the scanned tree.
+- **[DBG-F008] Watcher constructor no longer walks the tree on the UI thread:**
+  - Initial signature is computed in the worker; stop no longer joins on Drop.
+- **[DBG-F003] Scan cancellation, preflight, and representative budget profile:**
+  - `ScanOutcome` records omissions; oversized files are skipped before hashing.
+  - Mid-scan cancel and giant-file/limit fixtures were added.
+- **[SEC-F002] Generic high-entropy redaction and relevance threshold:**
+  - High-entropy tokens are masked; score-0 files are not retrieved into egress packets.
+
+---
+
+## [0.1.0-dev] - 2026-08-19 (Re-audit #8 Remediation)
+
+### Fixed
+- **[SEC-F011] Exclusion toggle invalidates the pending packet immediately:**
+  - `ConsentAssemblyState` increments a generation, clears the old packet, and blocks approve until the matching generation result arrives.
+  - Stale assembler results from a previous exclusion set are discarded.
+- **[DBG-F005] Formatter and wire-level adapter fixtures:**
+  - Restored `cargo fmt --all -- --check`.
+  - Added loopback HTTP fixtures for 401/429/5xx, cancel-during-send, and split SSE chunks.
+- **[DBG-F008] Watcher walk moved off the UI thread:**
+  - Background thread computes tree signatures; the UI only polls a channel.
+- **[IMP-F005] Stable repository identity and snapshot restore:**
+  - Canonical root lookup reuses the previous repo UUID and consumes stored snapshot metadata.
+- **[IMP-F004] Cloud AnswerBundle validation:**
+  - Structured JSON is citation-checked against the current snapshot.
+  - Unstructured model text is marked `UNSTRUCTURED_RESPONSE` instead of high-confidence inferred bullets.
+
+---
+
 ## [0.1.0-dev] - 2026-08-19 (Re-audit #7 Remediation)
 
 ### Fixed

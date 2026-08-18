@@ -1,7 +1,8 @@
 # Code Mentat Architecture Decision Records (DESIGN_DECISIONS.md)
 ## 아키텍처 및 디자인 결정 기록
 
-- **문서 버전:** 0.1.0-dev (Turn 2 Remediation)
+- **문서 버전:** 0.1.0-dev (Turn 13 / Re-audit #10 Remediation)
+- **패키지 버전:** 0.1.0 (`0.1.0-dev`는 문서 상태)
 - **표준 규격:** AI Implementation Documentation Standard Section 7 / D3D Protocol v1.3
 - **기준 작성일:** 2026-08-18
 
@@ -78,6 +79,63 @@
 
 ### [DEC-INF-001] 다중 공급자 공통 계약 및 Google Gemini / OpenRouter 지원
 - 단일 `InferenceBackend` 인터페이스 하에 Google Gemini REST/SSE 및 OpenRouter / OpenAI SSE 어댑터 지원.
+
+### [DEC-SEC-005] 사용자 제외 토글은 generation 가드로 이전 패킷을 즉시 무효화한다 (SEC-F011)
+- **배경:** 제외 체크박스 변경 후 비동기 재조립이 끝나기 전 기존 `pending_egress_packet`을 승인하면, UI에는 제외된 파일이 전송 payload에는 남는 consent TOCTOU가 발생한다.
+- **결정:**
+  - 제외 집합이 바뀌는 즉시 `pending_egress_packet = None`, `rebuilding = true`, `generation += 1`.
+  - 승인은 `!rebuilding && pending_packet.is_some()`일 때만 가능하다.
+  - 조립 결과는 현재 generation과 일치할 때만 수락하고, 이전 generation 결과는 폐기한다.
+- **대안 및 기각 사유:**
+  - *표시만 바꾸고 승인 payload를 재조립 완료 후 교체:* 느린 조립 동안 승인 창이 열려 위험하므로 기각.
+- **결과:** 제외된 파일이 포함된 old packet은 전송 경로에 도달할 수 없다.
+
+### [DEC-ARCH-004] 안정 저장소 ID는 canonical root 조회 결과이다 (IMP-F005)
+- **배경:** `ReadOnlySession::open()`이 매번 새 UUID를 만들면 `snapshot_history`가 orphan되고 재실행 복원이 불가능하다.
+- **결정:** 정규화된 루트 경로로 `recent_repositories`를 조회하고, 기존 ID가 있으면 세션에 재사용한다. 복원된 snapshot digest가 새 scan과 같으면 snapshot ID도 유지한다.
+- **대안 및 기각 사유:**
+  - *경로 문자열 그대로 비교:* Windows에서 상대/UNC/`\\?\` 표기 불일치로 실패하므로 기각.
+- **결과:** 같은 루트를 다시 열면 이전 snapshot/session 메타데이터를 찾을 수 있다.
+
+### [DEC-INF-002] 클라우드 응답은 AnswerBundle 검증 후에만 Claim이 된다 (IMP-F004)
+- **배경:** markdown bullet을 임의로 높은 신뢰도 `Inferred` Claim으로 바꾸면 근거 없는 문장이 구조화 답변처럼 보인다.
+- **결정:** JSON `AnswerBundle`만 주장으로 승격한다. citation은 현재 snapshot 파일/행 범위와 대조하고 실패 시 `[INVALID_CITATION]`과 `Unknown`으로 강등한다. 비구조 텍스트는 `UNSTRUCTURED_RESPONSE`로 표시하고 자동 주장을 만들지 않는다.
+- **결과:** 모델 원문과 검증된 Claim이 분리된다.
+
+### [DEC-INF-004] Cloud 요청은 AnswerBundle schema와 citation catalog를 포함한다 (IMP-F004)
+- **배경:** validator만 강화하면 모델이 유효 citation을 만들 메타데이터를 받지 못한다.
+- **결정:** `ApprovedInferenceRequest` system contract에 JSON schema를 넣고, packet context에 snapshot ID와 파일별 path/hash/허용 행 범위를 제공한다. 앱은 packet에 실린 실제 파일 본문으로 `from_model_text_with_contents`를 호출한다.
+- **결과:** 입력 계약과 출력 검증이 같은 citation metadata를 공유한다.
+
+### [DEC-SEC-007] 최종 outbound 텍스트는 질문 포함 단일 경로로만 나간다 (SEC-F002)
+- **결정:** `user_question`도 `scan_and_redact_secrets`를 통과한다. 질문은 packet의 `redacted_user_question` 한 곳에만 두고 어댑터는 `prompt_context`에 다시 붙이지 않는다.
+
+### [DEC-UI-002] 뷰포트·테마·단축키는 구현값을 제품 기준으로 동결한다 (IMP-F003)
+- **결정:** Tier 크기는 `580x52` / `580x300` / `660x480`, conflict 색은 amber `#F59E0B`이다. `Ctrl+K`/`Ctrl+P`는 앱 단축키, `Alt+Space`/`Ctrl+Alt+M`은 가능한 OS에서 전역 등록한다.
+
+### [DEC-REL-001] Cargo 0.1.0과 문서 0.1.0-dev (IMP-F002)
+- **결정:** 패키지 SemVer는 `0.1.0`이다. `0.1.0-dev`는 미릴리스 문서 상태이며 다른 제품을 가리키지 않는다.
+
+### [DEC-INF-003] Cloud citation은 current snapshot의 hash/excerpt/range와 일치해야 한다 (IMP-F004)
+- **배경:** path만 맞으면 존재하는 파일을 가리키는 가짜 citation이 Observed로 남을 수 있다.
+- **결정:** `AnswerBundleNormalizer`는 모델 snapshot ID를 현재 ID로 강제하고, FileRecord content hash, 실제 excerpt, line_end를 검증한다. 하나라도 무효인 evidence를 가진 claim은 Unknown으로 강등한다. `/conflicts`는 문서가 주장한 언어/경로와 스캔 결과를 비교한다.
+- **대안 및 기각 사유:** markdown bullet 정규화는 근거 없는 주장을 만들어 기각.
+- **결과:** 그럴듯한 가짜 citation과 문서-코드 불일치가 구조화 결과에 남는다.
+
+### [DEC-SEC-006] 고엔트로피 토큰 마스킹과 최소 relevance threshold (SEC-F002)
+- **배경:** 알려진 공급자 패턴만으로는 신규 credential 형식과 질의와 무관한 문서를 막지 못한다.
+- **결정:** 길이 24 이상이고 Shannon entropy가 임계값을 넘는 토큰을 마스킹한다. path relevance가 최소 점수 미만인 파일은 내용을 읽지 않는다.
+- **결과:** 미등록 비밀 형식과 점수 0 문서의 기본 송신 경로가 닫힌다.
+
+### [DEC-DBG-002] Scan은 취소 가능하고 한도 초과는 omission으로 남긴다 (DBG-F003)
+- **배경:** 파일 수/바이트 상한만으로는 거대 파일 해시와 장시간 walk를 멈추지 못한다.
+- **결정:** metadata preflight로 단일 파일 상한을 해시 전에 적용하고, `CancellationToken`과 `ScanOutcome.omissions`을 도입한다. 대표 규모는 주입 가능한 `ScanLimits`로 검증한다.
+- **결과:** 거대 파일/취소/한도가 명시적 결과로 남는다.
+
+### [DEC-DBG-001] 저장소 워처 walk는 UI 스레드 밖에서만 수행한다 (DBG-F008)
+- **배경:** 1초 throttle만으로는 큰 트리의 동기 walk가 프레임을 막을 수 있다.
+- **결정:** `RepositoryWatcher::new()`는 walk하지 않는다. 최초 signature와 이후 walk는 worker에서만 수행하고 Drop은 join하지 않는다. UI는 `poll_changes()`로 결과만 읽는다.
+- **결과:** 저장소 열기·전환 시 UI 스레드가 전체 트리를 순회하지 않는다.
 
 ### [DEC-PER-001] 사실 불변조건을 준수하는 표현 계층 페르소나 분리
 - 페르소나 전환 시에도 `Claim`, `EvidenceRef`, `Conflict` 등 사실 판단은 100% 보존.

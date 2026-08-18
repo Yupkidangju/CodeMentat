@@ -112,4 +112,35 @@ mod tests {
         assert_eq!(loaded.total_bytes, 1048576);
         assert_eq!(loaded.status, SnapshotStatus::Ready);
     }
+
+    #[test]
+    fn test_imp_f005_find_repo_by_canonical_root() {
+        let dir = tempdir().unwrap();
+        let repo_root = dir.path().join("sample_repo");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        let db_path = dir.path().join("mentat.db");
+        let storage = SqliteStorage::open(&db_path).expect("DB should open");
+
+        let id = Uuid::new_v4();
+        let profile = RepositoryProfile {
+            id,
+            display_name: "Sample".to_string(),
+            root_path: repo_root.clone(),
+            repo_type: RepositoryType::Directory,
+            consent_policy: false,
+        };
+        storage.save_recent_repo(&profile).unwrap();
+
+        let found = storage
+            .find_repo_by_root(&repo_root)
+            .expect("lookup")
+            .expect("repo should exist");
+        assert_eq!(found.id, id);
+
+        let again = storage
+            .find_repo_by_root(&repo_root)
+            .unwrap()
+            .expect("stable lookup");
+        assert_eq!(again.id, id);
+    }
 }

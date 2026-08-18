@@ -15,7 +15,7 @@ fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Code Mentat")
-            .with_inner_size([540.0, 52.0]) // Starts compact as Pill Bar
+            .with_inner_size(app::TIER1_SIZE) // Starts compact as Pill Bar
             .with_min_inner_size([460.0, 48.0])
             .with_decorations(false) // Frameless widget style
             .with_transparent(true)

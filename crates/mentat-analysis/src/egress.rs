@@ -4,6 +4,7 @@ use mentat_core::models::FileRecord;
 use mentat_core::ports::RepositoryReader;
 use mentat_inference::{BackendProfile, InferenceRequest};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -35,6 +36,9 @@ pub struct EgressPacket {
     pub redacted_secret_occurrences: usize,
     pub estimated_tokens: usize,
     pub prompt_context: String,
+    pub snapshot_id: Uuid,
+    pub redacted_user_question: String,
+    pub included_file_texts: HashMap<PathBuf, String>,
 }
 
 /// [SEC-F001] Cryptographically sealed and consume-once approved request
@@ -56,6 +60,12 @@ impl ApprovedInferenceRequest {
         snapshot_id: Uuid,
         approved_profile: BackendProfile,
     ) -> Result<Self, MentatError> {
+        let user_question = if packet.redacted_user_question.is_empty() {
+            EgressFilter::scan_and_redact_secrets(&user_question).0
+        } else {
+            packet.redacted_user_question.clone()
+        };
+
         // [SEC-F001] Re-hash actual prompt_context bytes directly to prevent in-memory tampering
         let mut context_hasher = Sha256::new();
         context_hasher.update(packet.prompt_context.as_bytes());
@@ -146,6 +156,10 @@ impl ApprovedInferenceRequest {
             && self.packet.packet_hash == computed_packet_hash
     }
 
+    pub fn citation_file_texts(&self) -> &HashMap<PathBuf, String> {
+        &self.packet.included_file_texts
+    }
+
     /// [SEC-F001] Consume-once API: Consumes `self` by value to generate the final sealed `InferenceRequest`
     pub fn into_inference_request(self) -> Result<InferenceRequest, MentatError> {
         if !self.verify_integrity() {
@@ -154,15 +168,25 @@ impl ApprovedInferenceRequest {
             ));
         }
 
+        let question = if self.packet.redacted_user_question.is_empty() {
+            EgressFilter::scan_and_redact_secrets(&self.user_question).0
+        } else {
+            self.packet.redacted_user_question.clone()
+        };
+
         Ok(InferenceRequest {
             request_id: self.receipt.receipt_id,
-            system_contract: "You are Code Mentat, a strict read-only repository advisor. Provide evidence-based explanations distinguishing OBSERVED, INFERRED, and CONFLICT.".to_string(),
+            system_contract: crate::AnswerBundleNormalizer::system_contract(self.snapshot_id),
             prompt_context: self.packet.prompt_context,
-            user_question: self.user_question,
+            user_question: question,
             profile: self.approved_profile,
         })
     }
 }
+
+pub const MIN_CONTENT_RELEVANCE_SCORE: usize = 3;
+pub const HIGH_ENTROPY_MIN_LEN: usize = 24;
+pub const HIGH_ENTROPY_THRESHOLD: f64 = 4.0;
 
 pub struct EgressFilter;
 
@@ -258,7 +282,35 @@ impl EgressFilter {
             output.push('\n');
         }
 
-        (output, redaction_count)
+        let (entropy_redacted, entropy_count) = Self::redact_high_entropy_tokens(&output);
+        (entropy_redacted, redaction_count + entropy_count)
+    }
+
+    /// [SEC-F002] Generic detector for unknown credential-shaped high-entropy tokens.
+    pub fn redact_high_entropy_tokens(text: &str) -> (String, usize) {
+        let mut count = 0;
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(idx) = rest.find(|c: char| is_secret_token_char(c)) {
+            out.push_str(&rest[..idx]);
+            let tail = &rest[idx..];
+            let end = tail
+                .find(|c: char| !is_secret_token_char(c))
+                .unwrap_or(tail.len());
+            let token = &tail[..end];
+            if token.len() >= HIGH_ENTROPY_MIN_LEN
+                && shannon_entropy(token) >= HIGH_ENTROPY_THRESHOLD
+                && looks_secret_like(token)
+            {
+                out.push_str("[REDACTED_HIGH_ENTROPY]");
+                count += 1;
+            } else {
+                out.push_str(token);
+            }
+            rest = &tail[end..];
+        }
+        out.push_str(rest);
+        (out, count)
     }
 
     /// Redacts all secret patterns within a single line using char-level Unicode boundary checks
@@ -290,7 +342,12 @@ impl EgressFilter {
             // 2. Anthropic API Key (sk-ant-...)
             if let Some(pos) = current.find("sk-ant-") {
                 if let Some(end) = Self::find_token_end(&current, pos, 20) {
-                    Self::update_earliest(&mut earliest_match, pos, end, "[REDACTED_ANTHROPIC_KEY]");
+                    Self::update_earliest(
+                        &mut earliest_match,
+                        pos,
+                        end,
+                        "[REDACTED_ANTHROPIC_KEY]",
+                    );
                 }
             }
 
@@ -574,8 +631,17 @@ impl EgressFilter {
         files: &[FileRecord],
         summary: &ProjectStructureSummary,
         user_question: &str,
+        snapshot_id: Uuid,
     ) -> Result<EgressPacket, MentatError> {
-        Self::assemble_packet_with_user_exclusions(reader, files, summary, user_question, &[]).await
+        Self::assemble_packet_with_user_exclusions(
+            reader,
+            files,
+            summary,
+            user_question,
+            &[],
+            snapshot_id,
+        )
+        .await
     }
 
     /// [SEC-F002] Query-aware context assembly with per-request user exclusions and exact file/line preview
@@ -585,18 +651,27 @@ impl EgressFilter {
         summary: &ProjectStructureSummary,
         user_question: &str,
         user_excluded_files: &[std::path::PathBuf],
+        snapshot_id: Uuid,
     ) -> Result<EgressPacket, MentatError> {
         let mut included_files = Vec::new();
         let mut included_file_refs = Vec::new();
+        let mut included_file_texts = HashMap::new();
         let mut excluded_sensitive_files = Vec::new();
         let mut total_redactions = 0;
         let mut context_buffer = String::new();
 
+        let (redacted_user_question, question_redactions) =
+            Self::scan_and_redact_secrets(user_question);
+        total_redactions += question_redactions;
+
         context_buffer.push_str(&format!(
-            "# Repository Context Summary\nPrimary Language: {}\nTotal Files: {}\n\n",
+            "# Repository Context Summary\nSnapshot ID: {}\nPrimary Language: {}\nTotal Files: {}\n\n",
+            snapshot_id,
             summary.primary_language.as_deref().unwrap_or("Unknown"),
             files.len()
         ));
+        context_buffer.push_str("## Citation Catalog\n");
+        context_buffer.push_str("| path | content_hash | allowed_lines |\n|---|---|---|\n");
 
         context_buffer.push_str("## Project Manifests & Key Documents\n");
 
@@ -640,13 +715,19 @@ impl EgressFilter {
 
         scored_files.sort_by_key(|b| std::cmp::Reverse(b.1));
 
-        for (file, _) in scored_files {
+        for (file, score) in scored_files {
             if user_excluded_files.contains(&file.relative_path) {
                 excluded_sensitive_files.push(file.relative_path.clone());
                 continue;
             }
 
             if Self::is_sensitive_filename(&file.relative_path) {
+                excluded_sensitive_files.push(file.relative_path.clone());
+                continue;
+            }
+
+            // [SEC-F002] Do not retrieve content for files below the relevance threshold.
+            if score < MIN_CONTENT_RELEVANCE_SCORE {
                 excluded_sensitive_files.push(file.relative_path.clone());
                 continue;
             }
@@ -667,8 +748,16 @@ impl EgressFilter {
                     total_redactions += count;
 
                     context_buffer.push_str(&format!(
-                        "### File: {}\n```\n{}\n```\n\n",
+                        "| {} | {} | 1-{} |\n",
                         file.relative_path.display(),
+                        file.content_hash,
+                        line_count
+                    ));
+                    context_buffer.push_str(&format!(
+                        "### File: {}\nhash: {}\nallowed_lines: 1-{}\n```\n{}\n```\n\n",
+                        file.relative_path.display(),
+                        file.content_hash,
+                        line_count,
                         redacted
                     ));
 
@@ -679,13 +768,13 @@ impl EgressFilter {
                         line_end: line_count,
                         line_count,
                     });
+                    included_file_texts.insert(file.relative_path.clone(), redacted);
                 }
             }
         }
 
-        context_buffer.push_str(&format!("## User Question\n{}\n", user_question));
-
-        let estimated_tokens = context_buffer.len().div_ceil(4);
+        // Question lives only in redacted_user_question; not duplicated here.
+        let estimated_tokens = (context_buffer.len() + redacted_user_question.len()).div_ceil(4);
 
         // Cryptographic Hash of the Exact Packet
         let mut hasher = Sha256::new();
@@ -701,8 +790,38 @@ impl EgressFilter {
             redacted_secret_occurrences: total_redactions,
             estimated_tokens,
             prompt_context: context_buffer,
+            snapshot_id,
+            redacted_user_question,
+            included_file_texts,
         })
     }
+}
+
+fn is_secret_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-')
+}
+
+fn looks_secret_like(token: &str) -> bool {
+    let has_digit = token.chars().any(|c| c.is_ascii_digit());
+    let has_lower = token.chars().any(|c| c.is_ascii_lowercase());
+    let has_upper = token.chars().any(|c| c.is_ascii_uppercase());
+    has_digit && (has_lower || has_upper)
+}
+
+fn shannon_entropy(token: &str) -> f64 {
+    let mut freq = [0u32; 256];
+    let bytes = token.as_bytes();
+    for &b in bytes {
+        freq[b as usize] += 1;
+    }
+    let len = bytes.len() as f64;
+    freq.iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = f64::from(c) / len;
+            -p * p.log2()
+        })
+        .sum()
 }
 
 #[cfg(test)]
@@ -861,6 +980,9 @@ pub mod tests {
             redacted_secret_occurrences: 0,
             estimated_tokens: 5,
             prompt_context: prompt_context.clone(),
+            snapshot_id: snap_id,
+            redacted_user_question: "Explain structure".to_string(),
+            included_file_texts: HashMap::new(),
         };
 
         let receipt = EgressReceipt {
@@ -931,5 +1053,147 @@ pub mod tests {
         assert!(redacted.contains("[REDACTED_ANTHROPIC_KEY]"));
         assert!(redacted.contains("[REDACTED_HF_TOKEN]"));
         assert!(redacted.contains("[REDACTED_SLACK_TOKEN]"));
+    }
+
+    #[test]
+    fn test_sec_f002_high_entropy_redaction() {
+        let secret = "xK9mP2vQ8nL4wR7tY1uI0oE3aS6dF5gH";
+        let sample = format!("opaque provider blob {secret} in notes\nplain hello world\n");
+        let (redacted, count) = EgressFilter::scan_and_redact_secrets(&sample);
+        assert!(count >= 1);
+        assert!(!redacted.contains(secret));
+        assert!(redacted.contains("[REDACTED_HIGH_ENTROPY]"));
+        assert!(redacted.contains("hello world"));
+    }
+
+    #[test]
+    fn test_sec_f002_outbound_question_zero_leak_and_single_copy() {
+        let secret = "sk-ant-api03-abcdef1234567890abcdef";
+        let entropy = "xK9mP2vQ8nL4wR7tY1uI0oE3aS6dF5gH";
+        let unicode = "한글앞AIzaSyD-1234567890abcdef1234567890abcde한글뒤";
+        let question = format!("use {secret} and {entropy} and {unicode}");
+        let (redacted, count) = EgressFilter::scan_and_redact_secrets(&question);
+        assert!(count >= 2);
+        assert!(!redacted.contains("sk-ant-api03-abcdef1234567890abcdef"));
+        assert!(!redacted.contains("AIzaSyD-1234567890abcdef1234567890abcde"));
+        assert!(!redacted.contains(entropy));
+        assert!(
+            redacted.contains("[REDACTED_ANTHROPIC_KEY]")
+                || redacted.contains("[REDACTED_HIGH_ENTROPY]")
+        );
+        assert!(
+            !redacted.contains("## User Question\n")
+                || redacted.matches("## User Question").count() <= 1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sec_f002_zero_score_file_excluded_from_content() {
+        use async_trait::async_trait;
+        use mentat_core::models::{
+            FileKind, RepositoryProfile, RepositorySnapshot, RepositoryType, SnapshotStatus,
+        };
+        use mentat_core::ports::RepositoryReader;
+        use std::collections::HashMap;
+
+        struct MapReader {
+            files: HashMap<PathBuf, String>,
+        }
+
+        #[async_trait]
+        impl RepositoryReader for MapReader {
+            fn root_path(&self) -> &std::path::Path {
+                std::path::Path::new(".")
+            }
+            fn profile(&self) -> &RepositoryProfile {
+                use std::sync::OnceLock;
+                static PROFILE: OnceLock<RepositoryProfile> = OnceLock::new();
+                PROFILE.get_or_init(|| RepositoryProfile {
+                    id: Uuid::new_v4(),
+                    display_name: "t".into(),
+                    root_path: PathBuf::from("."),
+                    repo_type: RepositoryType::Directory,
+                    consent_policy: false,
+                })
+            }
+            async fn scan_files(&self) -> Result<Vec<FileRecord>, MentatError> {
+                Ok(vec![])
+            }
+            async fn read_file_content(
+                &self,
+                relative_path: &std::path::Path,
+            ) -> Result<String, MentatError> {
+                self.files
+                    .get(relative_path)
+                    .cloned()
+                    .ok_or_else(|| MentatError::IoError("missing".into()))
+            }
+            async fn read_file_lines(
+                &self,
+                relative_path: &std::path::Path,
+                _s: usize,
+                _e: usize,
+            ) -> Result<String, MentatError> {
+                self.read_file_content(relative_path).await
+            }
+            async fn create_snapshot(&self) -> Result<RepositorySnapshot, MentatError> {
+                Ok(RepositorySnapshot {
+                    id: Uuid::new_v4(),
+                    repo_id: Uuid::new_v4(),
+                    created_at: chrono::Utc::now(),
+                    tree_digest: "x".into(),
+                    status: SnapshotStatus::Ready,
+                    file_count: 0,
+                    total_bytes: 0,
+                })
+            }
+        }
+
+        let unrelated = PathBuf::from("docs/unrelated_notes.md");
+        let entry = PathBuf::from("src/main.rs");
+        let reader = MapReader {
+            files: HashMap::from([
+                (
+                    unrelated.clone(),
+                    "totally unrelated gardening notes".into(),
+                ),
+                (entry.clone(), "fn main() { authentication(); }".into()),
+            ]),
+        };
+        let files = vec![
+            FileRecord {
+                relative_path: unrelated.clone(),
+                kind: FileKind::Documentation,
+                size_bytes: 20,
+                content_hash: "a".into(),
+                is_text: true,
+                line_count: Some(1),
+                text_preview: None,
+            },
+            FileRecord {
+                relative_path: entry.clone(),
+                kind: FileKind::SourceCode,
+                size_bytes: 30,
+                content_hash: "b".into(),
+                is_text: true,
+                line_count: Some(1),
+                text_preview: None,
+            },
+        ];
+        let summary = crate::ProjectDetector::summarize(&files);
+        let packet = EgressFilter::assemble_packet(
+            &reader,
+            &files,
+            &summary,
+            "authentication middleware",
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+
+        assert!(!packet.included_files.contains(&unrelated));
+        assert!(packet.excluded_sensitive_files.contains(&unrelated));
+        assert!(packet.included_files.contains(&entry));
+        assert!(!packet.prompt_context.contains("gardening"));
     }
 }

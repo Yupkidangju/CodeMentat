@@ -1,9 +1,13 @@
+pub mod answer_bundle;
+pub mod consent;
 pub mod detector;
 pub mod egress;
 pub mod evidence;
 pub mod search;
 pub mod semantic_kernel;
 
+pub use answer_bundle::AnswerBundleNormalizer;
+pub use consent::ConsentAssemblyState;
 pub use detector::{ProjectDetector, ProjectStructureSummary};
 pub use egress::{ApprovedInferenceRequest, EgressFilter, EgressPacket, EgressReceipt};
 pub use evidence::EvidenceIndex;
@@ -27,6 +31,7 @@ mod tests {
                 content_hash: "abc".to_string(),
                 is_text: true,
                 kind: FileKind::Manifest,
+                text_preview: None,
             },
             FileRecord {
                 relative_path: PathBuf::from("src/main.rs"),
@@ -35,6 +40,7 @@ mod tests {
                 content_hash: "def".to_string(),
                 is_text: true,
                 kind: FileKind::SourceCode,
+                text_preview: None,
             },
             FileRecord {
                 relative_path: PathBuf::from("README.md"),
@@ -43,6 +49,7 @@ mod tests {
                 content_hash: "ghi".to_string(),
                 is_text: true,
                 kind: FileKind::Documentation,
+                text_preview: None,
             },
         ];
 

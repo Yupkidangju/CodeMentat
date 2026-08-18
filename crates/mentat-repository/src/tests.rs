@@ -1,7 +1,9 @@
 use super::*;
 use mentat_core::ports::RepositoryReader;
 use std::fs;
+use std::io::Write;
 use tempfile::tempdir;
+use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn test_read_only_session_scan_and_snapshot() {
@@ -121,4 +123,270 @@ fn test_dbg_f008_watcher_throttling_and_change_detection() {
     let mut watcher = crate::watcher::RepositoryWatcher::new(root);
     // Immediate second call should be throttled and return false
     assert!(!watcher.check_for_changes().unwrap());
+}
+
+#[test]
+fn test_dbg_f008_constructor_does_not_walk_tree() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    for i in 0..200 {
+        fs::write(root.join(format!("f{i}.rs")), "x").unwrap();
+    }
+
+    let start = std::time::Instant::now();
+    let mut watcher = crate::watcher::RepositoryWatcher::new(root);
+    assert!(start.elapsed().as_millis() < 50);
+    watcher.spawn_background();
+    assert!(start.elapsed().as_millis() < 80);
+}
+
+#[test]
+fn test_dbg_f008_background_watcher_poll_is_nonblocking() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("initial.rs"), "initial").unwrap();
+
+    let mut watcher = crate::watcher::RepositoryWatcher::new(root);
+    watcher.spawn_background();
+
+    let start = std::time::Instant::now();
+    let changed = watcher.poll_changes().unwrap();
+    assert!(start.elapsed().as_millis() < 50);
+    assert!(!changed);
+}
+
+#[test]
+fn test_dbg_f008_background_watcher_detects_add_delete_modify() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("initial.rs"), "aaaa").unwrap();
+
+    let mut watcher = crate::watcher::RepositoryWatcher::new(root);
+    watcher.spawn_background();
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    fs::write(root.join("added.rs"), "new").unwrap();
+    assert!(wait_for_change(&mut watcher), "add should be detected");
+
+    fs::write(root.join("initial.rs"), "bbbb").unwrap();
+    assert!(
+        wait_for_change(&mut watcher),
+        "same-size modify should be detected"
+    );
+
+    fs::remove_file(root.join("added.rs")).unwrap();
+    assert!(wait_for_change(&mut watcher), "delete should be detected");
+}
+
+#[test]
+fn test_imp_f005_open_reuses_known_repo_id() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
+
+    let first = ReadOnlySession::open(root).expect("first open");
+    let known_id = first.profile().id;
+    drop(first);
+
+    let second = ReadOnlySession::open_with_known_id(root, Some(known_id)).expect("reopen");
+    assert_eq!(second.profile().id, known_id);
+    assert_eq!(second.root_path(), root.canonicalize().unwrap().as_path());
+}
+
+#[tokio::test]
+async fn test_dbg_f003_giant_file_omitted_without_full_hash() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("ok.rs"), "fn main() {}\n").unwrap();
+    let giant = root.join("giant.bin");
+    let mut file = fs::File::create(&giant).unwrap();
+    let chunk = vec![b'x'; 1024 * 1024];
+    for _ in 0..11 {
+        file.write_all(&chunk).unwrap();
+    }
+    drop(file);
+
+    let start = std::time::Instant::now();
+    let session = ReadOnlySession::open(root).unwrap();
+    let outcome = session
+        .scan_files_with_limits(ScanLimits::default(), CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert!(
+        start.elapsed().as_secs() < 3,
+        "oversized file must not be fully hashed"
+    );
+    assert_eq!(outcome.files.len(), 1);
+    assert!(outcome
+        .omissions
+        .iter()
+        .any(|o| o.reason == ScanOmitReason::FileTooLarge));
+}
+
+#[tokio::test]
+async fn test_dbg_f003_mid_scan_cancel() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    for i in 0..400 {
+        fs::write(root.join(format!("f{i}.rs")), format!("// {i}\n")).unwrap();
+    }
+
+    let session = ReadOnlySession::open(root).unwrap();
+    let cancel = CancellationToken::new();
+    let cancel_flag = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        cancel_flag.cancel();
+    });
+    let outcome = session
+        .scan_files_with_limits(ScanLimits::default(), cancel)
+        .await
+        .unwrap();
+    assert!(
+        outcome.cancelled || outcome.files.len() < 400,
+        "scan must stop early or record cancellation"
+    );
+    if outcome.cancelled {
+        assert!(outcome
+            .omissions
+            .iter()
+            .any(|o| o.reason == ScanOmitReason::Cancelled));
+    }
+}
+
+#[tokio::test]
+async fn test_dbg_f003_representative_budget_profile() {
+    assert_eq!(MAX_SCAN_FILES_LIMIT, 100_000);
+    assert_eq!(MAX_SCAN_TOTAL_BYTES_LIMIT, 2 * 1024 * 1024 * 1024);
+    assert_eq!(MAX_SINGLE_FILE_BYTES, 10 * 1024 * 1024);
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    for i in 0..80 {
+        let sub = root.join(format!("mod_{}", i % 8));
+        let _ = fs::create_dir_all(&sub);
+        fs::write(sub.join(format!("file_{i}.rs")), format!("// {i}\n")).unwrap();
+    }
+
+    let session = ReadOnlySession::open(root).unwrap();
+    let limited = ScanLimits {
+        max_files: 25,
+        max_total_bytes: MAX_SCAN_TOTAL_BYTES_LIMIT,
+        max_single_file_bytes: MAX_SINGLE_FILE_BYTES,
+    };
+    let start = std::time::Instant::now();
+    let outcome = session
+        .scan_files_with_limits(limited, CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert!(start.elapsed().as_millis() < 2_000);
+    assert_eq!(outcome.files.len(), 25);
+    assert!(outcome
+        .omissions
+        .iter()
+        .any(|o| o.reason == ScanOmitReason::FileCountLimit));
+}
+
+#[test]
+fn test_dbg_f002_preserved_mtime_same_size_content_change() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("same.rs");
+    fs::write(&path, "aaaa").unwrap();
+    let original_mtime = fs::metadata(&path).unwrap().modified().unwrap();
+
+    let mut watcher = crate::watcher::RepositoryWatcher::new(root);
+    assert!(!watcher.force_content_check().unwrap());
+
+    fs::write(&path, "bbbb").unwrap();
+    let file = fs::File::options().write(true).open(&path).unwrap();
+    file.set_modified(original_mtime).unwrap();
+    drop(file);
+
+    assert_eq!(
+        fs::metadata(&path).unwrap().modified().unwrap(),
+        original_mtime
+    );
+    assert!(
+        watcher.force_content_check().unwrap(),
+        "same-size content change with restored mtime must be STALE"
+    );
+}
+
+#[test]
+fn test_dbg_f002_rapid_replace_and_metadata_error_fingerprint() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("swap.rs");
+    fs::write(&path, "1111").unwrap();
+    let mut watcher = crate::watcher::RepositoryWatcher::new(root);
+    assert!(!watcher.force_content_check().unwrap());
+    fs::write(&path, "2222").unwrap();
+    assert!(watcher.force_content_check().unwrap());
+    fs::write(&path, "3333").unwrap();
+    assert!(watcher.force_content_check().unwrap());
+
+    // Directory in place of a file still changes the fingerprint (metadata edge).
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    assert!(watcher.force_content_check().unwrap());
+}
+
+#[test]
+fn test_dbg_f002_large_tree_poll_stays_nonblocking() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    for i in 0..400 {
+        fs::write(root.join(format!("n{i}.rs")), "x").unwrap();
+    }
+    let mut watcher = crate::watcher::RepositoryWatcher::new(root);
+    watcher.spawn_background();
+    for _ in 0..20 {
+        let start = std::time::Instant::now();
+        let _ = watcher.poll_changes().unwrap();
+        assert!(start.elapsed().as_millis() < 20);
+    }
+}
+
+#[test]
+#[ignore = "representative 100k-file / 2GiB budget profile; cargo test -- --ignored"]
+fn test_dbg_f003_100k_2gib_benchmark_profile() {
+    assert_eq!(MAX_SCAN_FILES_LIMIT, 100_000);
+    assert_eq!(MAX_SCAN_TOTAL_BYTES_LIMIT, 2 * 1024 * 1024 * 1024);
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    for i in 0..100_000 {
+        let sub = root.join(format!("b{}", i / 1000));
+        let _ = fs::create_dir_all(&sub);
+        fs::write(sub.join(format!("{i}.rs")), b"//\n").unwrap();
+    }
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let session = ReadOnlySession::open(root).unwrap();
+        let start = std::time::Instant::now();
+        let outcome = session
+            .scan_files_with_limits(ScanLimits::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(start.elapsed().as_secs() < 180);
+        assert!(outcome.files.len() <= MAX_SCAN_FILES_LIMIT);
+        assert!(outcome
+            .files
+            .iter()
+            .all(|f| f.text_preview.is_some() || !f.is_text || f.size_bytes > 16 * 1024));
+    });
+}
+
+fn wait_for_change(watcher: &mut crate::watcher::RepositoryWatcher) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        if watcher.poll_changes().unwrap_or(false) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
 }

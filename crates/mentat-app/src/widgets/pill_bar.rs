@@ -15,6 +15,7 @@ pub struct PillBar<'a> {
     pub query_text: &'a mut String,
     pub is_pinned: bool,
     pub status_text: &'a str,
+    pub request_focus: bool,
 }
 
 impl<'a> PillBar<'a> {
@@ -31,7 +32,13 @@ impl<'a> PillBar<'a> {
             query_text,
             is_pinned,
             status_text,
+            request_focus: false,
         }
+    }
+
+    pub fn request_focus(mut self, yes: bool) -> Self {
+        self.request_focus = yes;
+        self
     }
 
     pub fn show(self, ui: &mut Ui) -> PillBarAction {
@@ -109,6 +116,10 @@ impl<'a> PillBar<'a> {
                     )
                     .font(egui::FontId::proportional(12.5)),
             );
+
+            if self.request_focus {
+                input_resp.request_focus();
+            }
 
             if input_resp.lost_focus()
                 && ui.input(|i| i.key_pressed(egui::Key::Enter))

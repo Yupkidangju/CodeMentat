@@ -55,6 +55,9 @@ pub struct FileRecord {
     pub content_hash: String,
     pub is_text: bool,
     pub line_count: Option<usize>,
+    /// First bytes of text used to verify cloud citation excerpts without a second read.
+    #[serde(default)]
+    pub text_preview: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

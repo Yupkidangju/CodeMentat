@@ -72,6 +72,10 @@ impl SqliteStorage {
             RepositoryType::Directory => "Directory",
         };
         let now = chrono::Utc::now().to_rfc3339();
+        let root_path = repo
+            .root_path
+            .canonicalize()
+            .unwrap_or_else(|_| repo.root_path.clone());
 
         conn.execute(
             "INSERT OR REPLACE INTO recent_repositories (id, display_name, root_path, repo_type, last_opened_at)
@@ -79,7 +83,7 @@ impl SqliteStorage {
             params![
                 repo.id.to_string(),
                 repo.display_name,
-                repo.root_path.to_string_lossy().to_string(),
+                root_path.to_string_lossy().to_string(),
                 repo_type_str,
                 now,
             ],
@@ -203,6 +207,15 @@ impl SqliteStorage {
         }
     }
 
+    /// [IMP-F005] Looks up a previously opened repository by canonical root path.
+    pub fn find_repo_by_root(&self, root: &Path) -> Result<Option<RepositoryProfile>, MentatError> {
+        let target = normalize_root_key(root);
+        let repos = self.list_recent_repos()?;
+        Ok(repos
+            .into_iter()
+            .find(|repo| normalize_root_key(&repo.root_path) == target))
+    }
+
     /// [IMP-F005] Saves repository snapshot record to history
     pub fn save_snapshot_meta(&self, snapshot: &RepositorySnapshot) -> Result<(), MentatError> {
         let conn = self.conn.lock().unwrap();
@@ -284,4 +297,20 @@ impl SqliteStorage {
     pub fn db_path(&self) -> &Path {
         &self.db_path
     }
+}
+
+/// Windows-safe comparison key for the same repository root across runs.
+pub fn normalize_root_key(path: &Path) -> String {
+    let raw = path
+        .canonicalize()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+    let trimmed = raw
+        .strip_prefix(r"\\?\")
+        .or_else(|| raw.strip_prefix("//?/"))
+        .unwrap_or(&raw);
+    trimmed
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_lowercase()
 }

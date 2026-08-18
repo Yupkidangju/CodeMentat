@@ -2219,6 +2219,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "futures-util",
+ "mentat-analysis",
  "mentat-core",
  "mentat-inference",
  "reqwest",
@@ -2266,6 +2267,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]

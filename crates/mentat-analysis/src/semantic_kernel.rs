@@ -67,7 +67,7 @@ impl SemanticKernelBuilder {
     pub async fn run_local_workflow(
         workflow: &str,
         reader: &(impl RepositoryReader + ?Sized),
-        _files: &[FileRecord],
+        files: &[FileRecord],
         summary: &ProjectStructureSummary,
         snapshot_id: Uuid,
     ) -> Result<AnswerBundle, MentatError> {
@@ -166,24 +166,16 @@ impl SemanticKernelBuilder {
                         unresolved_question: "공식 사양서(spec.md) 작성이 필요합니까?".to_string(),
                     });
                 } else {
-                    let mut doc_ev_ids = Vec::new();
-                    for doc in &summary.documents {
-                        if let Ok(ev) = index.create_evidence_ref(reader, doc, 1, 5).await {
-                            doc_ev_ids.push(ev.id);
-                            evidence_map.push(ev);
-                        }
-                    }
-                    claims.push(Claim {
-                        id: Uuid::new_v4(),
-                        classification: ClaimClassification::Observed,
-                        statement: format!(
-                            "{}건의 문서와 소스코드의 정합성이 모니터링 중입니다.",
-                            summary.documents.len()
-                        ),
-                        confidence: 0.9,
-                        evidence_ids: doc_ev_ids,
-                        rationale: Some("기록된 설계 문서와 소스 코드 대조".to_string()),
-                    });
+                    detect_doc_code_conflicts(
+                        reader,
+                        files,
+                        summary,
+                        &mut index,
+                        &mut claims,
+                        &mut conflicts,
+                        &mut evidence_map,
+                    )
+                    .await;
                 }
             }
             "/where" | "where" => {
@@ -283,5 +275,172 @@ impl SemanticKernelBuilder {
             conflicts,
             raw_model_response: None,
         })
+    }
+}
+
+/// [IMP-F004] Compares document-claimed stack/paths against the scanned tree.
+async fn detect_doc_code_conflicts(
+    reader: &(impl RepositoryReader + ?Sized),
+    files: &[FileRecord],
+    summary: &ProjectStructureSummary,
+    index: &mut EvidenceIndex,
+    claims: &mut Vec<Claim>,
+    conflicts: &mut Vec<ConflictItem>,
+    evidence_map: &mut Vec<mentat_core::models::EvidenceRef>,
+) {
+    let detected = summary.primary_language.as_deref().unwrap_or("Unknown");
+
+    for doc in &summary.documents {
+        let Ok(text) = reader.read_file_content(doc).await else {
+            continue;
+        };
+        let mut ev_ids = Vec::new();
+        if let Ok(ev) = index.create_evidence_ref(reader, doc, 1, 8).await {
+            ev_ids.push(ev.id);
+            evidence_map.push(ev);
+        }
+
+        if let Some(claimed) = language_claimed_in_text(&text) {
+            if !claimed.eq_ignore_ascii_case(detected) {
+                conflicts.push(ConflictItem {
+                    id: Uuid::new_v4(),
+                    side_a: format!("문서({})가 {}를 주장", doc.display(), claimed),
+                    side_b: format!("스캔된 주 언어는 {}", detected),
+                    evidence_ids: ev_ids.clone(),
+                    impact: "온보딩과 도구 선택이 어긋날 수 있음".to_string(),
+                    unresolved_question: "문서와 구현 중 어느 쪽이 현재 진실인가?".to_string(),
+                });
+                claims.push(Claim {
+                    id: Uuid::new_v4(),
+                    classification: ClaimClassification::Conflict,
+                    statement: format!(
+                        "문서가 {}를 주장하지만 저장소는 {}로 감지됨",
+                        claimed, detected
+                    ),
+                    confidence: 0.9,
+                    evidence_ids: ev_ids.clone(),
+                    rationale: Some("문서 본문과 ProjectDetector 언어 분포 비교".to_string()),
+                });
+            }
+        }
+
+        for missing in referenced_missing_paths(&text, files) {
+            conflicts.push(ConflictItem {
+                id: Uuid::new_v4(),
+                side_a: format!("문서가 {}를 참조", missing),
+                side_b: "스캔된 파일 목록에 해당 경로 없음".to_string(),
+                evidence_ids: ev_ids.clone(),
+                impact: "문서의 작업 위치가 현재 트리와 불일치".to_string(),
+                unresolved_question: format!("{}가 이동·삭제되었습니까?", missing),
+            });
+        }
+    }
+
+    if conflicts.is_empty() {
+        claims.push(Claim {
+            id: Uuid::new_v4(),
+            classification: ClaimClassification::Observed,
+            statement: format!(
+                "{}건의 문서와 소스코드에서 언어/경로 충돌이 감지되지 않았습니다.",
+                summary.documents.len()
+            ),
+            confidence: 0.7,
+            evidence_ids: evidence_map.iter().map(|e| e.id).collect(),
+            rationale: Some("문서 본문과 스캔 트리 대조".to_string()),
+        });
+    }
+}
+
+fn language_claimed_in_text(text: &str) -> Option<&'static str> {
+    let lower = text.to_lowercase();
+    if lower.contains("python") || lower.contains("django") || lower.contains("pypi") {
+        Some("Python")
+    } else if lower.contains("typescript") {
+        Some("TypeScript")
+    } else if lower.contains("javascript") || lower.contains("node.js") || lower.contains("npm ") {
+        Some("JavaScript")
+    } else if lower.contains("golang") || lower.contains(" go ") {
+        Some("Go")
+    } else if lower.contains("rust") || lower.contains("cargo workspace") || lower.contains("crate")
+    {
+        Some("Rust")
+    } else {
+        None
+    }
+}
+
+fn referenced_missing_paths(text: &str, files: &[FileRecord]) -> Vec<String> {
+    let mut missing = Vec::new();
+    for token in text.split_whitespace() {
+        let cleaned = token.trim_matches(|c: char| c == '`' || c == ',' || c == '.' || c == '"');
+        let looks_like_path = cleaned.contains('/')
+            || cleaned.contains('\\')
+            || cleaned.ends_with(".py")
+            || cleaned.ends_with(".rs")
+            || cleaned.ends_with(".js")
+            || cleaned.ends_with(".ts")
+            || cleaned.ends_with(".go");
+        if !looks_like_path {
+            continue;
+        }
+        let exists = files.iter().any(|f| {
+            f.relative_path.as_os_str() == std::ffi::OsStr::new(cleaned)
+                || f.relative_path
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .ends_with(cleaned.replace('\\', "/").as_str())
+        });
+        if !exists && !missing.contains(&cleaned.to_string()) {
+            missing.push(cleaned.to_string());
+        }
+    }
+    missing
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mentat_core::ports::RepositoryReader;
+    use mentat_repository::ReadOnlySession;
+    use std::fs;
+
+    #[tokio::test]
+    async fn test_imp_f004_doc_code_language_conflict_fixture() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("README.md"),
+            "# Demo\nThis is a Python 3.12 application. See `app.py` for the entry point.\n",
+        )
+        .unwrap();
+        fs::write(root.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let session = ReadOnlySession::open(root).unwrap();
+        let files = session.scan_files().await.unwrap();
+        let summary = crate::ProjectDetector::summarize(&files);
+        assert_eq!(summary.primary_language.as_deref(), Some("Rust"));
+
+        let bundle = SemanticKernelBuilder::run_local_workflow(
+            "/conflicts",
+            &session,
+            &files,
+            &summary,
+            uuid::Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !bundle.conflicts.is_empty(),
+            "doc-code language mismatch must produce a conflict"
+        );
+        assert!(bundle.conflicts.iter().any(|c| c.side_a.contains("Python")));
+        assert!(bundle
+            .claims
+            .iter()
+            .any(|c| c.classification == ClaimClassification::Conflict));
+        assert!(bundle.conflicts.iter().any(|c| c.side_a.contains("app.py")));
     }
 }

@@ -9,11 +9,50 @@ use mentat_core::models::{
 use mentat_core::ports::RepositoryReader;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub const MAX_SCAN_FILES_LIMIT: usize = 100_000;
 pub const MAX_SCAN_TOTAL_BYTES_LIMIT: u64 = 2 * 1024 * 1024 * 1024; // 2GiB
 pub const MAX_SINGLE_FILE_BYTES: u64 = 10 * 1024 * 1024; // 10MB
+
+#[derive(Debug, Clone, Copy)]
+pub struct ScanLimits {
+    pub max_files: usize,
+    pub max_total_bytes: u64,
+    pub max_single_file_bytes: u64,
+}
+
+impl Default for ScanLimits {
+    fn default() -> Self {
+        Self {
+            max_files: MAX_SCAN_FILES_LIMIT,
+            max_total_bytes: MAX_SCAN_TOTAL_BYTES_LIMIT,
+            max_single_file_bytes: MAX_SINGLE_FILE_BYTES,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScanOmitReason {
+    FileCountLimit,
+    TotalBytesLimit,
+    FileTooLarge,
+    Cancelled,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanOmission {
+    pub relative_path: PathBuf,
+    pub reason: ScanOmitReason,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanOutcome {
+    pub files: Vec<FileRecord>,
+    pub omissions: Vec<ScanOmission>,
+    pub cancelled: bool,
+}
 
 pub struct ReadOnlySession {
     root_path: PathBuf,
@@ -22,6 +61,14 @@ pub struct ReadOnlySession {
 
 impl ReadOnlySession {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, MentatError> {
+        Self::open_with_known_id(path, None)
+    }
+
+    /// [IMP-F005] Reuses a stable repository UUID when the same canonical root is reopened.
+    pub fn open_with_known_id(
+        path: impl AsRef<Path>,
+        known_id: Option<Uuid>,
+    ) -> Result<Self, MentatError> {
         let raw_path = path.as_ref();
         let canonical_root = raw_path.canonicalize().map_err(|e| {
             MentatError::InvalidRepositoryPath(format!("{}: {}", raw_path.display(), e))
@@ -42,7 +89,7 @@ impl ReadOnlySession {
             .to_string();
 
         let profile = RepositoryProfile {
-            id: Uuid::new_v4(),
+            id: known_id.unwrap_or_else(Uuid::new_v4),
             display_name,
             root_path: canonical_root.clone(),
             repo_type: if is_git {
@@ -101,6 +148,102 @@ impl ReadOnlySession {
             total_bytes,
         }
     }
+
+    /// [DBG-F003] Cancellable scan with explicit omission reasons and metadata preflight.
+    pub async fn scan_files_with_limits(
+        &self,
+        limits: ScanLimits,
+        cancel: CancellationToken,
+    ) -> Result<ScanOutcome, MentatError> {
+        let root = self.root_path.clone();
+        tokio::task::spawn_blocking(move || scan_tree(root, limits, cancel))
+            .await
+            .map_err(|e| MentatError::IoError(format!("스캔 태스크 실행 오류: {}", e)))?
+    }
+}
+
+fn scan_tree(
+    root: PathBuf,
+    limits: ScanLimits,
+    cancel: CancellationToken,
+) -> Result<ScanOutcome, MentatError> {
+    let mut records = Vec::new();
+    let mut omissions = Vec::new();
+    let mut accumulated_bytes = 0u64;
+    let mut cancelled = false;
+
+    let walker = WalkBuilder::new(&root)
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .build();
+
+    for entry in walker {
+        if cancel.is_cancelled() {
+            cancelled = true;
+            omissions.push(ScanOmission {
+                relative_path: PathBuf::from("<scan>"),
+                reason: ScanOmitReason::Cancelled,
+            });
+            break;
+        }
+
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        let path = entry.path();
+        if path.components().any(|c| c.as_os_str() == ".git") {
+            continue;
+        }
+
+        let meta = match entry.metadata() {
+            Ok(m) if m.is_file() => m,
+            _ => continue,
+        };
+
+        let rel_path = match path.strip_prefix(&root) {
+            Ok(p) => p.to_path_buf(),
+            Err(_) => continue,
+        };
+
+        if meta.len() > limits.max_single_file_bytes {
+            omissions.push(ScanOmission {
+                relative_path: rel_path,
+                reason: ScanOmitReason::FileTooLarge,
+            });
+            continue;
+        }
+
+        if accumulated_bytes.saturating_add(meta.len()) > limits.max_total_bytes {
+            omissions.push(ScanOmission {
+                relative_path: rel_path,
+                reason: ScanOmitReason::TotalBytesLimit,
+            });
+            continue;
+        }
+
+        if records.len() >= limits.max_files {
+            omissions.push(ScanOmission {
+                relative_path: rel_path,
+                reason: ScanOmitReason::FileCountLimit,
+            });
+            continue;
+        }
+
+        if let Ok(record) = FileScanner::inspect_file(&root, &rel_path) {
+            accumulated_bytes += record.size_bytes;
+            records.push(record);
+        }
+    }
+
+    Ok(ScanOutcome {
+        files: records,
+        omissions,
+        cancelled,
+    })
 }
 
 #[async_trait]
@@ -115,50 +258,10 @@ impl RepositoryReader for ReadOnlySession {
 
     /// [DBG-F003] Scans files under resource budgets (max 100,000 files, max 2GiB total scanned size)
     async fn scan_files(&self) -> Result<Vec<FileRecord>, MentatError> {
-        let root = self.root_path.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut records = Vec::new();
-            let mut accumulated_bytes = 0u64;
-
-            let walker = WalkBuilder::new(&root)
-                .hidden(false)
-                .git_ignore(true)
-                .git_global(true)
-                .git_exclude(true)
-                .build();
-
-            for entry in walker {
-                if records.len() >= MAX_SCAN_FILES_LIMIT {
-                    break;
-                }
-                if accumulated_bytes >= MAX_SCAN_TOTAL_BYTES_LIMIT {
-                    break;
-                }
-
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-
-                let path = entry.path();
-                if path.is_file() {
-                    // Skip .git internal files
-                    if path.components().any(|c| c.as_os_str() == ".git") {
-                        continue;
-                    }
-
-                    if let Ok(rel_path) = path.strip_prefix(&root) {
-                        if let Ok(record) = FileScanner::inspect_file(&root, rel_path) {
-                            accumulated_bytes += record.size_bytes;
-                            records.push(record);
-                        }
-                    }
-                }
-            }
-            Ok(records)
-        })
-        .await
-        .map_err(|e| MentatError::IoError(format!("스캔 태스크 실행 오류: {}", e)))?
+        let outcome = self
+            .scan_files_with_limits(ScanLimits::default(), CancellationToken::new())
+            .await?;
+        Ok(outcome.files)
     }
 
     async fn read_file_content(&self, relative_path: &Path) -> Result<String, MentatError> {
