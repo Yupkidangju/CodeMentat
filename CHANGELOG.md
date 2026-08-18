@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.0-dev] - 2026-08-19 (Re-audit #7 Remediation)
+
+### Fixed
+- **[DBG-F008] Watcher I/O Polling Decoupled from UI Frame Rate:**
+  - Added 1,000ms minimum throttling (`WATCHER_THROTTLE_INTERVAL`) to `RepositoryWatcher::check_for_changes()`.
+  - Eliminated high frequency (~60fps) filesystem directory tree walks during active UI streaming/repaint wakeups.
+- **[DBG-F002] Deterministic Sorted Snapshot & Watcher Tree Signature:**
+  - Enforced lexicographical sorting on `files` before SHA-256 tree digest calculation in `ReadOnlySession::create_snapshot_from_files`.
+  - Upgraded `RepositoryWatcher` with `TreeSignature` tracking `(file_count, total_size, latest_mtime)` to reliably detect deletions, additions, and mtime rollbacks.
+- **[DBG-F003] Deterministic Repository Scan Benchmark Test:**
+  - Added `test_dbg_f003_scan_and_snapshot_deterministic_benchmark` asserting 100-file recursive scanning and snapshot hashing in under 500ms.
+- **[IMP-F004] Request-Scoped State Reset & Cloud Response Claim Normalization:**
+  - Reset previous claims, recommendations, conflicts, and evidence maps at the start of each query in `MentatApp::handle_query`.
+  - Added automatic cloud response normalization parsing markdown headers and bullet points into structured `Claim` objects tagged as `ClaimClassification::Inferred`.
+- **[IMP-F005] Recent Repository Quick Reopening & Snapshot History Restoration:**
+  - Connected `recent_repos` in UI settings allowing one-click reopening of previous repositories.
+  - Automatically restored latest known snapshot metadata from SQLite storage upon opening a repository.
+- **[SEC-F002] Interactive User Exclusion UI & Extended Token Redaction:**
+  - Added interactive file exclusion checkboxes to Egress Consent Sheet, dynamically reassembling egress context without excluded files.
+  - Added pattern redaction for Anthropic keys (`sk-ant-`), HuggingFace tokens (`hf_`), and Slack tokens (`xoxb-`/`xoxp-`).
+- **[DBG-F005] Wire-Level Integration Tests:**
+  - Added fail-closed tests for invalid base URLs in `MultiProviderAdapter::health_check`.
+
+---
+
 ## [0.1.0-dev] - 2026-08-19 (Re-audit #6 Remediation)
 
 ### Fixed

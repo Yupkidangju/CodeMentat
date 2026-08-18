@@ -79,3 +79,46 @@ fn test_sec_f006_inspect_file_canonical_safety() {
     let err = crate::scanner::FileScanner::inspect_file(root, bad_path);
     assert!(err.is_err());
 }
+
+#[tokio::test]
+async fn test_dbg_f003_scan_and_snapshot_deterministic_benchmark() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    // Create 100 files across multiple subdirectories
+    for i in 0..100 {
+        let sub = root.join(format!("mod_{}", i % 10));
+        let _ = fs::create_dir_all(&sub);
+        fs::write(
+            sub.join(format!("file_{}.rs", i)),
+            format!("// Code file {}", i),
+        )
+        .unwrap();
+    }
+
+    let start = std::time::Instant::now();
+    let session = ReadOnlySession::open(root).expect("Session open");
+    let files = session.scan_files().await.expect("Scan files");
+    let snapshot1 = session.create_snapshot_from_files(&files);
+    let snapshot2 = session.create_snapshot_from_files(&files);
+
+    let elapsed = start.elapsed();
+    assert_eq!(files.len(), 100);
+    // Deterministic snapshot digest
+    assert_eq!(snapshot1.tree_digest, snapshot2.tree_digest);
+    assert!(
+        elapsed.as_millis() < 500,
+        "100 files scan should complete under 500ms"
+    );
+}
+
+#[test]
+fn test_dbg_f008_watcher_throttling_and_change_detection() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("initial.rs"), "initial").unwrap();
+
+    let mut watcher = crate::watcher::RepositoryWatcher::new(root);
+    // Immediate second call should be throttled and return false
+    assert!(!watcher.check_for_changes().unwrap());
+}

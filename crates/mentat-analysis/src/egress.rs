@@ -287,28 +287,35 @@ impl EgressFilter {
                 }
             }
 
-            // 2. OpenAI / OpenRouter Key (sk- + valid token chars)
+            // 2. Anthropic API Key (sk-ant-...)
+            if let Some(pos) = current.find("sk-ant-") {
+                if let Some(end) = Self::find_token_end(&current, pos, 20) {
+                    Self::update_earliest(&mut earliest_match, pos, end, "[REDACTED_ANTHROPIC_KEY]");
+                }
+            }
+
+            // 3. OpenAI / OpenRouter Key (sk- + valid token chars)
             if let Some(pos) = current.find("sk-") {
                 if let Some(end) = Self::find_token_end(&current, pos, 20) {
                     Self::update_earliest(&mut earliest_match, pos, end, "[REDACTED_OPENAI_KEY]");
                 }
             }
 
-            // 3. GitHub fine-grained PAT (github_pat_ + valid token chars)
+            // 4. GitHub fine-grained PAT (github_pat_ + valid token chars)
             if let Some(pos) = current.find("github_pat_") {
                 if let Some(end) = Self::find_token_end(&current, pos, 20) {
                     Self::update_earliest(&mut earliest_match, pos, end, "[REDACTED_GITHUB_PAT]");
                 }
             }
 
-            // 4. GitHub classic token (ghp_ + 36 chars)
+            // 5. GitHub classic token (ghp_ + 36 chars)
             if let Some(pos) = current.find("ghp_") {
                 if let Some(end) = Self::find_token_end(&current, pos, 40) {
                     Self::update_earliest(&mut earliest_match, pos, end, "[REDACTED_GITHUB_TOKEN]");
                 }
             }
 
-            // 5. AWS Access Key ID (AKIA + 16 uppercase alphanumeric chars)
+            // 6. AWS Access Key ID (AKIA + 16 uppercase alphanumeric chars)
             if let Some(pos) = current.find("AKIA") {
                 if let Some(end) = Self::find_token_end(&current, pos, 20) {
                     Self::update_earliest(
@@ -320,14 +327,14 @@ impl EgressFilter {
                 }
             }
 
-            // 6. JWT Token (eyJ...)
+            // 7. JWT Token (eyJ...)
             if let Some(pos) = current.find("eyJ") {
                 if let Some(end) = Self::find_jwt_end(&current, pos) {
                     Self::update_earliest(&mut earliest_match, pos, end, "[REDACTED_JWT_TOKEN]");
                 }
             }
 
-            // 7. Generic Bearer Token (Bearer <token>)
+            // 8. Generic Bearer Token (Bearer <token>)
             if let Some(pos) = current.find("Bearer ") {
                 let token_start = pos + 7;
                 if let Some(end) = Self::find_token_end(&current, token_start, 20) {
@@ -337,6 +344,20 @@ impl EgressFilter {
                         end,
                         "Bearer [REDACTED_BEARER_TOKEN]",
                     );
+                }
+            }
+
+            // 9. HuggingFace Token (hf_...)
+            if let Some(pos) = current.find("hf_") {
+                if let Some(end) = Self::find_token_end(&current, pos, 30) {
+                    Self::update_earliest(&mut earliest_match, pos, end, "[REDACTED_HF_TOKEN]");
+                }
+            }
+
+            // 10. Slack Token (xoxb- or xoxp-)
+            if let Some(pos) = current.find("xoxb-").or_else(|| current.find("xoxp-")) {
+                if let Some(end) = Self::find_token_end(&current, pos, 20) {
+                    Self::update_earliest(&mut earliest_match, pos, end, "[REDACTED_SLACK_TOKEN]");
                 }
             }
 
@@ -900,5 +921,15 @@ pub mod tests {
         assert_eq!(count, 1);
         assert!(!redacted.contains("my_super_secret_token_1234567890abcdef"));
         assert!(redacted.contains("Bearer [REDACTED_BEARER_TOKEN]"));
+    }
+
+    #[test]
+    fn test_extended_tokens_redaction() {
+        let sample = "anthropic = \"sk-ant-api03-abcdef1234567890abcdef\"\nhf = \"hf_abcdefghijklmnopqrstuvwxyz123456\"\nslack = \"xoxb-1234567890-abcdef\"\n";
+        let (redacted, count) = EgressFilter::scan_and_redact_secrets(sample);
+        assert_eq!(count, 3);
+        assert!(redacted.contains("[REDACTED_ANTHROPIC_KEY]"));
+        assert!(redacted.contains("[REDACTED_HF_TOKEN]"));
+        assert!(redacted.contains("[REDACTED_SLACK_TOKEN]"));
     }
 }

@@ -21,6 +21,7 @@ use mentat_persona::{PersonaKind, PersonaRenderer};
 use mentat_platform::PlatformManager;
 use mentat_repository::{ReadOnlySession, RepositoryWatcher};
 use mentat_storage::SqliteStorage;
+use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
@@ -74,10 +75,11 @@ pub struct MentatApp {
     pub egress_packet_rx: Option<Receiver<Result<EgressPacket, MentatError>>>,
     pub preview_rx: Option<Receiver<Result<String, MentatError>>>,
 
-    // Egress Consent Sheet state (SEC-F001 Fail-Closed single-use receipt)
+    // Egress Consent Sheet state (SEC-F001 Fail-Closed single-use receipt & SEC-F002 User Exclusions)
     pub repo_consent_given: bool,
     pub pending_egress_packet: Option<EgressPacket>,
     pub pending_query: Option<String>,
+    pub user_excluded_files: Vec<PathBuf>,
 
     // Analysis results
     pub recent_claims: Vec<Claim>,
@@ -143,6 +145,7 @@ impl MentatApp {
             repo_consent_given: false,
             pending_egress_packet: None,
             pending_query: None,
+            user_excluded_files: Vec::new(),
             recent_claims: Vec::new(),
             recent_recommendations: Vec::new(),
             recent_conflicts: Vec::new(),
@@ -186,6 +189,10 @@ impl MentatApp {
                 if let Some(ref s) = self.storage {
                     let _ = s.save_recent_repo(&profile);
                     self.recent_repos = s.list_recent_repos().unwrap_or_default();
+                    // [IMP-F005] Restore latest snapshot if known
+                    if let Ok(Some(last_snap)) = s.load_latest_snapshot(profile.id) {
+                        self.snapshot = Some(last_snap);
+                    }
                 }
 
                 let session_arc = Arc::new(session);
@@ -194,6 +201,7 @@ impl MentatApp {
                 self.repo_consent_given = false;
                 self.pending_egress_packet = None;
                 self.pending_query = None;
+                self.user_excluded_files.clear();
 
                 let rt = self.rt.clone();
                 let s = session_arc.clone();
@@ -249,6 +257,13 @@ impl MentatApp {
 
         self.set_expansion_tier(ctx, ExpansionTier::Tier2Card);
 
+        // [IMP-F004] Cleanly reset previous query results for request-scoped correctness
+        self.recent_claims.clear();
+        self.recent_recommendations.clear();
+        self.recent_conflicts.clear();
+        self.evidence_map.clear();
+        self.answer_preview = None;
+
         // If local slash command, run instant async local workflow
         if query.starts_with('/') {
             let snap_id = self
@@ -276,18 +291,26 @@ impl MentatApp {
             return;
         }
 
-        // [SEC-F001] Fail-Closed Egress Consent Workflow (Non-blocking async assembly)
+        // [SEC-F001 & SEC-F002] Fail-Closed Egress Consent Workflow with User Exclusions
         let files = self.files.clone();
         let sum = summary.clone();
         let s = session.clone();
         let q = query.clone();
+        let exclusions = self.user_excluded_files.clone();
 
         let (tx, rx) = std::sync::mpsc::channel();
         self.egress_packet_rx = Some(rx);
         self.pending_query = Some(query);
 
         self.rt.spawn(async move {
-            let packet = EgressFilter::assemble_packet(s.as_ref(), &files, &sum, &q).await;
+            let packet = EgressFilter::assemble_packet_with_user_exclusions(
+                s.as_ref(),
+                &files,
+                &sum,
+                &q,
+                &exclusions,
+            )
+            .await;
             let _ = tx.send(packet);
         });
     }
@@ -549,8 +572,37 @@ impl eframe::App for MentatApp {
                                 }
                             }
                             InferenceEvent::Completed { full_text } => {
-                                self.answer_preview = Some(full_text);
+                                self.answer_preview = Some(full_text.clone());
                                 self.status_text = "완료됨".to_string();
+
+                                // [IMP-F004] Normalize cloud response bullets into Inferred Claims
+                                for line in full_text.lines() {
+                                    let trimmed = line.trim();
+                                    if trimmed.starts_with('#')
+                                        || trimmed.starts_with('-')
+                                        || trimmed.starts_with('*')
+                                    {
+                                        let statement = trimmed
+                                            .trim_start_matches(|c: char| {
+                                                c == '#'
+                                                    || c == '-'
+                                                    || c == '*'
+                                                    || c.is_whitespace()
+                                            })
+                                            .to_string();
+                                        if statement.len() > 5 {
+                                            self.recent_claims.push(Claim {
+                                                id: uuid::Uuid::new_v4(),
+                                                classification: ClaimClassification::Inferred,
+                                                statement,
+                                                confidence: 0.85,
+                                                evidence_ids: vec![],
+                                                rationale: Some("AI 모델 추론 결과".to_string()),
+                                            });
+                                        }
+                                    }
+                                }
+
                                 finished = true;
                                 break;
                             }
@@ -588,7 +640,7 @@ impl eframe::App for MentatApp {
             }
         }
 
-        // Periodic file watcher check for STALE transitions
+        // Periodic file watcher check for STALE transitions (Throttled for DBG-F008)
         if let Some(ref mut watcher) = self.watcher {
             if let Ok(true) = watcher.check_for_changes() {
                 if let Some(ref mut snap) = self.snapshot {
@@ -680,6 +732,22 @@ impl eframe::App for MentatApp {
                 )
                 .show(ui);
 
+                // [IMP-F005] Quick Reopen of Recent Repositories
+                if !self.recent_repos.is_empty() {
+                    ui.separator();
+                    ui.label(RichText::new("📂 최근 저장소 다시 열기:").size(11.5).strong());
+                    let mut reopened_root = None;
+                    for repo in &self.recent_repos {
+                        if ui.button(format!("📁 {}", repo.display_name)).clicked() {
+                            reopened_root = Some(repo.root_path.clone());
+                        }
+                    }
+                    if let Some(root) = reopened_root {
+                        self.open_repository(root);
+                        self.settings_open = false;
+                    }
+                }
+
                 if settings_action.ping_clicked {
                     self.ping_backend();
                 }
@@ -694,6 +762,7 @@ impl eframe::App for MentatApp {
             // Render Egress Consent Sheet (if pending)
             let mut consent_granted = false;
             let mut consent_cancelled = false;
+            let mut exclusion_toggled = None;
 
             if let Some(ref packet) = self.pending_egress_packet {
                 ui.add_space(8.0);
@@ -709,21 +778,25 @@ impl eframe::App for MentatApp {
                         packet.packet_hash.chars().take(8).collect::<String>()
                     )).size(12.0));
 
-                    // SEC-F002: Exact file and line preview in consent sheet
-                    ui.collapsing("📄 포함될 파일 및 행 범위 미리보기", |ui| {
+                    // SEC-F002: Exact file preview with interactive user exclusion toggle
+                    ui.collapsing("📄 포함될 파일 및 행 범위 미리보기 (체크 해제 시 제외)", |ui| {
                         for ref_item in &packet.included_file_refs {
-                            ui.label(RichText::new(format!(
-                                " • {} (1..{}행, 총 {}행)",
+                            let mut is_included = !self.user_excluded_files.contains(&ref_item.relative_path);
+                            let label = format!(
+                                "{} (1..{}행, 총 {}행)",
                                 ref_item.relative_path.display(),
                                 ref_item.line_end,
                                 ref_item.line_count
-                            )).size(11.0).color(MentatTheme::TEXT_MUTED));
+                            );
+                            if ui.checkbox(&mut is_included, label).changed() {
+                                exclusion_toggled = Some((ref_item.relative_path.clone(), !is_included));
+                            }
                         }
                     });
 
                     if !packet.excluded_sensitive_files.is_empty() {
                         ui.label(RichText::new(format!(
-                            "🔒 자동 제외된 민감정보 파일: {}건 (.env, 인증서, 토큰 등)",
+                            "🔒 자동 제외된 파일: {}건 (.env, 인증서, 사용자 제외 파일 등)",
                             packet.excluded_sensitive_files.len()
                         )).color(MentatTheme::STATUS_READ_ONLY).size(11.5));
                     }
@@ -745,6 +818,20 @@ impl eframe::App for MentatApp {
                         }
                     });
                 });
+            }
+
+            // Handle user file exclusion toggle in Consent Sheet
+            if let Some((path, exclude)) = exclusion_toggled {
+                if exclude {
+                    if !self.user_excluded_files.contains(&path) {
+                        self.user_excluded_files.push(path);
+                    }
+                } else {
+                    self.user_excluded_files.retain(|p| p != &path);
+                }
+                if let Some(ref q) = self.pending_query.clone() {
+                    self.handle_query(ctx, q.clone());
+                }
             }
 
             if consent_granted {

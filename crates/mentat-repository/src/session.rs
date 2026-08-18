@@ -75,12 +75,15 @@ impl ReadOnlySession {
         Ok(canonical_path)
     }
 
-    /// [DBG-F002] Constructs snapshot directly from already-scanned file records (Single-Scan)
+    /// [DBG-F002] Constructs deterministic snapshot directly from already-scanned file records (Single-Scan)
     pub fn create_snapshot_from_files(&self, files: &[FileRecord]) -> RepositorySnapshot {
+        let mut sorted_files = files.to_vec();
+        sorted_files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+
         let mut hasher = Sha256::new();
         let mut total_bytes = 0;
 
-        for file in files {
+        for file in &sorted_files {
             hasher.update(file.relative_path.to_string_lossy().as_bytes());
             hasher.update(file.content_hash.as_bytes());
             total_bytes += file.size_bytes;

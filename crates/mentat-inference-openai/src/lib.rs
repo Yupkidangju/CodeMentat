@@ -145,4 +145,17 @@ mod tests {
             Ok(_) => panic!("Expected Err(MentatError::Cancelled), got Ok(_)"),
         }
     }
+
+    #[tokio::test]
+    async fn test_adapter_invalid_url_health_check_fail_closed() {
+        let adapter = MultiProviderAdapter::default();
+        let profile = BackendProfile {
+            api_key: Some("test_key".to_string()),
+            base_url: "http://localhost.evil.com/v1".to_string(),
+            ..Default::default()
+        };
+
+        let status = adapter.health_check(&profile).await;
+        assert!(status.is_err());
+    }
 }
