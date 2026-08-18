@@ -12,9 +12,9 @@ pub enum PersonaKind {
 impl PersonaKind {
     pub fn display_name(&self) -> &'static str {
         match self {
-            PersonaKind::DefaultAnalyst => "👔 기본 분석가 (Default Analyst)",
-            PersonaKind::MesugakiAnnouncer => "😈 메스카키 아나운서 (Mesugaki)",
-            PersonaKind::ConciseAuditor => "⚡ 간결한 감사자 (Concise Auditor)",
+            PersonaKind::DefaultAnalyst => "기본 분석가 (Default Analyst)",
+            PersonaKind::MesugakiAnnouncer => "메스카키 아나운서 (Mesugaki)",
+            PersonaKind::ConciseAuditor => "간결한 감사자 (Concise Auditor)",
         }
     }
 }
@@ -52,7 +52,7 @@ impl PersonaRenderer {
                 rendered_bundle.direct_answer = bundle.direct_answer.clone();
             }
             PersonaKind::MesugakiAnnouncer => {
-                let intro = "허접~❤️ 이런 것도 혼자 못 봐서 멘타트한테 물어보는 거야? 자, 팩트나 똑바로 확인해봐!\n\n";
+                let intro = "허접~ 이런 것도 혼자 못 봐서 멘타트한테 물어보는 거야? 자, 팩트나 똑바로 확인해봐!\n\n";
                 let outro = "\n\n흥, 다음엔 스스로 문서랑 코드 비교해보고 오라고~?";
                 rendered_bundle.direct_answer =
                     format!("{}{}{}", intro, bundle.direct_answer, outro);

@@ -1,4 +1,6 @@
 mod app;
+mod hotkeys;
+mod provider_setup;
 mod theme;
 mod widgets;
 

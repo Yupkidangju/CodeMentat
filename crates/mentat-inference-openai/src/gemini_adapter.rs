@@ -2,7 +2,10 @@ use async_stream::stream;
 use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
 use mentat_core::error::MentatError;
-use mentat_inference::{BackendProfile, HealthStatus, InferenceEvent, InferenceRequest};
+use mentat_inference::{
+    AvailableModel, BackendProfile, HealthStatus, InferenceEvent, InferenceRequest, ModelCatalog,
+    ModelVerification,
+};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use serde_json::json;
 use std::time::{Duration, Instant};
@@ -13,9 +16,48 @@ pub struct GeminiAdapter {
 }
 
 impl GeminiAdapter {
+    async fn parse_bounded_json(
+        response: reqwest::Response,
+        limit: usize,
+        too_large_code: &str,
+        read_error_code: &str,
+        invalid_json_code: &str,
+    ) -> Result<serde_json::Value, MentatError> {
+        if response
+            .content_length()
+            .is_some_and(|length| length > limit as u64)
+        {
+            return Err(MentatError::BackendError {
+                code: too_large_code.to_string(),
+                message: format!("응답이 {limit}바이트 제한을 초과했습니다."),
+            });
+        }
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| MentatError::BackendError {
+                code: read_error_code.to_string(),
+                message: e.to_string(),
+            })?;
+            if body.len().saturating_add(chunk.len()) > limit {
+                return Err(MentatError::BackendError {
+                    code: too_large_code.to_string(),
+                    message: format!("응답이 {limit}바이트 제한을 초과했습니다."),
+                });
+            }
+            body.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&body).map_err(|e| MentatError::BackendError {
+            code: invalid_json_code.to_string(),
+            message: e.to_string(),
+        })
+    }
+
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::builder()
+                // Gemini 자격 증명은 custom header이므로 redirect를 자동 추적하지 않는다.
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
         }
@@ -29,6 +71,160 @@ impl Default for GeminiAdapter {
 }
 
 impl GeminiAdapter {
+    fn api_key_header(profile: &BackendProfile) -> Result<HeaderMap, MentatError> {
+        let api_key = profile.api_key.as_deref().unwrap_or("");
+        if api_key.is_empty() {
+            return Err(MentatError::BackendError {
+                code: "MISSING_GEMINI_KEY".to_string(),
+                message: "Gemini API 키가 비어 있습니다.".to_string(),
+            });
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-goog-api-key"),
+            HeaderValue::from_str(api_key).map_err(|e| MentatError::BackendError {
+                code: "INVALID_HEADER".to_string(),
+                message: e.to_string(),
+            })?,
+        );
+        Ok(headers)
+    }
+
+    pub async fn discover_models(
+        &self,
+        profile: &BackendProfile,
+    ) -> Result<ModelCatalog, MentatError> {
+        profile.validate_url()?;
+        let start = Instant::now();
+        let url = format!("{}/v1beta/models", profile.base_url.trim_end_matches('/'));
+        let response = self
+            .client
+            .get(url)
+            .headers(Self::api_key_header(profile)?)
+            .timeout(Duration::from_secs(profile.timeout_secs.clamp(5, 300)))
+            .send()
+            .await
+            .map_err(|e| MentatError::BackendError {
+                code: "MODEL_DISCOVERY_NETWORK_ERROR".to_string(),
+                message: e.to_string(),
+            })?;
+        if !response.status().is_success() {
+            return Err(MentatError::BackendError {
+                code: format!("MODEL_DISCOVERY_HTTP_{}", response.status().as_u16()),
+                message: "Gemini 모델 목록 요청이 거부되었습니다.".to_string(),
+            });
+        }
+        let value = Self::parse_bounded_json(
+            response,
+            4 * 1024 * 1024,
+            "MODEL_DISCOVERY_RESPONSE_TOO_LARGE",
+            "MODEL_DISCOVERY_READ_ERROR",
+            "MODEL_DISCOVERY_INVALID_JSON",
+        )
+        .await?;
+        let models = value
+            .get("models")
+            .and_then(|models| models.as_array())
+            .ok_or_else(|| MentatError::BackendError {
+                code: "MODEL_DISCOVERY_INVALID_SCHEMA".to_string(),
+                message: "Gemini 응답에 models 배열이 없습니다.".to_string(),
+            })?
+            .iter()
+            .filter(|item| {
+                item.get("supportedGenerationMethods")
+                    .and_then(|methods| methods.as_array())
+                    .is_some_and(|methods| {
+                        methods
+                            .iter()
+                            .any(|method| method.as_str() == Some("generateContent"))
+                    })
+            })
+            .filter_map(|item| {
+                let id = item
+                    .get("baseModelId")
+                    .and_then(|id| id.as_str())
+                    .or_else(|| item.get("name").and_then(|id| id.as_str()))?
+                    .trim_start_matches("models/");
+                let display = item
+                    .get("displayName")
+                    .and_then(|name| name.as_str())
+                    .unwrap_or(id);
+                Some(AvailableModel::new(id, display))
+            })
+            .collect();
+        let catalog =
+            ModelCatalog::from_untrusted(models).with_latency(start.elapsed().as_millis() as u64);
+        if catalog.models.is_empty() {
+            return Err(MentatError::BackendError {
+                code: "MODEL_DISCOVERY_EMPTY".to_string(),
+                message: "generateContent를 지원하는 Gemini 모델이 없습니다.".to_string(),
+            });
+        }
+        Ok(catalog)
+    }
+
+    pub async fn verify_model(
+        &self,
+        profile: &BackendProfile,
+    ) -> Result<ModelVerification, MentatError> {
+        profile.validate_url()?;
+        let model = profile.model.trim().trim_start_matches("models/");
+        if model.is_empty() {
+            return Err(MentatError::BackendError {
+                code: "MODEL_NOT_SELECTED".to_string(),
+                message: "검증할 Gemini 모델을 선택해야 합니다.".to_string(),
+            });
+        }
+        let start = Instant::now();
+        let url = format!(
+            "{}/v1beta/models/{}:generateContent",
+            profile.base_url.trim_end_matches('/'),
+            model
+        );
+        let response = self
+            .client
+            .post(url)
+            .headers(Self::api_key_header(profile)?)
+            .timeout(Duration::from_secs(profile.timeout_secs.clamp(5, 300)))
+            .json(&json!({
+                "contents": [{"parts": [{"text": "Reply with OK."}]}],
+                "generationConfig": {"maxOutputTokens": 1}
+            }))
+            .send()
+            .await
+            .map_err(|e| MentatError::BackendError {
+                code: "MODEL_VERIFY_NETWORK_ERROR".to_string(),
+                message: e.to_string(),
+            })?;
+        if !response.status().is_success() {
+            return Err(MentatError::BackendError {
+                code: format!("MODEL_VERIFY_HTTP_{}", response.status().as_u16()),
+                message: "선택 Gemini 모델의 생성 요청이 거부되었습니다.".to_string(),
+            });
+        }
+        let value = Self::parse_bounded_json(
+            response,
+            1024 * 1024,
+            "MODEL_VERIFY_RESPONSE_TOO_LARGE",
+            "MODEL_VERIFY_READ_ERROR",
+            "MODEL_VERIFY_INVALID_JSON",
+        )
+        .await?;
+        let compatible = value
+            .pointer("/candidates/0/content/parts/0/text")
+            .and_then(|text| text.as_str())
+            .is_some_and(|text| !text.trim().is_empty());
+        Ok(ModelVerification {
+            compatible,
+            message: if compatible {
+                "선택 Gemini 모델이 생성 요청에 정상 응답했습니다.".to_string()
+            } else {
+                "Gemini 응답에 텍스트 생성 결과가 없습니다.".to_string()
+            },
+            latency_ms: Some(start.elapsed().as_millis() as u64),
+        })
+    }
+
     pub async fn health_check(
         &self,
         profile: &BackendProfile,
@@ -102,14 +298,17 @@ impl GeminiAdapter {
             });
         }
 
+        if profile.model.trim().is_empty() {
+            return Err(MentatError::BackendError {
+                code: "MODEL_NOT_SELECTED".to_string(),
+                message: "검증되어 활성화된 Gemini 모델이 없습니다.".to_string(),
+            });
+        }
+
         profile.validate_url()?;
 
         let base = profile.base_url.trim_end_matches('/');
-        let model = if profile.model.is_empty() {
-            "gemini-2.5-flash"
-        } else {
-            &profile.model
-        };
+        let model = profile.model.trim().trim_start_matches("models/");
 
         // SEC-F004: Pass API key via x-goog-api-key header instead of URL parameter
         let endpoint = format!(

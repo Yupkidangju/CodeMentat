@@ -15,6 +15,7 @@ use uuid::Uuid;
 pub const MAX_SCAN_FILES_LIMIT: usize = 100_000;
 pub const MAX_SCAN_TOTAL_BYTES_LIMIT: u64 = 2 * 1024 * 1024 * 1024; // 2GiB
 pub const MAX_SINGLE_FILE_BYTES: u64 = 10 * 1024 * 1024; // 10MB
+pub const MAX_SCAN_PREVIEW_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ScanLimits {
@@ -52,6 +53,12 @@ pub struct ScanOutcome {
     pub files: Vec<FileRecord>,
     pub omissions: Vec<ScanOmission>,
     pub cancelled: bool,
+}
+
+impl ScanOutcome {
+    pub fn is_complete(&self) -> bool {
+        !self.cancelled && self.omissions.is_empty()
+    }
 }
 
 pub struct ReadOnlySession {
@@ -149,6 +156,14 @@ impl ReadOnlySession {
         }
     }
 
+    pub fn create_snapshot_from_outcome(&self, outcome: &ScanOutcome) -> RepositorySnapshot {
+        let mut snapshot = self.create_snapshot_from_files(&outcome.files);
+        if !outcome.is_complete() {
+            snapshot.status = SnapshotStatus::Incomplete;
+        }
+        snapshot
+    }
+
     /// [DBG-F003] Cancellable scan with explicit omission reasons and metadata preflight.
     pub async fn scan_files_with_limits(
         &self,
@@ -171,6 +186,7 @@ fn scan_tree(
     let mut omissions = Vec::new();
     let mut accumulated_bytes = 0u64;
     let mut cancelled = false;
+    let mut preview_bytes = 0usize;
 
     let walker = WalkBuilder::new(&root)
         .hidden(false)
@@ -233,7 +249,14 @@ fn scan_tree(
             continue;
         }
 
-        if let Ok(record) = FileScanner::inspect_file(&root, &rel_path) {
+        if let Ok(mut record) = FileScanner::inspect_file(&root, &rel_path) {
+            if let Some(preview) = record.text_preview.as_ref() {
+                if preview_bytes.saturating_add(preview.len()) <= MAX_SCAN_PREVIEW_BYTES {
+                    preview_bytes += preview.len();
+                } else {
+                    record.text_preview = None;
+                }
+            }
             accumulated_bytes += record.size_bytes;
             records.push(record);
         }

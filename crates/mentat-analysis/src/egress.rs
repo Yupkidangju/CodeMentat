@@ -41,6 +41,171 @@ pub struct EgressPacket {
     pub included_file_texts: HashMap<PathBuf, String>,
 }
 
+impl EgressPacket {
+    fn update_field(hasher: &mut Sha256, name: &str, value: &[u8]) {
+        hasher.update((name.len() as u64).to_be_bytes());
+        hasher.update(name.as_bytes());
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value);
+    }
+
+    fn provider_name(provider: &mentat_inference::ProviderKind) -> &'static str {
+        use mentat_inference::ProviderKind;
+        match provider {
+            ProviderKind::GoogleGemini => "GoogleGemini",
+            ProviderKind::OpenRouter => "OpenRouter",
+            ProviderKind::OpenAi => "OpenAi",
+            ProviderKind::OpenAICompatible => "OpenAICompatible",
+            ProviderKind::CustomCompatible => "CustomCompatible",
+            ProviderKind::LocalMock => "LocalMock",
+        }
+    }
+
+    /// 승인 UI와 실제 outbound/citation 판정에 영향을 주는 모든 값을 하나의 digest로 결속한다.
+    pub fn canonical_digest(&self, profile: &BackendProfile) -> String {
+        let mut hasher = Sha256::new();
+        Self::update_field(&mut hasher, "seal_version", b"code-mentat-egress-v1");
+        Self::update_field(&mut hasher, "packet_id", self.packet_id.as_bytes());
+        Self::update_field(&mut hasher, "snapshot_id", self.snapshot_id.as_bytes());
+        Self::update_field(
+            &mut hasher,
+            "prompt_context",
+            self.prompt_context.as_bytes(),
+        );
+        Self::update_field(
+            &mut hasher,
+            "redacted_user_question",
+            self.redacted_user_question.as_bytes(),
+        );
+        Self::update_field(
+            &mut hasher,
+            "redacted_secret_occurrences",
+            &(self.redacted_secret_occurrences as u64).to_be_bytes(),
+        );
+        Self::update_field(
+            &mut hasher,
+            "estimated_tokens",
+            &(self.estimated_tokens as u64).to_be_bytes(),
+        );
+
+        let mut included_files: Vec<_> = self
+            .included_files
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        included_files.sort();
+        for path in included_files {
+            Self::update_field(&mut hasher, "included_file", path.as_bytes());
+        }
+
+        let mut excluded_files: Vec<_> = self
+            .excluded_sensitive_files
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        excluded_files.sort();
+        for path in excluded_files {
+            Self::update_field(&mut hasher, "excluded_file", path.as_bytes());
+        }
+
+        let mut refs = self.included_file_refs.clone();
+        refs.sort_by(|left, right| {
+            left.relative_path
+                .cmp(&right.relative_path)
+                .then(left.line_start.cmp(&right.line_start))
+                .then(left.line_end.cmp(&right.line_end))
+                .then(left.line_count.cmp(&right.line_count))
+        });
+        for reference in refs {
+            Self::update_field(
+                &mut hasher,
+                "ref_path",
+                reference.relative_path.to_string_lossy().as_bytes(),
+            );
+            Self::update_field(
+                &mut hasher,
+                "ref_line_start",
+                &(reference.line_start as u64).to_be_bytes(),
+            );
+            Self::update_field(
+                &mut hasher,
+                "ref_line_end",
+                &(reference.line_end as u64).to_be_bytes(),
+            );
+            Self::update_field(
+                &mut hasher,
+                "ref_line_count",
+                &(reference.line_count as u64).to_be_bytes(),
+            );
+        }
+
+        let mut validation_texts: Vec<_> = self.included_file_texts.iter().collect();
+        validation_texts.sort_by_key(|(path, _)| *path);
+        for (path, text) in validation_texts {
+            let text_digest = Sha256::digest(text.as_bytes());
+            Self::update_field(
+                &mut hasher,
+                "validation_path",
+                path.to_string_lossy().as_bytes(),
+            );
+            Self::update_field(&mut hasher, "validation_text_sha256", &text_digest);
+        }
+
+        Self::update_field(&mut hasher, "profile_id", profile.id.as_bytes());
+        Self::update_field(
+            &mut hasher,
+            "provider",
+            Self::provider_name(&profile.provider).as_bytes(),
+        );
+        Self::update_field(
+            &mut hasher,
+            "base_url",
+            profile.base_url.trim_end_matches('/').as_bytes(),
+        );
+        Self::update_field(&mut hasher, "model", profile.model.as_bytes());
+        Self::update_field(
+            &mut hasher,
+            "timeout_secs",
+            &profile.timeout_secs.to_be_bytes(),
+        );
+        format!("{:x}", hasher.finalize())
+    }
+
+    pub fn seal_for_profile(&mut self, profile: &BackendProfile) {
+        self.packet_hash = self.canonical_digest(profile);
+    }
+
+    fn has_consistent_validation_sources(&self) -> bool {
+        let mut files = self.included_files.clone();
+        files.sort();
+        files.dedup();
+        let mut ref_paths: Vec<_> = self
+            .included_file_refs
+            .iter()
+            .map(|reference| reference.relative_path.clone())
+            .collect();
+        ref_paths.sort();
+        ref_paths.dedup();
+        let mut text_paths: Vec<_> = self.included_file_texts.keys().cloned().collect();
+        text_paths.sort();
+        text_paths.dedup();
+        files == ref_paths && files == text_paths
+    }
+}
+
+impl EgressReceipt {
+    pub fn issue(packet: &EgressPacket, profile: &BackendProfile) -> Self {
+        Self {
+            receipt_id: Uuid::new_v4(),
+            packet_hash: packet.canonical_digest(profile),
+            snapshot_id: packet.snapshot_id,
+            token_count: packet.estimated_tokens,
+            file_count: packet.included_files.len(),
+            granted_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+}
+
 /// [SEC-F001] Cryptographically sealed and consume-once approved request
 #[derive(Debug)]
 pub struct ApprovedInferenceRequest {
@@ -60,16 +225,25 @@ impl ApprovedInferenceRequest {
         snapshot_id: Uuid,
         approved_profile: BackendProfile,
     ) -> Result<Self, MentatError> {
-        let user_question = if packet.redacted_user_question.is_empty() {
-            EgressFilter::scan_and_redact_secrets(&user_question).0
-        } else {
-            packet.redacted_user_question.clone()
-        };
+        let redacted_question = EgressFilter::scan_and_redact_secrets(&user_question).0;
+        if redacted_question != packet.redacted_user_question {
+            return Err(MentatError::EgressViolation(
+                "승인된 질문과 EgressPacket 질문이 일치하지 않습니다.".to_string(),
+            ));
+        }
+        if packet.snapshot_id != snapshot_id || receipt.snapshot_id != packet.snapshot_id {
+            return Err(MentatError::EgressViolation(
+                "승인 receipt, packet, 현재 snapshot ID가 일치하지 않습니다.".to_string(),
+            ));
+        }
+        if !packet.has_consistent_validation_sources() {
+            return Err(MentatError::EgressViolation(
+                "포함 파일, 행 참조, citation validation text 집합이 일치하지 않습니다."
+                    .to_string(),
+            ));
+        }
 
-        // [SEC-F001] Re-hash actual prompt_context bytes directly to prevent in-memory tampering
-        let mut context_hasher = Sha256::new();
-        context_hasher.update(packet.prompt_context.as_bytes());
-        let computed_packet_hash = format!("{:x}", context_hasher.finalize());
+        let computed_packet_hash = packet.canonical_digest(&approved_profile);
 
         if computed_packet_hash != packet.packet_hash {
             return Err(MentatError::EgressViolation(
@@ -82,12 +256,6 @@ impl ApprovedInferenceRequest {
             return Err(MentatError::EgressViolation(
                 "EgressReceipt의 패킷 해시와 EgressPacket의 실제 해시가 일치하지 않습니다."
                     .to_string(),
-            ));
-        }
-
-        if receipt.snapshot_id != snapshot_id {
-            return Err(MentatError::EgressViolation(
-                "EgressReceipt의 스냅샷 ID와 현재 스냅샷 ID가 일치하지 않습니다.".to_string(),
             ));
         }
 
@@ -104,56 +272,28 @@ impl ApprovedInferenceRequest {
             ));
         }
 
-        let approved_digest = Self::calculate_digest_internal(
-            &computed_packet_hash,
-            &snapshot_id,
-            &approved_profile.provider,
-            &approved_profile.model,
-            &user_question,
-        );
+        let approved_digest = computed_packet_hash;
 
         Ok(Self {
             receipt,
             packet,
-            user_question,
+            user_question: redacted_question,
             snapshot_id,
             approved_profile,
             approved_digest,
         })
     }
 
-    fn calculate_digest_internal(
-        packet_hash: &str,
-        snapshot_id: &Uuid,
-        provider: &mentat_inference::ProviderKind,
-        model_name: &str,
-        user_question: &str,
-    ) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(packet_hash.as_bytes());
-        hasher.update(snapshot_id.as_bytes());
-        hasher.update(format!("{:?}", provider).as_bytes());
-        hasher.update(model_name.as_bytes());
-        hasher.update(user_question.as_bytes());
-        format!("{:x}", hasher.finalize())
-    }
-
     pub fn verify_integrity(&self) -> bool {
-        let mut context_hasher = Sha256::new();
-        context_hasher.update(self.packet.prompt_context.as_bytes());
-        let computed_packet_hash = format!("{:x}", context_hasher.finalize());
+        let computed_packet_hash = self.packet.canonical_digest(&self.approved_profile);
 
-        let expected_digest = Self::calculate_digest_internal(
-            &computed_packet_hash,
-            &self.snapshot_id,
-            &self.approved_profile.provider,
-            &self.approved_profile.model,
-            &self.user_question,
-        );
-
-        self.approved_digest == expected_digest
+        self.approved_digest == computed_packet_hash
             && self.receipt.packet_hash == computed_packet_hash
             && self.packet.packet_hash == computed_packet_hash
+            && self.packet.snapshot_id == self.snapshot_id
+            && self.receipt.snapshot_id == self.snapshot_id
+            && self.packet.redacted_user_question == self.user_question
+            && self.packet.has_consistent_validation_sources()
     }
 
     pub fn citation_file_texts(&self) -> &HashMap<PathBuf, String> {
@@ -632,6 +772,7 @@ impl EgressFilter {
         summary: &ProjectStructureSummary,
         user_question: &str,
         snapshot_id: Uuid,
+        profile: &BackendProfile,
     ) -> Result<EgressPacket, MentatError> {
         Self::assemble_packet_with_user_exclusions(
             reader,
@@ -640,6 +781,7 @@ impl EgressFilter {
             user_question,
             &[],
             snapshot_id,
+            profile,
         )
         .await
     }
@@ -652,6 +794,7 @@ impl EgressFilter {
         user_question: &str,
         user_excluded_files: &[std::path::PathBuf],
         snapshot_id: Uuid,
+        profile: &BackendProfile,
     ) -> Result<EgressPacket, MentatError> {
         let mut included_files = Vec::new();
         let mut included_file_refs = Vec::new();
@@ -776,14 +919,9 @@ impl EgressFilter {
         // Question lives only in redacted_user_question; not duplicated here.
         let estimated_tokens = (context_buffer.len() + redacted_user_question.len()).div_ceil(4);
 
-        // Cryptographic Hash of the Exact Packet
-        let mut hasher = Sha256::new();
-        hasher.update(context_buffer.as_bytes());
-        let packet_hash = format!("{:x}", hasher.finalize());
-
-        Ok(EgressPacket {
+        let mut packet = EgressPacket {
             packet_id: Uuid::new_v4(),
-            packet_hash,
+            packet_hash: String::new(),
             included_files,
             included_file_refs,
             excluded_sensitive_files,
@@ -793,7 +931,9 @@ impl EgressFilter {
             snapshot_id,
             redacted_user_question,
             included_file_texts,
-        })
+        };
+        packet.seal_for_profile(profile);
+        Ok(packet)
     }
 }
 
@@ -962,13 +1102,21 @@ pub mod tests {
     fn test_approved_inference_request_binding_integrity_and_consume_once() {
         let snap_id = Uuid::new_v4();
         let prompt_context = "context content here".to_string();
-        let mut hasher = Sha256::new();
-        hasher.update(prompt_context.as_bytes());
-        let exact_hash = format!("{:x}", hasher.finalize());
-
-        let packet = EgressPacket {
+        let question = EgressFilter::scan_and_redact_secrets("Explain structure").0;
+        let profile = BackendProfile {
+            id: Uuid::new_v4(),
+            name: "Gemini Test".to_string(),
+            provider: ProviderKind::GoogleGemini,
+            base_url: ProviderKind::GoogleGemini.default_base_url().to_string(),
+            model: "fixture-gemini".to_string(),
+            api_key: Some("dummy".to_string()),
+            timeout_secs: 30,
+        };
+        let mut validation_texts = HashMap::new();
+        validation_texts.insert(PathBuf::from("Cargo.toml"), "[workspace]".to_string());
+        let mut packet = EgressPacket {
             packet_id: Uuid::new_v4(),
-            packet_hash: exact_hash.clone(),
+            packet_hash: String::new(),
             included_files: vec![PathBuf::from("Cargo.toml")],
             included_file_refs: vec![IncludedFileRef {
                 relative_path: PathBuf::from("Cargo.toml"),
@@ -981,33 +1129,16 @@ pub mod tests {
             estimated_tokens: 5,
             prompt_context: prompt_context.clone(),
             snapshot_id: snap_id,
-            redacted_user_question: "Explain structure".to_string(),
-            included_file_texts: HashMap::new(),
+            redacted_user_question: question.clone(),
+            included_file_texts: validation_texts,
         };
-
-        let receipt = EgressReceipt {
-            receipt_id: Uuid::new_v4(),
-            packet_hash: exact_hash,
-            snapshot_id: snap_id,
-            token_count: 5,
-            file_count: 1,
-            granted_at: chrono::Utc::now().to_rfc3339(),
-        };
-
-        let profile = BackendProfile {
-            id: Uuid::new_v4(),
-            name: "Gemini Test".to_string(),
-            provider: ProviderKind::GoogleGemini,
-            base_url: ProviderKind::GoogleGemini.default_base_url().to_string(),
-            model: "gemini-2.5-flash".to_string(),
-            api_key: Some("dummy".to_string()),
-            timeout_secs: 30,
-        };
+        packet.seal_for_profile(&profile);
+        let receipt = EgressReceipt::issue(&packet, &profile);
 
         let approved = ApprovedInferenceRequest::new(
             receipt.clone(),
             packet.clone(),
-            "Explain structure".to_string(),
+            question.clone(),
             snap_id,
             profile.clone(),
         )
@@ -1019,21 +1150,47 @@ pub mod tests {
         let inference_req = approved
             .into_inference_request()
             .expect("Should consume approved request");
-        assert_eq!(inference_req.user_question, "Explain structure");
+        assert_eq!(inference_req.user_question, question);
         assert_eq!(inference_req.prompt_context, prompt_context);
-        assert_eq!(inference_req.profile.model, "gemini-2.5-flash");
+        assert_eq!(inference_req.profile.model, "fixture-gemini");
 
-        // Tampered prompt context in packet must fail constructor
-        let mut tampered_packet = packet;
-        tampered_packet.prompt_context = "tampered content".to_string();
-        let err = ApprovedInferenceRequest::new(
-            receipt,
-            tampered_packet,
-            "Explain structure".to_string(),
-            snap_id,
-            profile,
-        );
-        assert!(err.is_err());
+        let assert_tamper_rejected =
+            |packet: EgressPacket, profile: BackendProfile, question: &str, snapshot_id: Uuid| {
+                assert!(ApprovedInferenceRequest::new(
+                    receipt.clone(),
+                    packet,
+                    question.to_string(),
+                    snapshot_id,
+                    profile,
+                )
+                .is_err());
+            };
+
+        let mut question_swap = packet.clone();
+        question_swap.redacted_user_question = "Explain structurE".to_string();
+        assert_tamper_rejected(question_swap, profile.clone(), &question, snap_id);
+
+        let mut validation_swap = packet.clone();
+        validation_swap
+            .included_file_texts
+            .insert(PathBuf::from("Cargo.toml"), "[package]".to_string());
+        assert_tamper_rejected(validation_swap, profile.clone(), &question, snap_id);
+
+        let mut snapshot_swap = packet.clone();
+        snapshot_swap.snapshot_id = Uuid::new_v4();
+        assert_tamper_rejected(snapshot_swap, profile.clone(), &question, snap_id);
+
+        let mut ref_swap = packet.clone();
+        ref_swap.included_file_refs[0].line_end = 19;
+        assert_tamper_rejected(ref_swap, profile.clone(), &question, snap_id);
+
+        let mut endpoint_swap = profile.clone();
+        endpoint_swap.base_url = "https://example.invalid".to_string();
+        assert_tamper_rejected(packet.clone(), endpoint_swap, &question, snap_id);
+
+        let mut model_swap = profile;
+        model_swap.model = "other-model".to_string();
+        assert_tamper_rejected(packet, model_swap, &question, snap_id);
     }
 
     #[test]
@@ -1187,6 +1344,7 @@ pub mod tests {
             &summary,
             "authentication middleware",
             Uuid::new_v4(),
+            &BackendProfile::default(),
         )
         .await
         .unwrap();

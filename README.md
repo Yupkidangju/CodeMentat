@@ -11,16 +11,19 @@ Code Mentat는 로컬 소프트웨어 저장소(Repository)를 **완전한 읽�
 ## 🌟 주요 특징 (Key Features)
 
 1. **컴팩트 스마트 알약 위젯 (3-Tier Progressive Disclosure)**
-   - **Tier 1 (Smart Pill, 580×52):** 개발자 화면을 가리지 않고 상단/모서리에 상주하는 초슬림 검색 바 (가능하면 `Alt+Space` / `Ctrl+Alt+M`으로 표시·숨김)
+   - **Tier 1 (Smart Pill, 580×52):** 개발자 화면을 가리지 않고 상단/모서리에 상주하는 초슬림 검색 바 (`Alt+Space` / `Ctrl+Alt+M`은 전역 표시·포커스 및 안전 접기)
    - **Tier 2 (Smart Card):** 질문 시 스트리밍 답변과 핵심 주장 태그(`[OBSERVED]`, `[INFERRED]`, `[CONFLICT]`)를 요약 노출
    - **Tier 3 (Detailed Inspector):** 클릭 시 펼쳐지는 실제 소스코드 행 번호 뷰어 및 관련 파일 트리
 2. **엄격한 읽기 전용 불변조건 (Strict Read-Only Guarantee)**
    - 저장소 파일을 수정하거나 셸/빌드/Git 변경 명령을 실행하지 않습니다.
    - 상위 경로 탈출 및 악성 프롬프트 인젝션 텍스트는 순수 데이터로만 안전하게 격리됩니다.
 3. **다중 AI 프로바이더 지원 (Multi-Provider Support)**
-   - **Google Gemini (AI Studio):** `gemini-2.5-flash`, `gemini-2.5-pro` 실시간 REST/SSE 스트리밍
-   - **OpenRouter:** Claude 3.7 Sonnet, DeepSeek R1, LLaMA 3.3 등 다양한 모델 연동
-   - **OpenAI & Local Compatible:** `gpt-4o`, `gpt-4o-mini` 또는 로컬 vLLM/Ollama
+   - **Google Gemini (AI Studio):** 계정에 활성화된 생성 모델의 REST/SSE 스트리밍
+   - **OpenRouter:** 현재 API 키로 접근 가능한 멀티 모델 카탈로그 연동
+   - **OpenAI & Local Compatible:** OpenAI 공식 API와 호환 서버 또는 내장 로컬 런타임
+   - 모델 ID는 코드 프리셋이 아니라 현재 API 키/로컬 런타임이 반환한 목록에서 동적으로 선택합니다.
+   - `API 확인 및 모델 불러오기 → 선택 모델 호환성 확인 → 활성화`를 통과한 동일 프로필만 프로그램 AI로 사용합니다.
+   - 내장 로컬은 항상 선택 가능하지만 실행 엔진 또는 설치 모델이 없으면 이유를 표시하고 활성화를 차단합니다.
 4. **오프라인 로컬 분석 워크플로 (Offline Workflows)**
    - 외부 AI 없이도 `/onboard`, `/structure`, `/conflicts`, `/where` 명령으로 프로젝트 구조, 매니페스트, 권위 문서를 로컬에서 즉시 분석
 5. **페르소나 레이어 & 조용한 아나운서 (Persona & Quiet Announcer)**
@@ -36,7 +39,7 @@ Code Mentat는 로컬 소프트웨어 저장소(Repository)를 **완전한 읽�
 
 | 단축키 | 기능 |
 |---|---|
-| `Alt + Space` / `Ctrl + Alt + M` | 위젯 표시 / 숨김 토글 (OS 전역 등록, 실패 시 포커스된 창에서만) |
+| `Alt + Space` / `Ctrl + Alt + M` | OS 전역 표시·포커스 및 Tier 1 접기. self-unhide 불능을 막기 위해 창을 숨기지 않음 |
 | `/` 또는 `Ctrl + K` | 질문 입력창 포커스 |
 | `Esc` | 단계별 축소 (Inspector → Card → Pill), 스트리밍·인덱싱 취소 |
 | `Ctrl + P` | Always-on-Top 최상위 핀 고정 토글 |
@@ -57,6 +60,14 @@ cargo test --workspace
 # 컴팩트 위젯 애플리케이션 실행
 cargo run -p mentat-app
 ```
+
+### UI 문제 해결 / UI Troubleshooting / UI トラブルシューティング / UI 疑難排解 / UI 故障排除
+
+- **한국어:** 한글이 사각형으로 보이던 문제는 앱에 포함된 한글 폴백 글꼴로 해결됩니다. 설정·질문·증거 패널은 버튼 또는 `Enter` 입력에 맞춰 자동 확장됩니다.
+- **English:** The app embeds a Korean fallback font to prevent square glyphs. Settings, chat, and evidence panels resize the native window automatically.
+- **日本語:** 内蔵の韓国語フォールバックフォントにより文字化けを防ぎます。設定・チャット・証拠パネルは自動的にウィンドウを拡張します。
+- **繁體中文:** 應用程式內嵌韓文字型以避免方框字元；設定、對話與證據面板會自動調整視窗大小。
+- **简体中文:** 应用内置韩文字体以避免方框字符；设置、对话和证据面板会自动调整窗口大小。
 
 ---
 
@@ -80,4 +91,4 @@ crates/
 
 ## 📄 라이선스 (License)
 
-MIT OR Apache-2.0 License.
+MIT OR Apache-2.0 License. 내장 NanumGothic 글꼴은 `crates/mentat-app/assets/fonts/OFL-NanumGothic.txt`의 SIL Open Font License 1.1을 따릅니다.

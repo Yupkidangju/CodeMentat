@@ -1,6 +1,31 @@
 use crate::theme::MentatTheme;
 use egui::{vec2, Color32, RichText, Rounding, Stroke, Ui};
 
+pub const MIN_QUERY_WIDTH: f32 = 160.0;
+const TRAILING_CONTROLS_WIDTH: f32 = 170.0;
+const COMPACT_TRAILING_CONTROLS_WIDTH: f32 = 86.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PillLayout {
+    pub query_width: f32,
+    pub show_quick_chip: bool,
+}
+
+pub fn pill_layout(available_width: f32) -> PillLayout {
+    let show_quick_chip = available_width >= MIN_QUERY_WIDTH + TRAILING_CONTROLS_WIDTH;
+    let reserved_width = if show_quick_chip {
+        TRAILING_CONTROLS_WIDTH
+    } else {
+        COMPACT_TRAILING_CONTROLS_WIDTH
+    };
+    PillLayout {
+        query_width: (available_width - reserved_width)
+            .max(MIN_QUERY_WIDTH)
+            .min(available_width),
+        show_quick_chip,
+    }
+}
+
 pub struct PillBarAction {
     pub open_repo_clicked: bool,
     pub query_submitted: Option<String>,
@@ -66,8 +91,8 @@ impl<'a> PillBar<'a> {
 
             // Repo Selector Badge
             let repo_label = match self.repo_name {
-                Some(name) => format!("📁 {} ▾", name),
-                None => "📁 저장소 열기... ▾".to_string(),
+                Some(name) => format!("저장소: {} ▾", name),
+                None => "저장소 열기... ▾".to_string(),
             };
 
             let repo_btn = egui::Button::new(
@@ -91,7 +116,7 @@ impl<'a> PillBar<'a> {
             );
             ui.add(
                 egui::Button::new(
-                    RichText::new("🔒 R/O")
+                    RichText::new("R/O")
                         .color(if self.is_read_only {
                             MentatTheme::STATUS_READ_ONLY
                         } else {
@@ -107,8 +132,9 @@ impl<'a> PillBar<'a> {
             .on_hover_text(ro_tooltip);
 
             // Query Input Box
+            let pill_layout = pill_layout(ui.available_width());
             let input_resp = ui.add_sized(
-                vec2(ui.available_width() - 170.0, 26.0),
+                vec2(pill_layout.query_width, 26.0),
                 egui::TextEdit::singleline(self.query_text)
                     .hint_text(
                         RichText::new("저장소에 질문하기... (/ 커맨드)")
@@ -129,21 +155,23 @@ impl<'a> PillBar<'a> {
             }
 
             // Quick Chip (e.g. /onboard)
-            let chip_btn = egui::Button::new(
-                RichText::new("⚡/onboard")
-                    .color(MentatTheme::STATUS_INFERENCING)
-                    .size(11.0),
-            )
-            .fill(Color32::from_rgba_premultiplied(56, 189, 248, 20))
-            .stroke(Stroke::new(1.0, MentatTheme::STATUS_INFERENCING))
-            .rounding(Rounding::same(6.0));
+            if pill_layout.show_quick_chip {
+                let chip_btn = egui::Button::new(
+                    RichText::new("/onboard")
+                        .color(MentatTheme::STATUS_INFERENCING)
+                        .size(11.0),
+                )
+                .fill(Color32::from_rgba_premultiplied(56, 189, 248, 20))
+                .stroke(Stroke::new(1.0, MentatTheme::STATUS_INFERENCING))
+                .rounding(Rounding::same(6.0));
 
-            if ui.add(chip_btn).clicked() {
-                action.quick_chip_clicked = Some("/onboard".to_string());
+                if ui.add(chip_btn).clicked() {
+                    action.quick_chip_clicked = Some("/onboard".to_string());
+                }
             }
 
             // Always-on-top Pin Toggle
-            let pin_icon = if self.is_pinned { "📌" } else { "📍" };
+            let pin_icon = if self.is_pinned { "고정" } else { "해제" };
             let pin_btn = egui::Button::new(RichText::new(pin_icon).size(13.0))
                 .fill(if self.is_pinned {
                     Color32::from_rgb(45, 53, 66)
@@ -161,7 +189,7 @@ impl<'a> PillBar<'a> {
             }
 
             // Settings button
-            let settings_btn = egui::Button::new(RichText::new("⚙️").size(13.0))
+            let settings_btn = egui::Button::new(RichText::new("설정").size(11.5))
                 .fill(MentatTheme::BG_CARD)
                 .rounding(Rounding::same(6.0));
 
@@ -175,5 +203,18 @@ impl<'a> PillBar<'a> {
         });
 
         action
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_input_keeps_a_usable_minimum_width() {
+        assert_eq!(pill_layout(250.0).query_width, 164.0);
+        assert!(!pill_layout(250.0).show_quick_chip);
+        assert_eq!(pill_layout(430.0).query_width, 260.0);
+        assert!(pill_layout(430.0).show_quick_chip);
     }
 }

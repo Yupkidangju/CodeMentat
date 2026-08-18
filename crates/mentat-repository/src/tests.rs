@@ -252,7 +252,37 @@ async fn test_dbg_f003_mid_scan_cancel() {
             .omissions
             .iter()
             .any(|o| o.reason == ScanOmitReason::Cancelled));
+        let snapshot = session.create_snapshot_from_outcome(&outcome);
+        assert_eq!(
+            snapshot.status,
+            mentat_core::models::SnapshotStatus::Incomplete
+        );
     }
+}
+
+#[tokio::test]
+async fn test_dbg_f003_preview_memory_has_a_global_budget() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let text = "x".repeat(16 * 1024);
+    for i in 0..700 {
+        fs::write(root.join(format!("preview_{i}.rs")), &text).unwrap();
+    }
+
+    let session = ReadOnlySession::open(root).unwrap();
+    let outcome = session
+        .scan_files_with_limits(ScanLimits::default(), CancellationToken::new())
+        .await
+        .unwrap();
+    let preview_bytes: usize = outcome
+        .files
+        .iter()
+        .filter_map(|file| file.text_preview.as_ref())
+        .map(String::len)
+        .sum();
+
+    assert!(preview_bytes <= crate::session::MAX_SCAN_PREVIEW_BYTES);
+    assert!(outcome.files.iter().any(|file| file.text_preview.is_none()));
 }
 
 #[tokio::test]
@@ -294,13 +324,15 @@ fn test_dbg_f002_preserved_mtime_same_size_content_change() {
     let dir = tempdir().unwrap();
     let root = dir.path();
     let path = root.join("same.rs");
-    fs::write(&path, "aaaa").unwrap();
+    let mut original = vec![b'a'; 16 * 1024];
+    fs::write(&path, &original).unwrap();
     let original_mtime = fs::metadata(&path).unwrap().modified().unwrap();
 
     let mut watcher = crate::watcher::RepositoryWatcher::new(root);
     assert!(!watcher.force_content_check().unwrap());
 
-    fs::write(&path, "bbbb").unwrap();
+    original[12 * 1024..].fill(b'b');
+    fs::write(&path, &original).unwrap();
     let file = fs::File::options().write(true).open(&path).unwrap();
     file.set_modified(original_mtime).unwrap();
     drop(file);
@@ -313,6 +345,17 @@ fn test_dbg_f002_preserved_mtime_same_size_content_change() {
         watcher.force_content_check().unwrap(),
         "same-size content change with restored mtime must be STALE"
     );
+}
+
+#[test]
+fn test_dbg_f002_watcher_stop_latency_is_bounded() {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join("watch.rs"), "fn main() {}\n").unwrap();
+    let mut watcher = crate::watcher::RepositoryWatcher::new(dir.path());
+    watcher.spawn_background();
+    let start = std::time::Instant::now();
+    watcher.stop_background();
+    assert!(start.elapsed() < std::time::Duration::from_millis(250));
 }
 
 #[test]
@@ -358,26 +401,78 @@ fn test_dbg_f003_100k_2gib_benchmark_profile() {
 
     let dir = tempdir().unwrap();
     let root = dir.path();
+    let full_text_file_count = (MAX_SCAN_TOTAL_BYTES_LIMIT / MAX_SINGLE_FILE_BYTES) as usize;
+    let remaining_text_bytes = MAX_SCAN_TOTAL_BYTES_LIMIT % MAX_SINGLE_FILE_BYTES;
+    let text_chunk = vec![b'x'; MAX_SINGLE_FILE_BYTES as usize];
     for i in 0..100_000 {
         let sub = root.join(format!("b{}", i / 1000));
         let _ = fs::create_dir_all(&sub);
-        fs::write(sub.join(format!("{i}.rs")), b"//\n").unwrap();
+        let path = sub.join(format!("{i}.rs"));
+        if i < full_text_file_count {
+            fs::write(path, &text_chunk).unwrap();
+        } else if i == full_text_file_count && remaining_text_bytes > 0 {
+            fs::write(path, &text_chunk[..remaining_text_bytes as usize]).unwrap();
+        } else {
+            fs::File::create(path).unwrap();
+        }
     }
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let session = ReadOnlySession::open(root).unwrap();
         let start = std::time::Instant::now();
+        let peak_before = peak_working_set_bytes();
         let outcome = session
             .scan_files_with_limits(ScanLimits::default(), CancellationToken::new())
             .await
             .unwrap();
-        assert!(start.elapsed().as_secs() < 180);
         assert!(outcome.files.len() <= MAX_SCAN_FILES_LIMIT);
-        assert!(outcome
+        assert_eq!(
+            outcome.files.iter().map(|file| file.size_bytes).sum::<u64>(),
+            MAX_SCAN_TOTAL_BYTES_LIMIT
+        );
+        let preview_bytes: usize = outcome
             .files
             .iter()
-            .all(|f| f.text_preview.is_some() || !f.is_text || f.size_bytes > 16 * 1024));
+            .filter_map(|file| file.text_preview.as_ref())
+            .map(String::len)
+            .sum();
+        assert!(preview_bytes <= crate::session::MAX_SCAN_PREVIEW_BYTES);
+        let peak_after = peak_working_set_bytes();
+        let elapsed = start.elapsed();
+        println!(
+            "files={} corpus_bytes={} preview_bytes={} elapsed_ms={} peak_working_set_before={} peak_working_set_after={}",
+            outcome.files.len(),
+            MAX_SCAN_TOTAL_BYTES_LIMIT,
+            preview_bytes,
+            elapsed.as_millis(),
+            peak_before.unwrap_or(0),
+            peak_after.unwrap_or(0),
+        );
+        assert!(elapsed.as_secs() < 180);
     });
+}
+
+#[cfg(windows)]
+fn peak_working_set_bytes() -> Option<usize> {
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    let mut counters = PROCESS_MEMORY_COUNTERS::default();
+    let ok = unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut counters,
+            std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        )
+    };
+    (ok != 0).then_some(counters.PeakWorkingSetSize)
+}
+
+#[cfg(not(windows))]
+fn peak_working_set_bytes() -> Option<usize> {
+    None
 }
 
 fn wait_for_change(watcher: &mut crate::watcher::RepositoryWatcher) -> bool {

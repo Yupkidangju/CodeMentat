@@ -8,7 +8,8 @@ use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 use mentat_core::error::MentatError;
 use mentat_inference::{
-    BackendProfile, HealthStatus, InferenceBackend, InferenceEvent, InferenceRequest, ProviderKind,
+    BackendProfile, HealthStatus, InferenceBackend, InferenceEvent, InferenceRequest, ModelCatalog,
+    ModelVerification, ProviderKind,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -42,6 +43,31 @@ impl InferenceBackend for MultiProviderAdapter {
             | ProviderKind::OpenAICompatible
             | ProviderKind::CustomCompatible
             | ProviderKind::LocalMock => self.openai.health_check(profile).await,
+        }
+    }
+
+    async fn discover_models(&self, profile: &BackendProfile) -> Result<ModelCatalog, MentatError> {
+        match profile.provider {
+            ProviderKind::GoogleGemini => self.gemini.discover_models(profile).await,
+            ProviderKind::OpenRouter
+            | ProviderKind::OpenAi
+            | ProviderKind::OpenAICompatible
+            | ProviderKind::CustomCompatible
+            | ProviderKind::LocalMock => self.openai.discover_models(profile).await,
+        }
+    }
+
+    async fn verify_model(
+        &self,
+        profile: &BackendProfile,
+    ) -> Result<ModelVerification, MentatError> {
+        match profile.provider {
+            ProviderKind::GoogleGemini => self.gemini.verify_model(profile).await,
+            ProviderKind::OpenRouter
+            | ProviderKind::OpenAi
+            | ProviderKind::OpenAICompatible
+            | ProviderKind::CustomCompatible
+            | ProviderKind::LocalMock => self.openai.verify_model(profile).await,
         }
     }
 
@@ -118,6 +144,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inference_never_falls_back_to_a_hardcoded_model() {
+        let profile = BackendProfile {
+            provider: ProviderKind::OpenAICompatible,
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            model: String::new(),
+            api_key: Some("test-key".to_string()),
+            ..Default::default()
+        };
+        let request = InferenceRequest {
+            request_id: Uuid::new_v4(),
+            system_contract: "sys".to_string(),
+            prompt_context: "ctx".to_string(),
+            user_question: "q".to_string(),
+            profile,
+        };
+        let result = OpenAiAdapter::new()
+            .infer_stream(request, CancellationToken::new())
+            .await;
+        match result {
+            Err(MentatError::BackendError { code, .. }) => {
+                assert_eq!(code, "MODEL_NOT_SELECTED")
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+            Ok(_) => panic!("empty model must fail before network access"),
+        }
+    }
+
+    #[tokio::test]
     async fn test_pre_response_cancellation_aborts_immediately() {
         let gemini = GeminiAdapter::default();
         let cancel_token = CancellationToken::new();
@@ -126,6 +180,7 @@ mod tests {
 
         let profile = BackendProfile {
             api_key: Some("dummy_key".to_string()),
+            model: "fixture-model".to_string(),
             ..Default::default()
         };
 
@@ -223,6 +278,214 @@ mod tests {
             user_question: "q".to_string(),
             profile,
         }
+    }
+
+    #[tokio::test]
+    async fn openai_model_discovery_uses_provider_response_without_presets() {
+        use tokio::io::AsyncWriteExt;
+        let (listener, port) = bind_listener().await;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let request = read_http_request(&mut stream).await;
+            assert!(String::from_utf8_lossy(&request).starts_with("GET /v1/models "));
+            let body = r#"{"data":[{"id":"dynamic-alpha"},{"id":"dynamic-beta"},{"id":"dynamic-alpha"},{"id":""}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            stream.write_all(response.as_bytes()).await.expect("write");
+        });
+
+        let adapter = OpenAiAdapter::new();
+        let catalog = adapter
+            .discover_models(&openai_profile(port))
+            .await
+            .expect("catalog");
+        assert_eq!(
+            catalog
+                .models
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["dynamic-alpha", "dynamic-beta"]
+        );
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn gemini_model_discovery_keeps_only_generate_content_models() {
+        use tokio::io::AsyncWriteExt;
+        let (listener, port) = bind_listener().await;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let request = read_http_request(&mut stream).await;
+            assert!(String::from_utf8_lossy(&request).starts_with("GET /v1beta/models "));
+            let body = r#"{"models":[{"name":"models/dynamic-gemini","displayName":"Dynamic Gemini","supportedGenerationMethods":["generateContent"]},{"name":"models/embed-only","supportedGenerationMethods":["embedContent"]}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            stream.write_all(response.as_bytes()).await.expect("write");
+        });
+
+        let adapter = GeminiAdapter::new();
+        let profile = BackendProfile {
+            provider: ProviderKind::GoogleGemini,
+            base_url: format!("http://127.0.0.1:{port}"),
+            api_key: Some("test-key".to_string()),
+            ..Default::default()
+        };
+        let catalog = adapter.discover_models(&profile).await.expect("catalog");
+        assert_eq!(catalog.models.len(), 1);
+        assert_eq!(catalog.models[0].id, "dynamic-gemini");
+        assert_eq!(catalog.models[0].display_name, "Dynamic Gemini");
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn selected_openai_model_must_pass_a_real_generation_probe() {
+        use tokio::io::AsyncWriteExt;
+        let (listener, port) = bind_listener().await;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let request = read_http_request(&mut stream).await;
+            let request_text = String::from_utf8_lossy(&request);
+            assert!(request_text.starts_with("POST /v1/chat/completions "));
+            assert!(request_text.contains("dynamic-alpha"));
+            let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            stream.write_all(response.as_bytes()).await.expect("write");
+        });
+
+        let adapter = OpenAiAdapter::new();
+        let mut profile = openai_profile(port);
+        profile.model = "dynamic-alpha".to_string();
+        let verification = adapter.verify_model(&profile).await.expect("verification");
+        assert!(verification.compatible);
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn selected_gemini_model_must_pass_a_real_generation_probe() {
+        use tokio::io::AsyncWriteExt;
+        let (listener, port) = bind_listener().await;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let request = read_http_request(&mut stream).await;
+            let request_text = String::from_utf8_lossy(&request);
+            assert!(request_text.starts_with("POST /v1beta/models/dynamic-gemini:generateContent "));
+            let body = r#"{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            stream.write_all(response.as_bytes()).await.expect("write");
+        });
+
+        let adapter = GeminiAdapter::new();
+        let profile = BackendProfile {
+            provider: ProviderKind::GoogleGemini,
+            base_url: format!("http://127.0.0.1:{port}"),
+            model: "dynamic-gemini".to_string(),
+            api_key: Some("test-key".to_string()),
+            ..Default::default()
+        };
+        let verification = adapter.verify_model(&profile).await.expect("verification");
+        assert!(verification.compatible);
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn builtin_local_without_runtime_fails_closed_without_requesting_a_key() {
+        let adapter = MultiProviderAdapter::new();
+        let profile = BackendProfile {
+            provider: ProviderKind::LocalMock,
+            base_url: ProviderKind::LocalMock.default_base_url().to_string(),
+            api_key: None,
+            ..Default::default()
+        };
+        let result = adapter.discover_models(&profile).await;
+        match result {
+            Err(MentatError::BackendError { code, .. }) => {
+                assert_eq!(code, "LOCAL_RUNTIME_UNAVAILABLE")
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+            Ok(_) => panic!("내장 로컬 런타임이 없으면 활성화 자료를 만들 수 없습니다"),
+        }
+    }
+
+    #[tokio::test]
+    async fn model_verification_rejects_oversized_untrusted_response() {
+        use tokio::io::AsyncWriteExt;
+        let (listener, port) = bind_listener().await;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let _ = read_http_request(&mut stream).await;
+            let body = vec![b'x'; 1024 * 1024 + 1];
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(headers.as_bytes()).await.expect("headers");
+            stream.write_all(&body).await.expect("body");
+        });
+
+        let adapter = OpenAiAdapter::new();
+        let mut profile = openai_profile(port);
+        profile.model = "dynamic-alpha".to_string();
+        let result = adapter.verify_model(&profile).await;
+        match result {
+            Err(MentatError::BackendError { code, .. }) => {
+                assert_eq!(code, "MODEL_VERIFY_RESPONSE_TOO_LARGE")
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+            Ok(_) => panic!("oversized verification response must fail closed"),
+        }
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn gemini_cross_origin_redirect_never_receives_api_key() {
+        use tokio::io::AsyncWriteExt;
+        let (redirect_listener, redirect_port) = bind_listener().await;
+        let (target_listener, target_port) = bind_listener().await;
+
+        let redirect_server = tokio::spawn(async move {
+            let (mut stream, _) = redirect_listener.accept().await.expect("accept redirect");
+            let _ = read_http_request(&mut stream).await;
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{target_port}/stolen\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write redirect");
+        });
+        let target_server = tokio::spawn(async move {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                target_listener.accept(),
+            )
+            .await
+            .is_ok()
+        });
+
+        let profile = BackendProfile {
+            provider: ProviderKind::GoogleGemini,
+            base_url: format!("http://127.0.0.1:{redirect_port}"),
+            api_key: Some("redirect-test-key".to_string()),
+            ..Default::default()
+        };
+        let result = GeminiAdapter::new().discover_models(&profile).await;
+        assert!(matches!(
+            result,
+            Err(MentatError::BackendError { ref code, .. }) if code == "MODEL_DISCOVERY_HTTP_302"
+        ));
+        redirect_server.await.expect("redirect server");
+        assert!(!target_server.await.expect("target server"));
     }
 
     #[tokio::test]

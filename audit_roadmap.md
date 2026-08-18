@@ -1,65 +1,74 @@
-# Code Mentat Audit Roadmap (audit_roadmap.md)
-## 코드 멘타트 감사 로드맵
+# Code Mentat 감사 로드맵 (audit_roadmap.md)
 
-- **문서 버전:** 1.0.0
-- **참조 표준:** AI Audit Documentation Standard (`AI_AUDIT_DOC_STANDARD.md`)
+- **문서 버전:** 1.1.0
+- **참조 표준:** `AI_AUDIT_DOC_STANDARD.md`
+- **최신 독립 감사:** `docs/audit/audit_report_13.md` — Re-audit #11, **HOLD**
 - **적용 대상:** Code Mentat 10-Crate Workspace
+- **갱신 기준:** Re-audit #11 remediation working tree, clean commit 재검증 전
 
 ---
 
-## 1. 감사 프레임워크 (3-Pass Audit Model)
+## 1. 감사 프레임워크
 
-Code Mentat 감사는 세 가지 독립된 관점(Pass)으로 수행되며, 모든 게이트 조건을 충족해야 최종 PASS로 판정합니다.
+| Pass | 핵심 질문 | 게이트 통과 기준 |
+|---|---|---|
+| Implementation Compliance | baseline 원문, derived 요구사항, 코드와 UI가 충돌하지 않는가? | baseline 1:1 보존, 문서-코드 drift 없음, 최신 감사 Major 0건 |
+| Debug / Engineering Quality | scan, watcher, 취소, 메모리와 빌드가 재현 가능한가? | 기본 suite 전부 통과, 명시적 ignored profile 별도 통과, strict Clippy 0 warning |
+| Security & Privacy | egress 승인, 비밀정보, 경로와 외부 응답 경계가 fail-closed인가? | canonical seal tamper matrix, redirect zero-leak, secret scan, read-only 검증 통과 |
 
-| Pass | 핵심 질문 | 주요 입력물 | 게이트 통과 기준 |
-|---|---|---|---|
-| **Pass 1: Implementation Compliance** | `spec.md` 및 `designs.md`의 기능, 타입, API, UI가 코드와 테스트에 정확히 반영되었는가? | `spec.md`, `designs.md`, `crates/*` | 문서-구현 드리프트 없음, 고아(Orphan) 코드 없음 |
-| **Pass 2: Debug / Engineering Quality** | 코드가 결정적이고 안정적이며 부팅/빌드 재현성을 보장하는가? | `Cargo.toml`, `Cargo.lock`, `BUILD_GUIDE.md`, tests | `cargo test --workspace` 100% PASS, 0 warnings |
-| **Pass 3: Security & Privacy** | 읽기 전용 경계, 프롬프트 인젝션 차단, Egress 필터, AppData 격리가 완벽한가? | `mentat-repository`, `mentat-analysis/egress.rs`, `mentat-platform` | 파일 쓰기 시도 원천 차단, 외부 전송 시 민감정보 자동 배제 |
+독립 감사가 HOLD인 동안 개별 Phase의 구현 완료만으로 전체 PASS를 선언하지 않는다. 코더 검증은 재감사 PASS를 대신하지 않는다.
 
----
+## 2. Phase 게이트 상태
 
-## 2. Phase별 게이트 통과 기준 및 검증 결과
+| Phase | 현재 상태 | 근거와 남은 게이트 |
+|---|---|---|
+| Phase 1 — Workspace / Read-Only | Verified | 저장소 경계, AppData 격리, canonical direct-open 테스트 유지 |
+| Phase 2 — Detection / Evidence / Watcher | Remediated, Re-audit Pending | changed-path full hash, tail-edit, incomplete snapshot 차단, claim invariant의 수정 commit 검증 필요 |
+| Phase 3 — Provider / Streaming / Egress | Remediated, Re-audit Pending | canonical egress seal과 Gemini redirect zero-leak 수정. 실계정 API 시험은 자격 증명 부재로 미실행 |
+| Phase 4 — Persona / Storage | Partial | persona 사실 보존과 SQLite 테스트는 통과하나 전체 세션 대화 복원·키체인 연동은 미완료 |
+| Phase 5 — Native Local / Stabilization | HOLD | 100k/2GiB profile은 통과했으나 네이티브 llama 실행 엔진은 비활성 계약만 존재하고 clean commit 전체 gate가 남음 |
 
-### 🏁 Phase 1: Workspace Scaffolding & Strict Read-Only Boundary
-- **검증 항목:**
-  - `mentat-repository`: `.gitignore` 존중 스캐닝 및 상위 디렉터리 탈출(`..`) 차단 (`test_external_path_blocked`)
-  - `mentat-platform`: AppData 경로가 저장소 내부가 아님을 검증 (`test_storage_isolation_detection`)
-- **게이트 판정:** **PASS (Verified)**
+## 3. Re-audit #11 remediation gate
 
-### 🏁 Phase 2: Universal Detection, Evidence Model & Semantic Kernel
-- **검증 항목:**
-  - `mentat-analysis`: 다중 언어 기술스택 및 매니페스트 정확 탐지 (`test_detector_rust_project`)
-  - `mentat-analysis`: 악성 프롬프트 인젝션 텍스트가 실행되지 않고 데이터로 격리됨 (`test_evidence_and_prompt_injection_safety`)
-  - `mentat-repository`: Mtime 변경 감시자 (`RepositoryWatcher`) 작동
-- **게이트 판정:** **PASS (Verified)**
+| Finding | 코더 상태 | 재감사 증거 |
+|---|---|---|
+| SEC-F001 canonical egress seal | Remediated | question/validation/snapshot/ref/profile tamper matrix |
+| IMP-F001 baseline 원문 복구 | Remediated | FR-013/FR-017 baseline 원문 1:1 대조, `DR-FR-001` 분리 |
+| DBG-F003 incomplete snapshot / memory | Remediated | Incomplete DB/query 차단, repository switch cancel, global preview budget, 100k/2GiB profile |
+| DBG-F002 watcher | Remediated | OS event primary, changed-path full hash, 16KiB tail edit, stop latency |
+| IMP-F004 claim invariant | Remediated | Observed/Conflict empty evidence, duplicate/missing ID, confidence 범위 |
+| SEC-F004 Gemini redirect | Remediated | 302 cross-origin target key 수신 0회 |
+| IMP-F003 global hotkey | Remediated | register/hide/show/unregister runtime smoke와 collision fallback |
+| IMP-F006 roadmap 과대 판정 | Remediated | 본 문서의 HOLD/Partial 및 risk record 동기화 |
 
-### 🏁 Phase 3: Multi-Provider Inference & Streaming
-- **검증 항목:**
-  - `mentat-inference`: `FakeInferenceBackend` 스트리밍 및 취소 토큰(`CancellationToken`) 100ms 내 중단 검증
-  - `mentat-analysis`: `.env`, `*.pem`, `*.key`, `id_rsa` 민감정보 자동 필터링 (`test_sensitive_filtering`)
-  - `mentat-inference-openai`: Google Gemini (AI Studio) 및 OpenRouter/OpenAI SSE 파싱
-- **게이트 판정:** **PASS (Verified)**
+모든 `Remediated` 표시는 구현자 판정이며, 독립 재감사에서 Verified로 재판정되기 전까지 release gate는 HOLD다.
 
-### 🏁 Phase 4: Persona Engine & Storage Persistence
-- **검증 항목:**
-  - `mentat-persona`: 3종 페르소나 전환 시 `Claim` ID, 신뢰도, `EvidenceRef` 팩트 100% 일치 (`test_persona_rendering_preserves_facts_and_evidence`)
-  - `mentat-storage`: SQLite `recent_repositories` CRUD 및 정렬 검증 (`test_sqlite_storage_save_and_list_recent_repos`)
-- **게이트 판정:** **PASS (Verified)**
+## 4. Accepted Risk
 
-### 🏁 Phase 5: Native Llama Contract & Final Stabilization
-- **검증 항목:**
-  - `mentat-inference-llama`: 무거운 외부 C 링크 없이 모델 수명주기, 격리 컨텍스트, KV 캐시 명시적 해제, 세마포어 동시성 제한기 계약 검증 (`test_native_llama_contract_isolated_context_and_kv_cleanup`)
-  - 전체 워크스페이스 10개 크레이트 빌드 및 테스트 완전 통과
-- **게이트 판정:** **PASS (Verified)**
+### SEC-F007 — 유지
 
----
+- **범위:** Windows 현재 runtime에서 비도달인 `quick-xml 0.30.0` High advisory 2건
+- **Owner:** `@Yupkidangju`
+- **Expiry:** 2026-11-30
+- **Review Trigger:** `eframe 0.31.0`, 상위 `accesskit_unix` patch, Linux release scope 편입 중 하나가 발생할 때
+- **결정:** 위 조건까지 Windows 비도달 근거로만 수용하며 `cargo audit` 실패 자체를 PASS로 표시하지 않는다.
 
-## 3. 잔여 리스크 및 모니터링 (Accepted Risks)
+### 대형 저장소 메모리 — Accepted Risk 아님
 
-1. **대용량 저장소(100,000+ 파일) 스캐닝 메모리 사용량:**
-   - *위험 수준:* Minor
-   - *대응책:* 현재 `.gitignore` 준수 및 바이너리/미디어 파일 자동 제외를 적용하고 있으며, 향후 가상화 페이징 인덱서 도입 검토.
-2. **클라우드 API 네트워크 지연:**
-   - *위험 수준:* Minor
-   - *대응책:* `Esc` 또는 `[⏹️ 취소]` 버튼을 통한 즉각적인 비동기 취소(`CancellationToken`) 메커니즘이 확립되어 있음.
+- 100k/2GiB sparse corpus, peak working set, scan 시간, preview bytes를 ignored profile에서 측정한다.
+- 2026-08-19 실행 결과: 100,000 files, 2,147,483,648 bytes, preview 3,358,720 bytes, scan 106,477ms, peak working set 46,096,384 bytes — PASS.
+- 향후 측정이 실행되지 않거나 상한을 넘으면 Phase 5는 HOLD이며 risk 수용으로 우회하지 않는다.
+
+## 5. Clean commit 전체 게이트
+
+1. `cargo fmt --all -- --check`
+2. `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
+3. `cargo test --workspace --locked`
+4. `cargo test -p mentat-repository --locked test_dbg_f003_100k_2gib_benchmark_profile -- --ignored --nocapture`
+5. `cargo build --release --locked -p mentat-app`
+6. `cargo audit --file Cargo.lock`
+7. Windows global hotkey hide/show runtime smoke
+8. `git diff --check`
+9. 수정 commit 생성 후 `git status --short --branch` clean 확인
+
+실패한 gate는 숨기거나 PASS로 바꾸지 않고 명령, 결과, Accepted Risk 또는 남은 blocker와 함께 `IMPLEMENTATION_SUMMARY.md`에 기록한다.

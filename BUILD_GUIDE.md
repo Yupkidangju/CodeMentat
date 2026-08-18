@@ -41,3 +41,17 @@ cargo build --release -p mentat-app
 - **Windows:** `eframe / egui`가 Direct3D/OpenGL 백엔드를 자동 선택하며, 프레임리스(Decorated=false) 윈도우로 렌더링됩니다.
 - **macOS:** Metal 백엔드와 App Sandbox를 지원하며, 다이얼로그는 네이티브 Cocoa 파일 선택기를 사용합니다.
 - **Linux:** X11 및 Wayland 환경에서 동작하며 `libxkbcommon` 및 `libglvnd`가 필요할 수 있습니다.
+
+## 4. 전체 품질 게이트
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --locked
+cargo test -p mentat-repository --locked test_dbg_f003_100k_2gib_benchmark_profile -- --ignored --nocapture
+cargo build --release --locked -p mentat-app
+cargo audit --file Cargo.lock
+```
+
+- `notify 8.2.0`은 Windows/macOS/Linux의 OS 파일 변경 event를 사용합니다.
+- `global-hotkey 0.6.4`는 Windows/macOS/X11에서 전역 표시·포커스 단축키를 등록합니다. 등록 충돌 시 창 숨김 없이 Tier 1 접기로 제한됩니다.

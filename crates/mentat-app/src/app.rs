@@ -1,3 +1,5 @@
+use crate::hotkeys::{focused_shortcut_action, FocusedShortcutAction, GlobalShortcutController};
+use crate::provider_setup::ProviderSetupState;
 use crate::theme::MentatTheme;
 use crate::widgets::pill_bar::PillBar;
 use crate::widgets::settings_panel::SettingsPanel;
@@ -16,7 +18,9 @@ use mentat_core::models::{
     Recommendation, RepositoryProfile, RepositorySnapshot, SnapshotStatus,
 };
 use mentat_core::ports::RepositoryReader;
-use mentat_inference::{BackendProfile, InferenceBackend, InferenceEvent};
+use mentat_inference::{
+    BackendProfile, InferenceBackend, InferenceEvent, ModelCatalog, ModelVerification,
+};
 use mentat_inference_openai::MultiProviderAdapter;
 use mentat_persona::{PersonaKind, PersonaRenderer};
 use mentat_platform::PlatformManager;
@@ -41,8 +45,35 @@ pub enum ExpansionTier {
 pub const TIER1_SIZE: [f32; 2] = [580.0, 52.0];
 pub const TIER2_SIZE: [f32; 2] = [580.0, 300.0];
 pub const TIER3_SIZE: [f32; 2] = [660.0, 480.0];
+pub const SETTINGS_SIZE: [f32; 2] = [660.0, 420.0];
+
+pub fn viewport_size_for(tier: ExpansionTier, settings_open: bool) -> egui::Vec2 {
+    let size = if settings_open && tier != ExpansionTier::Tier3Inspector {
+        SETTINGS_SIZE
+    } else {
+        match tier {
+            ExpansionTier::Tier1Pill if !settings_open => TIER1_SIZE,
+            ExpansionTier::Tier1Pill | ExpansionTier::Tier2Card => TIER2_SIZE,
+            ExpansionTier::Tier3Inspector => TIER3_SIZE,
+        }
+    };
+    vec2(size[0], size[1])
+}
+
+fn snapshot_allows_analysis(status: SnapshotStatus) -> bool {
+    matches!(status, SnapshotStatus::Ready | SnapshotStatus::Stale)
+}
+
+fn install_scan_token(slot: &mut Option<CancellationToken>, next: CancellationToken) {
+    if let Some(previous) = slot.replace(next) {
+        previous.cancel();
+    }
+}
 
 pub type ScanChannel = Receiver<Result<(ScanOutcome, RepositorySnapshot), MentatError>>;
+pub type ModelDiscoveryChannel = Receiver<(BackendProfile, Result<ModelCatalog, MentatError>)>;
+pub type ModelVerificationChannel =
+    Receiver<(BackendProfile, Result<ModelVerification, MentatError>)>;
 
 pub struct MentatApp {
     pub session: Option<Arc<ReadOnlySession>>,
@@ -58,11 +89,11 @@ pub struct MentatApp {
 
     // Multi-Provider & Inference Backend
     pub backend: Arc<MultiProviderAdapter>,
-    pub profile: BackendProfile,
+    pub provider_setup: ProviderSetupState,
     pub persona: PersonaKind,
     pub settings_open: bool,
-    pub ping_status: String,
-    pub is_pinging: bool,
+    pub provider_status: String,
+    pub is_provider_busy: bool,
 
     // Storage persistence
     pub storage: Option<Arc<SqliteStorage>>,
@@ -75,7 +106,8 @@ pub struct MentatApp {
 
     // Async task channels (Non-blocking UI loop DBG-F001 & DBG-F007)
     pub scan_rx: Option<ScanChannel>,
-    pub ping_rx: Option<Receiver<Result<mentat_inference::HealthStatus, MentatError>>>,
+    pub model_discovery_rx: Option<ModelDiscoveryChannel>,
+    pub model_verification_rx: Option<ModelVerificationChannel>,
     pub local_query_rx: Option<Receiver<Result<AnswerBundle, MentatError>>>,
     pub egress_packet_rx: Option<Receiver<(u64, Result<EgressPacket, MentatError>)>>,
     pub preview_rx: Option<Receiver<Result<String, MentatError>>>,
@@ -99,6 +131,7 @@ pub struct MentatApp {
     pub citation_file_texts: HashMap<PathBuf, String>,
     pub focus_query: bool,
     pub window_visible: bool,
+    pub global_shortcuts: GlobalShortcutController,
 }
 
 impl MentatApp {
@@ -124,6 +157,9 @@ impl MentatApp {
             .and_then(|s| s.load_backend_profile().ok().flatten())
             .unwrap_or_default();
 
+        let global_shortcuts = GlobalShortcutController::register(&cc.egui_ctx);
+        let initial_status = global_shortcuts.status().to_string();
+
         Self {
             session: None,
             snapshot: None,
@@ -133,21 +169,22 @@ impl MentatApp {
             query_text: String::new(),
             expansion_tier: ExpansionTier::Tier1Pill,
             is_pinned: true,
-            status_text: "준비됨".to_string(),
+            status_text: initial_status,
             rt,
             backend: Arc::new(MultiProviderAdapter::new()),
-            profile,
+            provider_setup: ProviderSetupState::new(profile),
             persona: PersonaKind::DefaultAnalyst,
             settings_open: false,
-            ping_status: String::new(),
-            is_pinging: false,
+            provider_status: String::new(),
+            is_provider_busy: false,
             storage,
             recent_repos,
             is_streaming: false,
             streaming_cancel: None,
             stream_rx: None,
             scan_rx: None,
-            ping_rx: None,
+            model_discovery_rx: None,
+            model_verification_rx: None,
             local_query_rx: None,
             egress_packet_rx: None,
             preview_rx: None,
@@ -167,22 +204,32 @@ impl MentatApp {
             citation_file_texts: HashMap::new(),
             focus_query: false,
             window_visible: true,
+            global_shortcuts,
         }
     }
 
     pub fn set_expansion_tier(&mut self, ctx: &Context, tier: ExpansionTier) {
         if self.expansion_tier != tier {
             self.expansion_tier = tier;
-            let size = match tier {
-                ExpansionTier::Tier1Pill => vec2(TIER1_SIZE[0], TIER1_SIZE[1]),
-                ExpansionTier::Tier2Card => vec2(TIER2_SIZE[0], TIER2_SIZE[1]),
-                ExpansionTier::Tier3Inspector => vec2(TIER3_SIZE[0], TIER3_SIZE[1]),
-            };
-            ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(viewport_size_for(
+                tier,
+                self.settings_open,
+            )));
         }
     }
 
+    fn sync_viewport_size(&self, ctx: &Context) {
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(viewport_size_for(
+            self.expansion_tier,
+            self.settings_open,
+        )));
+    }
+
     pub fn open_repository(&mut self, path: std::path::PathBuf) {
+        if let Some(previous) = self.scan_cancel.take() {
+            previous.cancel();
+        }
+        self.scan_rx = None;
         let app_data_dir = match PlatformManager::get_app_data_dir() {
             Ok(dir) => dir,
             Err(e) => {
@@ -231,7 +278,7 @@ impl MentatApp {
                 let rt = self.rt.clone();
                 let s = session_arc.clone();
                 let cancel = CancellationToken::new();
-                self.scan_cancel = Some(cancel.clone());
+                install_scan_token(&mut self.scan_cancel, cancel.clone());
                 self.scan_omissions.clear();
 
                 // DBG-F003: Cancellable ScanOutcome path
@@ -242,7 +289,7 @@ impl MentatApp {
                         .scan_files_with_limits(ScanLimits::default(), cancel)
                         .await
                         .map(|outcome| {
-                            let snap = s.create_snapshot_from_files(&outcome.files);
+                            let snap = s.create_snapshot_from_outcome(&outcome);
                             (outcome, snap)
                         });
                     let _ = tx.send(result);
@@ -256,36 +303,85 @@ impl MentatApp {
         }
     }
 
-    pub fn ping_backend(&mut self) {
-        self.is_pinging = true;
-        self.ping_status = "연결 시험 중...".to_string();
-
+    pub fn discover_provider_models(&mut self) {
+        self.is_provider_busy = true;
+        self.provider_status = "API 확인 및 모델 목록 조회 중...".to_string();
         let backend = self.backend.clone();
-        let profile = self.profile.clone();
+        let profile = self.provider_setup.begin_discovery();
         let (tx, rx) = std::sync::mpsc::channel();
-        self.ping_rx = Some(rx);
+        self.model_discovery_rx = Some(rx);
 
         self.rt.spawn(async move {
-            let res = backend.health_check(&profile).await;
-            let _ = tx.send(res);
+            let result = backend.discover_models(&profile).await;
+            let _ = tx.send((profile, result));
         });
     }
 
+    pub fn verify_draft_model(&mut self) {
+        let profile = match self.provider_setup.verification_request() {
+            Ok(profile) => profile,
+            Err(message) => {
+                self.provider_status = message;
+                return;
+            }
+        };
+        self.is_provider_busy = true;
+        self.provider_status = "선택 모델의 실제 생성 호환성 확인 중...".to_string();
+        let backend = self.backend.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.model_verification_rx = Some(rx);
+        self.rt.spawn(async move {
+            let result = backend.verify_model(&profile).await;
+            let _ = tx.send((profile, result));
+        });
+    }
+
+    pub fn activate_draft_profile(&mut self) {
+        match self.provider_setup.activate() {
+            Ok(()) => {
+                self.provider_status = "검증된 모델을 프로그램 AI로 활성화했습니다.".to_string();
+                self.consent.cancel();
+                if let (Some(storage), Some(active)) =
+                    (&self.storage, self.provider_setup.active_profile())
+                {
+                    let _ = storage.save_backend_profile(active);
+                }
+            }
+            Err(message) => self.provider_status = message,
+        }
+    }
+
     pub fn handle_query(&mut self, ctx: &Context, query: String) {
+        // 선행조건 오류도 카드 안에서 보여야 하므로 검증보다 먼저 대화 영역을 연다.
+        self.set_expansion_tier(ctx, ExpansionTier::Tier2Card);
+
         let session = match &self.session {
             Some(s) => s.clone(),
             None => {
                 self.status_text = "저장소를 먼저 열어주세요.".to_string();
+                self.answer_preview = Some(self.status_text.clone());
                 return;
             }
         };
 
+        let snapshot_status = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.status.clone());
+        if !snapshot_status.is_some_and(snapshot_allows_analysis) {
+            self.status_text = "불완전하거나 인덱싱 중인 스냅샷은 분석할 수 없습니다.".to_string();
+            self.answer_preview = Some(self.status_text.clone());
+            return;
+        }
+
         let summary = match &self.summary {
             Some(sum) => sum.clone(),
-            None => return,
+            None => {
+                self.status_text = "저장소 인덱싱이 끝날 때까지 기다려주세요.".to_string();
+                self.answer_preview = Some(self.status_text.clone());
+                return;
+            }
         };
-
-        self.set_expansion_tier(ctx, ExpansionTier::Tier2Card);
 
         // [IMP-F004] Cleanly reset previous query results for request-scoped correctness
         self.recent_claims.clear();
@@ -321,6 +417,13 @@ impl MentatApp {
             return;
         }
 
+        if self.provider_setup.active_profile().is_none() {
+            self.status_text =
+                "설정에서 모델 목록 조회, 호환성 확인, 활성화를 먼저 완료해 주세요.".to_string();
+            self.answer_preview = Some(self.status_text.clone());
+            return;
+        }
+
         // [SEC-F001 & SEC-F011] Fail-closed egress consent with generation-guarded exclusions
         let generation = self.consent.begin_assembly(query);
         self.spawn_egress_assembly(session, summary, generation);
@@ -340,6 +443,10 @@ impl MentatApp {
             .as_ref()
             .map(|s| s.id)
             .unwrap_or_else(uuid::Uuid::new_v4);
+        let Some(profile) = self.provider_setup.active_profile().cloned() else {
+            self.status_text = "활성 공급자 프로필이 없어 전송 준비를 중단했습니다.".to_string();
+            return;
+        };
 
         let (tx, rx) = std::sync::mpsc::channel();
         self.egress_packet_rx = Some(rx);
@@ -352,6 +459,7 @@ impl MentatApp {
                 &q,
                 &exclusions,
                 snap_id,
+                &profile,
             )
             .await;
             let _ = tx.send((generation, packet));
@@ -367,7 +475,7 @@ impl MentatApp {
         let request = match approved.into_inference_request() {
             Ok(req) => req,
             Err(e) => {
-                self.status_text = format!("🛡️ 오류: {}", e);
+                self.status_text = format!("보호 오류: {}", e);
                 return;
             }
         };
@@ -439,7 +547,8 @@ impl eframe::App for MentatApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         // [DBG-F007] Keep UI awake and active whenever background tasks are running
         let has_pending_tasks = self.scan_rx.is_some()
-            || self.ping_rx.is_some()
+            || self.model_discovery_rx.is_some()
+            || self.model_verification_rx.is_some()
             || self.local_query_rx.is_some()
             || self.egress_packet_rx.is_some()
             || self.preview_rx.is_some()
@@ -455,17 +564,21 @@ impl eframe::App for MentatApp {
                 Ok(Ok((outcome, snap))) => {
                     let files = outcome.files;
                     self.scan_omissions = outcome.omissions.clone();
-                    let summary = ProjectDetector::summarize(&files);
-                    let kernel = SemanticKernelBuilder::build(&summary);
 
                     let omit_note = if self.scan_omissions.is_empty() {
                         String::new()
                     } else {
                         format!(" / 누락 {}건", self.scan_omissions.len())
                     };
-                    self.status_text = if outcome.cancelled {
-                        format!("인덱싱 취소됨 ({}개 파일{})", files.len(), omit_note)
+                    let complete = snap.status == SnapshotStatus::Ready;
+                    self.status_text = if !complete {
+                        format!(
+                            "불완전한 인덱싱 결과 차단됨 ({}개 파일{})",
+                            files.len(),
+                            omit_note
+                        )
                     } else {
+                        let summary = ProjectDetector::summarize(&files);
                         format!(
                             "{}개 파일 ({} - {}) 인덱싱 완료{}",
                             snap.file_count,
@@ -475,29 +588,42 @@ impl eframe::App for MentatApp {
                         )
                     };
 
-                    let snap = if let Some(restored) = self.restored_snapshot.take() {
-                        if restored.tree_digest == snap.tree_digest
-                            && restored.repo_id == snap.repo_id
-                        {
-                            let mut reused = restored;
-                            reused.status = SnapshotStatus::Ready;
-                            reused.file_count = snap.file_count;
-                            reused.total_bytes = snap.total_bytes;
-                            reused
+                    let snap = if complete {
+                        if let Some(restored) = self.restored_snapshot.take() {
+                            if restored.tree_digest == snap.tree_digest
+                                && restored.repo_id == snap.repo_id
+                            {
+                                let mut reused = restored;
+                                reused.status = SnapshotStatus::Ready;
+                                reused.file_count = snap.file_count;
+                                reused.total_bytes = snap.total_bytes;
+                                reused
+                            } else {
+                                snap
+                            }
                         } else {
                             snap
                         }
                     } else {
+                        self.restored_snapshot = None;
                         snap
                     };
 
-                    if let Some(ref s) = self.storage {
-                        let _ = s.save_snapshot_meta(&snap);
+                    if complete {
+                        if let Some(ref s) = self.storage {
+                            let _ = s.save_snapshot_meta(&snap);
+                        }
                     }
 
                     self.files = files;
-                    self.summary = Some(summary);
-                    self.kernel = Some(kernel);
+                    if complete {
+                        let summary = ProjectDetector::summarize(&self.files);
+                        self.kernel = Some(SemanticKernelBuilder::build(&summary));
+                        self.summary = Some(summary);
+                    } else {
+                        self.summary = None;
+                        self.kernel = None;
+                    }
                     self.snapshot = Some(snap);
                     self.scan_rx = None;
                     self.scan_cancel = None;
@@ -516,37 +642,65 @@ impl eframe::App for MentatApp {
             }
         }
 
-        // 2. Poll ping task (Non-blocking & full terminal error state consumption)
-        if let Some(ref rx) = self.ping_rx {
+        // 2. 공급자 모델 검색 결과는 요청 당시 Draft와 일치할 때만 수락한다.
+        if let Some(ref rx) = self.model_discovery_rx {
             match rx.try_recv() {
-                Ok(Ok(status)) => {
-                    self.ping_status = if status.healthy {
-                        format!(
-                            "✅ {} ({}ms)",
-                            status.message,
-                            status.latency_ms.unwrap_or(0)
-                        )
-                    } else {
-                        format!("❌ {}", status.message)
-                    };
-                    self.is_pinging = false;
-                    self.ping_rx = None;
+                Ok((requested, Ok(catalog))) => {
+                    let count = catalog.models.len();
+                    self.provider_status =
+                        match self.provider_setup.accept_catalog(&requested, catalog) {
+                            Ok(()) => {
+                                format!("API 확인 성공: 사용 가능한 모델 {count}개를 불러왔습니다.")
+                            }
+                            Err(message) => message,
+                        };
+                    self.is_provider_busy = false;
+                    self.model_discovery_rx = None;
                 }
-                Ok(Err(e)) => {
-                    self.ping_status = format!("❌ {}", e);
-                    self.is_pinging = false;
-                    self.ping_rx = None;
+                Ok((_, Err(e))) => {
+                    self.provider_status = format!("모델 목록 조회 실패: {e}");
+                    self.is_provider_busy = false;
+                    self.model_discovery_rx = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.ping_status = "❌ 연결 시험 채널 중단".to_string();
-                    self.is_pinging = false;
-                    self.ping_rx = None;
+                    self.provider_status = "모델 목록 조회 채널이 중단되었습니다.".to_string();
+                    self.is_provider_busy = false;
+                    self.model_discovery_rx = None;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
 
-        // 3. Poll local query workflow (Non-blocking & full terminal error state consumption)
+        // 3. 선택 모델 검증도 동일 Draft에 대한 결과만 수락한다.
+        if let Some(ref rx) = self.model_verification_rx {
+            match rx.try_recv() {
+                Ok((requested, Ok(verification))) => {
+                    let success_message = verification.message.clone();
+                    self.provider_status = match self
+                        .provider_setup
+                        .accept_verification(&requested, verification)
+                    {
+                        Ok(()) => success_message,
+                        Err(message) => message,
+                    };
+                    self.is_provider_busy = false;
+                    self.model_verification_rx = None;
+                }
+                Ok((_, Err(e))) => {
+                    self.provider_status = format!("선택 모델 검증 실패: {e}");
+                    self.is_provider_busy = false;
+                    self.model_verification_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.provider_status = "선택 모델 검증 채널이 중단되었습니다.".to_string();
+                    self.is_provider_busy = false;
+                    self.model_verification_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        // 4. Poll local query workflow (Non-blocking & full terminal error state consumption)
         if let Some(ref rx) = self.local_query_rx {
             match rx.try_recv() {
                 Ok(Ok(bundle)) => {
@@ -589,21 +743,21 @@ impl eframe::App for MentatApp {
                                 .as_ref()
                                 .map(|s| s.id)
                                 .unwrap_or_else(uuid::Uuid::new_v4);
-                            let receipt = EgressReceipt {
-                                receipt_id: uuid::Uuid::new_v4(),
-                                packet_hash: packet.packet_hash.clone(),
-                                snapshot_id: snap_id,
-                                token_count: packet.estimated_tokens,
-                                file_count: packet.included_files.len(),
-                                granted_at: chrono::Utc::now().to_rfc3339(),
+                            let Some(active_profile) =
+                                self.provider_setup.active_profile().cloned()
+                            else {
+                                self.status_text =
+                                    "활성 모델이 없어 승인된 요청을 중단했습니다.".to_string();
+                                self.egress_packet_rx = None;
+                                return;
                             };
-
+                            let receipt = EgressReceipt::issue(&packet, &active_profile);
                             if let Ok(approved_req) = ApprovedInferenceRequest::new(
                                 receipt,
                                 packet,
                                 q,
                                 snap_id,
-                                self.profile.clone(),
+                                active_profile,
                             ) {
                                 self.start_inference_stream_with_approved_request(approved_req);
                             }
@@ -612,7 +766,7 @@ impl eframe::App for MentatApp {
                     self.egress_packet_rx = None;
                 }
                 Ok((_, Err(e))) => {
-                    self.status_text = format!("🛡️ 컨텍스트 조립 실패: {}", e);
+                    self.status_text = format!("보호 오류: 컨텍스트 조립 실패: {}", e);
                     self.consent.rebuilding = false;
                     self.egress_packet_rx = None;
                 }
@@ -654,8 +808,12 @@ impl eframe::App for MentatApp {
                     match rx.try_recv() {
                         Ok(event) => match event {
                             InferenceEvent::Started { .. } => {
-                                self.status_text =
-                                    format!("🤖 {} 스트리밍 중...", self.profile.model);
+                                let model = self
+                                    .provider_setup
+                                    .active_profile()
+                                    .map(|profile| profile.model.as_str())
+                                    .unwrap_or("비활성 모델");
+                                self.status_text = format!("{model} 스트리밍 중...");
                             }
                             InferenceEvent::TextDelta(delta) => {
                                 if let Some(ref mut text) = self.answer_preview {
@@ -723,9 +881,11 @@ impl eframe::App for MentatApp {
         if let Some(ref mut watcher) = self.watcher {
             if let Ok(true) = watcher.poll_changes() {
                 if let Some(ref mut snap) = self.snapshot {
-                    snap.status = SnapshotStatus::Stale;
-                    self.status_text =
-                        "⚠️ 외부 파일 변경 감지됨 (STALE: 재인덱싱 권장)".to_string();
+                    if snapshot_allows_analysis(snap.status.clone()) {
+                        snap.status = SnapshotStatus::Stale;
+                        self.status_text =
+                            "경고: 외부 파일 변경 감지됨 (STALE: 재인덱싱 권장)".to_string();
+                    }
                 }
             }
         }
@@ -753,9 +913,20 @@ impl eframe::App for MentatApp {
             };
             ctx.send_viewport_cmd(ViewportCommand::WindowLevel(level));
         }
-        if toggle_visible {
-            self.window_visible = !self.window_visible;
-            ctx.send_viewport_cmd(ViewportCommand::Visible(self.window_visible));
+        if let Some(visible) = self.global_shortcuts.take_visibility_request() {
+            self.window_visible = visible;
+            self.set_expansion_tier(ctx, ExpansionTier::Tier1Pill);
+            self.status_text = self.global_shortcuts.status().to_string();
+        } else if toggle_visible {
+            match focused_shortcut_action(self.global_shortcuts.is_registered()) {
+                FocusedShortcutAction::CollapseOnly => {
+                    self.set_expansion_tier(ctx, ExpansionTier::Tier1Pill);
+                    self.status_text = format!(
+                        "{}; 안전 정책상 창 숨김 대신 Tier 1로 접었습니다.",
+                        self.global_shortcuts.status()
+                    );
+                }
+            }
         }
 
         // Global Keyboard Shortcut Esc to cancel or collapse tiers
@@ -766,6 +937,7 @@ impl eframe::App for MentatApp {
                 self.cancel_scan();
             } else if self.settings_open {
                 self.settings_open = false;
+                self.sync_viewport_size(ctx);
             } else {
                 match self.expansion_tier {
                     ExpansionTier::Tier3Inspector => {
@@ -831,26 +1003,37 @@ impl eframe::App for MentatApp {
 
             if action.settings_clicked {
                 self.settings_open = !self.settings_open;
+                self.sync_viewport_size(ctx);
             }
 
             // Render Settings Panel (if toggled)
             if self.settings_open {
                 ui.add_space(8.0);
+                let profile_before_edit = self.provider_setup.draft_profile.clone();
+                let setup_stage = self.provider_setup.stage();
                 let settings_action = SettingsPanel::new(
-                    &mut self.profile,
+                    &mut self.provider_setup.draft_profile,
                     &mut self.persona,
-                    &self.ping_status,
-                    self.is_pinging,
+                    &self.provider_setup.catalog.models,
+                    setup_stage,
+                    &self.provider_status,
+                    self.is_provider_busy,
                 )
                 .show(ui);
+                self.provider_setup.reconcile_edit(&profile_before_edit);
+                if let Some(model_id) = settings_action.selected_model.as_deref() {
+                    if let Err(message) = self.provider_setup.select_model(model_id) {
+                        self.provider_status = message;
+                    }
+                }
 
                 // [IMP-F005] Quick Reopen of Recent Repositories
                 if !self.recent_repos.is_empty() {
                     ui.separator();
-                    ui.label(RichText::new("📂 최근 저장소 다시 열기:").size(11.5).strong());
+                    ui.label(RichText::new("최근 저장소 다시 열기:").size(11.5).strong());
                     let mut reopened_root = None;
                     for repo in &self.recent_repos {
-                        if ui.button(format!("📁 {}", repo.display_name)).clicked() {
+                        if ui.button(&repo.display_name).clicked() {
                             reopened_root = Some(repo.root_path.clone());
                         }
                     }
@@ -860,14 +1043,18 @@ impl eframe::App for MentatApp {
                     }
                 }
 
-                if settings_action.ping_clicked {
-                    self.ping_backend();
+                if settings_action.discover_clicked {
+                    self.discover_provider_models();
+                }
+                if settings_action.verify_clicked {
+                    self.verify_draft_model();
+                }
+                if settings_action.activate_clicked {
+                    self.activate_draft_profile();
                 }
                 if settings_action.close_clicked {
-                    if let Some(ref s) = self.storage {
-                        let _ = s.save_backend_profile(&self.profile);
-                    }
                     self.settings_open = false;
+                    self.sync_viewport_size(ctx);
                 }
             }
 
@@ -910,7 +1097,7 @@ impl eframe::App for MentatApp {
                 ui.add_space(8.0);
                 ui.group(|ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("🛡️ 외부 데이터 전송 승인 (Egress Consent)").color(MentatTheme::STATUS_CONFLICT).strong().size(13.0));
+                        ui.label(RichText::new("외부 데이터 전송 승인 (Egress Consent)").color(MentatTheme::STATUS_CONFLICT).strong().size(13.0));
                     });
 
                     if self.consent.rebuilding || !self.consent.can_approve() {
@@ -922,7 +1109,10 @@ impl eframe::App for MentatApp {
                     if let Some(packet) = self.consent.display_packet() {
                         ui.label(RichText::new(format!(
                             "선택된 공급자({})로 문맥을 전송합니다. (포함: {}개 파일 / 약 {} 토큰 / 해시: {})",
-                            self.profile.model,
+                            self.provider_setup
+                                .active_profile()
+                                .map(|profile| profile.model.as_str())
+                                .unwrap_or("비활성"),
                             packet.included_files.len(),
                             packet.estimated_tokens,
                             packet.packet_hash.chars().take(8).collect::<String>()
@@ -930,20 +1120,20 @@ impl eframe::App for MentatApp {
 
                         if !packet.excluded_sensitive_files.is_empty() {
                             ui.label(RichText::new(format!(
-                                "🔒 자동 제외된 파일: {}건 (.env, 인증서, 사용자 제외 파일 등)",
+                                "자동 제외된 파일: {}건 (.env, 인증서, 사용자 제외 파일 등)",
                                 packet.excluded_sensitive_files.len()
                             )).color(MentatTheme::STATUS_READ_ONLY).size(11.5));
                         }
 
                         if packet.redacted_secret_occurrences > 0 {
                             ui.label(RichText::new(format!(
-                                "✂️ 내용 중 마스킹된 비밀정보: {}건",
+                                "내용 중 마스킹된 비밀정보: {}건",
                                 packet.redacted_secret_occurrences
                             )).color(MentatTheme::STATUS_INFERENCING).size(11.5));
                         }
                     }
 
-                    ui.collapsing("📄 포함될 파일 및 행 범위 미리보기 (체크 해제 시 제외)", |ui| {
+                    ui.collapsing("포함될 파일 및 행 범위 미리보기 (체크 해제 시 제외)", |ui| {
                         let preview_refs = self.consent.preview_refs().to_vec();
                         for ref_item in &preview_refs {
                             let mut is_included = !self.consent.user_excluded_files.contains(&ref_item.relative_path);
@@ -963,12 +1153,12 @@ impl eframe::App for MentatApp {
                     ui.horizontal(|ui| {
                         let approve = ui.add_enabled(
                             self.consent.can_approve(),
-                            egui::Button::new(RichText::new("✅ 전송 승인 및 실행").strong()),
+                            egui::Button::new(RichText::new("전송 승인 및 실행").strong()),
                         );
                         if approve.clicked() {
                             consent_granted = true;
                         }
-                        if ui.button("✖ 취소").clicked() {
+                        if ui.button("취소").clicked() {
                             consent_cancelled = true;
                         }
                     });
@@ -988,23 +1178,20 @@ impl eframe::App for MentatApp {
                     self.repo_consent_given = true;
                     let snap_id = self.snapshot.as_ref().map(|s| s.id).unwrap_or_else(uuid::Uuid::new_v4);
 
-                    let receipt = EgressReceipt {
-                        receipt_id: uuid::Uuid::new_v4(),
-                        packet_hash: packet.packet_hash.clone(),
-                        snapshot_id: snap_id,
-                        token_count: packet.estimated_tokens,
-                        file_count: packet.included_files.len(),
-                        granted_at: chrono::Utc::now().to_rfc3339(),
-                    };
-
+                    let active_profile = self.provider_setup.active_profile().cloned();
+                    if let Some(active_profile) = active_profile {
+                    let receipt = EgressReceipt::issue(&packet, &active_profile);
                     if let Ok(approved) = ApprovedInferenceRequest::new(
                         receipt,
                         packet,
                         q,
                         snap_id,
-                        self.profile.clone(),
+                        active_profile,
                     ) {
                         self.start_inference_stream_with_approved_request(approved);
+                    }
+                    } else {
+                        self.status_text = "활성 모델이 없어 전송을 중단했습니다.".to_string();
                     }
                 }
             }
@@ -1021,7 +1208,7 @@ impl eframe::App for MentatApp {
 
                 // Quick Action Chips Row
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("⚡ 빠른 분석:").size(11.5).color(MentatTheme::TEXT_MUTED));
+                    ui.label(RichText::new("빠른 분석:").size(11.5).color(MentatTheme::TEXT_MUTED));
                     if ui.small_button("/onboard").clicked() {
                         self.handle_query(ctx, "/onboard".to_string());
                     }
@@ -1046,7 +1233,7 @@ impl eframe::App for MentatApp {
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("✖ 접기 (Esc)").clicked() {
+                        if ui.button("접기 (Esc)").clicked() {
                             self.set_expansion_tier(ctx, ExpansionTier::Tier1Pill);
                         }
                     });
@@ -1092,7 +1279,7 @@ impl eframe::App for MentatApp {
 
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui.button("📋 답변 복사").clicked() {
+                    if ui.button("답변 복사").clicked() {
                         if let Some(ref text) = self.answer_preview {
                             let _ = PlatformManager::copy_to_clipboard(text);
                             self.status_text = "클립보드에 복사되었습니다.".to_string();
@@ -1119,13 +1306,13 @@ impl eframe::App for MentatApp {
                 if self.expansion_tier == ExpansionTier::Tier3Inspector {
                     ui.add_space(8.0);
                     ui.separator();
-                    ui.heading(RichText::new("🔬 Detailed Evidence & File Inspector").size(13.0));
+                    ui.heading(RichText::new("Detailed Evidence & File Inspector").size(13.0));
 
                     let mut clicked_file_idx = None;
 
                     ui.columns(2, |cols| {
                         cols[0].group(|ui| {
-                            ui.label(RichText::new("📂 저장소 파일 트리").strong().size(12.0));
+                            ui.label(RichText::new("저장소 파일 트리").strong().size(12.0));
                             egui::ScrollArea::vertical().id_salt("file_tree_scroll").max_height(160.0).show(ui, |ui| {
                                 for (idx, file) in self.files.iter().enumerate() {
                                     let label = format!("{} ({}행)", file.relative_path.display(), file.line_count.unwrap_or(0));
@@ -1138,7 +1325,7 @@ impl eframe::App for MentatApp {
                         });
 
                         cols[1].group(|ui| {
-                            ui.label(RichText::new("📄 소스코드 행 뷰어").strong().size(12.0));
+                            ui.label(RichText::new("소스코드 행 뷰어").strong().size(12.0));
                             egui::ScrollArea::vertical().id_salt("code_view_scroll").max_height(160.0).show(ui, |ui| {
                                 if let Some(ref content) = self.selected_file_content {
                                     for (i, line) in content.lines().enumerate() {
@@ -1190,19 +1377,56 @@ mod tests {
     }
 
     #[test]
+    fn settings_panel_requests_visible_card_height() {
+        assert_eq!(
+            viewport_size_for(ExpansionTier::Tier1Pill, true),
+            vec2(SETTINGS_SIZE[0], SETTINGS_SIZE[1])
+        );
+        assert_eq!(
+            viewport_size_for(ExpansionTier::Tier3Inspector, true),
+            vec2(TIER3_SIZE[0], TIER3_SIZE[1])
+        );
+    }
+
+    #[test]
+    fn incomplete_or_indexing_snapshot_cannot_enter_analysis() {
+        assert!(snapshot_allows_analysis(SnapshotStatus::Ready));
+        assert!(snapshot_allows_analysis(SnapshotStatus::Stale));
+        assert!(!snapshot_allows_analysis(SnapshotStatus::Indexing));
+        assert!(!snapshot_allows_analysis(SnapshotStatus::Incomplete));
+    }
+
+    #[test]
+    fn replacing_repository_scan_cancels_previous_token() {
+        let old = CancellationToken::new();
+        let old_observer = old.clone();
+        let mut slot = Some(old);
+        let next = CancellationToken::new();
+        install_scan_token(&mut slot, next.clone());
+
+        assert!(old_observer.is_cancelled());
+        assert!(!next.is_cancelled());
+    }
+
+    #[test]
     fn test_tampered_egress_request_rejection_fail_closed() {
         use mentat_inference::{BackendProfile, ProviderKind};
-        use sha2::{Digest, Sha256};
 
         let snap_id = uuid::Uuid::new_v4();
         let prompt_context = "context content".to_string();
-        let mut hasher = Sha256::new();
-        hasher.update(prompt_context.as_bytes());
-        let exact_hash = format!("{:x}", hasher.finalize());
-
-        let packet = EgressPacket {
+        let profile = BackendProfile {
+            id: uuid::Uuid::new_v4(),
+            name: "Gemini Test".to_string(),
+            provider: ProviderKind::GoogleGemini,
+            base_url: ProviderKind::GoogleGemini.default_base_url().to_string(),
+            model: "fixture-gemini".to_string(),
+            api_key: None,
+            timeout_secs: 30,
+        };
+        let question = EgressFilter::scan_and_redact_secrets("query").0;
+        let mut packet = EgressPacket {
             packet_id: uuid::Uuid::new_v4(),
-            packet_hash: exact_hash.clone(),
+            packet_hash: String::new(),
             included_files: vec![],
             included_file_refs: vec![],
             excluded_sensitive_files: vec![],
@@ -1210,33 +1434,16 @@ mod tests {
             estimated_tokens: 10,
             prompt_context: prompt_context.clone(),
             snapshot_id: snap_id,
-            redacted_user_question: "query".to_string(),
+            redacted_user_question: question.clone(),
             included_file_texts: std::collections::HashMap::new(),
         };
-
-        let receipt = EgressReceipt {
-            receipt_id: uuid::Uuid::new_v4(),
-            packet_hash: exact_hash,
-            snapshot_id: snap_id,
-            token_count: 10,
-            file_count: 0,
-            granted_at: "2026-08-19T00:00:00Z".to_string(),
-        };
-
-        let profile = BackendProfile {
-            id: uuid::Uuid::new_v4(),
-            name: "Gemini Test".to_string(),
-            provider: ProviderKind::GoogleGemini,
-            base_url: ProviderKind::GoogleGemini.default_base_url().to_string(),
-            model: "gemini-2.5-flash".to_string(),
-            api_key: None,
-            timeout_secs: 30,
-        };
+        packet.seal_for_profile(&profile);
+        let receipt = EgressReceipt::issue(&packet, &profile);
 
         let req = ApprovedInferenceRequest::new(
             receipt.clone(),
-            packet,
-            "query".to_string(),
+            packet.clone(),
+            question.clone(),
             snap_id,
             profile.clone(),
         )
@@ -1248,31 +1455,15 @@ mod tests {
         let consumed = req
             .into_inference_request()
             .expect("Should consume successfully");
-        assert_eq!(consumed.user_question, "query");
-        assert_eq!(consumed.profile.model, "gemini-2.5-flash");
+        assert_eq!(consumed.user_question, question);
+        assert_eq!(consumed.profile.model, "fixture-gemini");
 
         // Tampered prompt context in packet fails construction
-        let tampered_packet = EgressPacket {
-            packet_id: uuid::Uuid::new_v4(),
-            packet_hash: "unmatched_hash".to_string(),
-            included_files: vec![],
-            included_file_refs: vec![],
-            excluded_sensitive_files: vec![],
-            redacted_secret_occurrences: 0,
-            estimated_tokens: 10,
-            prompt_context: "tampered context".to_string(),
-            snapshot_id: snap_id,
-            redacted_user_question: "query".to_string(),
-            included_file_texts: std::collections::HashMap::new(),
-        };
+        let mut tampered_packet = packet;
+        tampered_packet.prompt_context = "tampered context".to_string();
 
-        let err = ApprovedInferenceRequest::new(
-            receipt,
-            tampered_packet,
-            "query".to_string(),
-            snap_id,
-            profile,
-        );
+        let err =
+            ApprovedInferenceRequest::new(receipt, tampered_packet, question, snap_id, profile);
         assert!(err.is_err(), "Tampered packet hash must fail construction");
     }
 }

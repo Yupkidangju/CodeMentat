@@ -45,6 +45,37 @@ impl InferenceBackend for FakeInferenceBackend {
         }
     }
 
+    async fn discover_models(
+        &self,
+        _profile: &BackendProfile,
+    ) -> Result<ModelCatalog, MentatError> {
+        if self.should_fail {
+            return Err(MentatError::BackendError {
+                code: "SIMULATED_DISCOVERY_FAILURE".to_string(),
+                message: "가상 모델 검색 실패".to_string(),
+            });
+        }
+        Ok(ModelCatalog::from_untrusted(vec![AvailableModel::new(
+            "fake-deterministic",
+            "Fake Deterministic",
+        )]))
+    }
+
+    async fn verify_model(
+        &self,
+        profile: &BackendProfile,
+    ) -> Result<ModelVerification, MentatError> {
+        Ok(ModelVerification {
+            compatible: !self.should_fail && !profile.model.trim().is_empty(),
+            message: if self.should_fail {
+                "가상 모델 검증 실패".to_string()
+            } else {
+                "가상 모델 검증 성공".to_string()
+            },
+            latency_ms: Some(1),
+        })
+    }
+
     async fn infer_stream(
         &self,
         request: InferenceRequest,

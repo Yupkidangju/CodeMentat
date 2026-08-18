@@ -23,6 +23,7 @@ pub enum SnapshotStatus {
     Ready,
     Stale,
     Indexing,
+    Incomplete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

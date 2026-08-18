@@ -48,7 +48,7 @@ sequenceDiagram
         Note over App: 제외 토글 시 old packet 즉시 None, generation 증가, stale 결과 폐기
         Dev->>App: [✅ 전송 승인 및 실행] (can_approve일 때만)
         App->>Analysis: ApprovedInferenceRequest::new(receipt, packet, query, snapshot, profile)
-        Note over Analysis: 프롬프트 바이트 직접 재해시 + 모든 메타데이터 봉인
+        Note over Analysis: question/validation/snapshot/ref/profile canonical seal 재검증
         Analysis-->>App: approved_req (Private Fields)
         App->>Infer: infer_stream(approved_req.into_inference_request(), cancel_token)
         Infer-->>App: SSE Stream (TextDelta, Started, Completed, Cancelled)
@@ -65,21 +65,30 @@ sequenceDiagram
 |---|---|---|---|
 | `mentat-core` | 도메인 모델 & 포트 | `Claim`, `EvidenceRef`, `RepositoryProfile`, `RepositorySnapshot`, `MentatError` 정의 | - |
 | `mentat-platform` | OS 플랫폼 & 격리 가드 | 폴더 선택기, 클립보드 복사, `validate_storage_isolation` (AppData 상호 침범 방지) | `test_storage_isolation_detection` |
-| `mentat-repository` | 읽기 전용 저장소 엔진 | `ReadOnlySession` (`ScanOutcome` 취소/omission, metadata preflight), `RepositoryWatcher` (생성자 non-walk) | `test_dbg_f003_mid_scan_cancel`, `test_dbg_f003_giant_file_omitted_without_full_hash`, `test_dbg_f008_constructor_does_not_walk_tree` |
+| `mentat-repository` | 읽기 전용 저장소 엔진 | Incomplete snapshot, 8MiB preview budget, repository switch cancel, OS event watcher + changed-path full hash | `test_dbg_f003_mid_scan_cancel`, `test_dbg_f003_preview_memory_has_a_global_budget`, `test_dbg_f002_preserved_mtime_same_size_content_change` |
 | `mentat-storage` | AppData SQLite 영속화 | `SqliteStorage`, 최근 저장소, 프로필, 스냅샷, canonical root 조회 | `test_sqlite_storage_save_and_list_recent_repos`, `test_imp_f005_find_repo_by_canonical_root` |
-| `mentat-analysis` | 정적 분석 및 유출 통제 | `AnswerBundleNormalizer` (snapshot/hash/excerpt/range), `/conflicts` 문서-코드 비교, 고엔트로피/relevance egress | `test_imp_f004_wrong_snapshot_hash_excerpt_range_and_mixed_evidence`, `test_imp_f004_doc_code_language_conflict_fixture`, `test_sec_f002_high_entropy_redaction` |
-| `mentat-inference` | 추론 도메인 인터페이스 | `InferenceBackend` trait, `BackendProfile` Redacted Debug & parsed URL loopback validation, `FakeInferenceBackend` | `test_sec_f004_redacted_debug_formatting`, `test_sec_f004_parsed_url_loopback_validation`, `test_fake_inference_cancellation`, `test_fake_inference_stream_completes` |
-| `mentat-inference-openai` | 멀티 프로바이더 스트리밍 | Gemini/OpenAI SSE, 사전 응답 취소, 바이트 버퍼 SSE, loopback wire fixture | `test_openai_wire_http_error_codes`, `test_openai_wire_cancel_during_send`, `test_openai_wire_split_sse_chunks` |
+| `mentat-analysis` | 정적 분석 및 유출 통제 | canonical egress seal, claim evidence/confidence invariant, AnswerBundle citation 검증, 고엔트로피/relevance egress | `test_approved_inference_request_binding_integrity_and_consume_once`, `test_imp_f004_claim_invariants_reject_empty_duplicate_and_invalid_confidence` |
+| `mentat-inference` | 추론 도메인 인터페이스 | 동적 `ModelCatalog`, `ModelVerification`, 하드코딩 없는 `BackendProfile`, URL 검증, 테스트 더블 | `production_profile_does_not_choose_a_hardcoded_model`, `model_catalog_rejects_empty_ids_and_deduplicates_provider_data` |
+| `mentat-inference-openai` | 멀티 프로바이더 스트리밍 | Gemini/OpenAI 동적 모델 검색, 최소 생성 프로브, redirect key 차단, SSE | `gemini_cross_origin_redirect_never_receives_api_key`, `openai_model_discovery_uses_provider_response_without_presets` |
 | `mentat-inference-llama` | 미래 온디바이스 계약 | `NativeLlamaContract`, 하드웨어 탐지 스텁 | `test_native_llama_contract_isolated_context_and_kv_cleanup` 등 3개 |
-| `mentat-persona` | 페르소나 및 아나운서 | 3가지 페르소나 프리셋, 사실 보존 렌더러, 중요도 기반 알림 정책 | `test_persona_rendering_preserves_facts_and_evidence`, `test_announcement_policy_levels` |
-| `mentat-app` | eframe 데스크톱 UI | Consent generation 가드, 복원된 snapshot을 Indexing/STALE 상태에 연결, 백그라운드 워처 폴링, 검증된 AnswerBundle 렌더 | `test_tampered_egress_request_rejection_fail_closed` |
+| `mentat-persona` | 페르소나 및 아나운서 | 이모지 글꼴에 의존하지 않는 3가지 페르소나 표시명, 사실 보존 렌더러, 중요도 기반 알림 정책 | `test_persona_rendering_preserves_facts_and_evidence`, `test_announcement_policy_levels` |
+| `mentat-app` | eframe 데스크톱 UI | Draft/Verified/Active 공급자 상태, incomplete query gate, global hotkey 표시·포커스와 non-hide fallback | `incomplete_or_indexing_snapshot_cannot_enter_analysis`, `failed_or_colliding_registration_never_hides_the_window` |
+
+### UI 복구 실행 증거 (2026-08-19)
+
+- 수정 전 실제 실행: 580×52 Tier 1에서 한국어·이모지가 사각형으로 표시되고, 설정 및 저장소 미선택 질문은 창 높이를 늘리지 않아 보조 UI가 보이지 않았다.
+- 수정 후 실제 실행: 초기 한글 레이블이 정상 표시되고, 설정과 질문 카드는 580×300, Detailed Inspector는 660×480으로 확장됐다.
+- 폰트 자산: `crates/mentat-app/assets/fonts/NanumGothic-Regular.ttf`와 OFL 1.1 라이선스를 앱 바이너리에 포함한다.
 
 ---
 
 ## 3. 품질 게이트 검증 결과 (Verification Results)
 
-- **단위/회귀 테스트:** `cargo test --workspace --locked` 실행 증거 (65 passed, 1 ignored 100k profile)
+- **단위/회귀 테스트:** `cargo test --workspace --locked` 실행 증거 (88 passed, 1 ignored 100k/2GiB profile)
+- **100k/2GiB profile:** 100,000 files / 2,147,483,648 bytes / preview 3,358,720 bytes / scan 106,477ms / Windows peak working set 46,096,384 bytes (별도 ignored gate PASS)
 - **포맷팅 검사:** `cargo fmt --all -- --check` (0 diffs)
 - **정적 분석:** `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` (0 errors, 0 warnings)
 - **릴리스 바이너리 빌드:** `cargo build --release -p mentat-app` (완료)
-- **의존성 보안 감사:** `cargo audit --file Cargo.lock` (`DEC-SEC-004` Accepted Risk 공식 관리 및 명문화)
+- **Windows global shortcut runtime:** 다른 앱 포커스에서 `Ctrl+Alt+M` 전역 event 수신과 Code Mentat 표시 유지/Tier 1 non-hide fallback 확인
+- **Baseline 원문 대조:** `CODE_MENTAT_SPEC.md`와 `spec.md`의 FR/NFR/CON 47개 정의·수용 기준, mismatch 0
+- **의존성 보안 감사:** `cargo audit --file Cargo.lock` FAIL — `quick-xml 0.30.0` High 2건(`RUSTSEC-2026-0194`, `RUSTSEC-2026-0195`)과 unmaintained 2건. High 2건은 `DEC-SEC-004`의 Windows 비도달 Accepted Risk이며 audit 실패를 PASS로 표기하지 않음

@@ -44,6 +44,12 @@
   - 승인된 패킷의 SHA-256 해시를 고정한 단일 사용 `EgressReceipt`를 발급하고, 승인된 패킷을 재조립 없이 그대로 소비.
 - **결과:** 무승인 전송 및 문맥 변조 위험 0건 달성.
 
+### [DEC-SEC-008] 승인 대상 전체를 결속하는 canonical egress seal (SEC-F001)
+- **배경:** `prompt_context` 단독 해시는 승인 후 질문, citation 검증 텍스트, 스냅샷, 파일 참조 또는 공급자 엔드포인트 교체를 식별하지 못한다.
+- **결정:** 하나의 길이-prefix canonical SHA-256 함수가 packet ID, snapshot, prompt, redacted question, 포함/제외 경로, 정렬된 파일 참조, 정렬된 validation text digest, redaction/token 계수와 활성 프로필 ID·provider·endpoint·model·timeout을 결속한다.
+- **불변조건:** packet 생성, receipt 발급, `ApprovedInferenceRequest::new`, consume-time 검증은 동일 함수만 사용한다. 별도 부분 해시나 필드별 fallback은 허용하지 않는다.
+- **결과:** 같은 길이 question, validation map, snapshot/ref, profile endpoint/model 중 하나라도 바뀌면 승인 요청 생성 또는 소비가 실패 폐쇄된다.
+
 ### [DEC-SEC-002] 내용 인식 비밀정보 스캐너 및 다층 필터링 (SEC-F002)
 - **배경:** 파일명 블랙리스트만으로는 일반 파일(README, 코드) 내 API 키, 인증서, 토큰 유출을 막을 수 없음.
 - **결정:**
@@ -80,6 +86,13 @@
 ### [DEC-INF-001] 다중 공급자 공통 계약 및 Google Gemini / OpenRouter 지원
 - 단일 `InferenceBackend` 인터페이스 하에 Google Gemini REST/SSE 및 OpenRouter / OpenAI SSE 어댑터 지원.
 
+### [DEC-INF-005] 동적 모델 검색과 검증 후 활성화
+- **배경:** 정적 모델 프리셋은 계정 권한, 모델 폐기, 로컬 설치 상태와 어긋나며 연결 성공만으로 선택 모델의 실제 추론 호환성을 보장할 수 없다.
+- **결정:** 운영 모델 ID 하드코딩을 제거하고 `InferenceBackend`에 모델 검색과 선택 모델 생성 프로브 계약을 둔다. UI는 Draft와 Active 프로필을 분리하고 `Draft → ModelsDiscovered → ModelVerified → Active` 순서만 허용한다.
+- **보안 경계:** 공급자 응답은 신뢰하지 않는 데이터로 검증한다. API 키는 메모리의 Draft/Active에만 존재하며 SQLite에는 저장하지 않는다. 프로필 편집은 기존 Active를 변경하지 않는다.
+- **내장 로컬:** 선택지는 제공하되 네이티브 실행 엔진 또는 설치 모델이 없으면 빈 카탈로그와 구조화 오류를 반환하여 활성화를 차단한다.
+- **대안 및 기각 사유:** 실패 시 코드 내 기본 모델 목록을 표시하는 방식은 존재하지 않거나 권한 없는 모델을 활성화할 수 있어 기각한다.
+
 ### [DEC-SEC-005] 사용자 제외 토글은 generation 가드로 이전 패킷을 즉시 무효화한다 (SEC-F011)
 - **배경:** 제외 체크박스 변경 후 비동기 재조립이 끝나기 전 기존 `pending_egress_packet`을 승인하면, UI에는 제외된 파일이 전송 payload에는 남는 consent TOCTOU가 발생한다.
 - **결정:**
@@ -111,7 +124,12 @@
 - **결정:** `user_question`도 `scan_and_redact_secrets`를 통과한다. 질문은 packet의 `redacted_user_question` 한 곳에만 두고 어댑터는 `prompt_context`에 다시 붙이지 않는다.
 
 ### [DEC-UI-002] 뷰포트·테마·단축키는 구현값을 제품 기준으로 동결한다 (IMP-F003)
-- **결정:** Tier 크기는 `580x52` / `580x300` / `660x480`, conflict 색은 amber `#F59E0B`이다. `Ctrl+K`/`Ctrl+P`는 앱 단축키, `Alt+Space`/`Ctrl+Alt+M`은 가능한 OS에서 전역 등록한다.
+- **결정:** Tier 크기는 `580x52` / `580x300` / `660x480`, conflict 색은 amber `#F59E0B`이다. `Ctrl+K`/`Ctrl+P`는 앱 단축키, `Alt+Space`/`Ctrl+Alt+M`은 OS 전역 표시·포커스/접기로 등록한다. hidden winit 창의 self-unhide dead-end를 피하기 위해 창 숨김은 금지한다.
+
+### [DEC-DBG-003] OS watcher event + changed-path full hash (DBG-F002)
+- **배경:** 3초마다 전 파일 첫 8KiB를 읽는 방식은 tail edit를 놓치면서 100k 파일 I/O를 반복한다.
+- **결정:** `notify 8.2.0` RecommendedWatcher를 primary로 사용하고 이벤트가 발생한 경로만 전체 SHA-256한다. 동기 강제 검증도 파일 전체를 읽으며 worker stop은 50ms polling과 join으로 제한한다.
+- **결과:** 16KiB 파일의 후반부 동일크기·mtime 복원 변경을 검출하고 정상 상태에서는 전수 content rehash를 수행하지 않는다.
 
 ### [DEC-REL-001] Cargo 0.1.0과 문서 0.1.0-dev (IMP-F002)
 - **결정:** 패키지 SemVer는 `0.1.0`이다. `0.1.0-dev`는 미릴리스 문서 상태이며 다른 제품을 가리키지 않는다.

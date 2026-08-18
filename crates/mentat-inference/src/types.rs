@@ -1,5 +1,6 @@
 use mentat_core::error::MentatError;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,27 +23,12 @@ impl ProviderKind {
         }
     }
 
-    pub fn default_models(&self) -> &'static [&'static str] {
-        match self {
-            ProviderKind::GoogleGemini => {
-                &["gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-flash"]
-            }
-            ProviderKind::OpenRouter => &[
-                "anthropic/claude-3.7-sonnet",
-                "deepseek/deepseek-r1",
-                "meta-llama/llama-3.3-70b-instruct",
-            ],
-            ProviderKind::OpenAi | ProviderKind::OpenAICompatible => {
-                &["gpt-4o", "gpt-4o-mini", "o3-mini"]
-            }
-            ProviderKind::CustomCompatible | ProviderKind::LocalMock => {
-                &["local-model", "mock-model"]
-            }
-        }
+    pub fn requires_api_key(&self) -> bool {
+        !matches!(self, ProviderKind::LocalMock)
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackendProfile {
     pub id: Uuid,
     pub name: String,
@@ -115,6 +101,71 @@ impl BackendProfile {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AvailableModel {
+    pub id: String,
+    pub display_name: String,
+}
+
+impl AvailableModel {
+    pub fn new(id: impl Into<String>, display_name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            display_name: display_name.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCatalog {
+    pub models: Vec<AvailableModel>,
+    pub latency_ms: Option<u64>,
+}
+
+impl ModelCatalog {
+    pub fn from_untrusted(models: Vec<AvailableModel>) -> Self {
+        let mut seen = HashSet::new();
+        let mut normalized = Vec::new();
+
+        for model in models {
+            let id = model.id.trim().to_string();
+            let valid_id = !id.is_empty()
+                && id.len() <= 256
+                && !id.starts_with('/')
+                && !id.contains("..")
+                && id.chars().all(|ch| {
+                    ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':')
+                });
+            if !valid_id || !seen.insert(id.clone()) {
+                continue;
+            }
+            let display_name = if model.display_name.trim().is_empty() {
+                id.clone()
+            } else {
+                model.display_name.trim().to_string()
+            };
+            normalized.push(AvailableModel { id, display_name });
+        }
+
+        Self {
+            models: normalized,
+            latency_ms: None,
+        }
+    }
+
+    pub fn with_latency(mut self, latency_ms: u64) -> Self {
+        self.latency_ms = Some(latency_ms);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelVerification {
+    pub compatible: bool,
+    pub message: String,
+    pub latency_ms: Option<u64>,
+}
+
 impl Default for BackendProfile {
     fn default() -> Self {
         Self {
@@ -122,7 +173,7 @@ impl Default for BackendProfile {
             name: "Google Gemini Default".to_string(),
             provider: ProviderKind::GoogleGemini,
             base_url: ProviderKind::GoogleGemini.default_base_url().to_string(),
-            model: "gemini-2.5-flash".to_string(),
+            model: String::new(),
             api_key: None,
             timeout_secs: 60,
         }
@@ -237,5 +288,35 @@ mod tests {
         let debug_str = format!("{:?}", profile);
         assert!(!debug_str.contains("super_secret_raw_key_123"));
         assert!(debug_str.contains("[REDACTED_API_KEY]"));
+    }
+
+    #[test]
+    fn production_profile_does_not_choose_a_hardcoded_model() {
+        let profile = BackendProfile::default();
+        assert!(profile.model.is_empty());
+    }
+
+    #[test]
+    fn model_catalog_rejects_empty_ids_and_deduplicates_provider_data() {
+        let catalog = ModelCatalog::from_untrusted(vec![
+            AvailableModel::new("model-a", "Model A"),
+            AvailableModel::new("", "Invalid"),
+            AvailableModel::new("model-a", "Duplicate"),
+            AvailableModel::new(" model-b ", ""),
+            AvailableModel::new("../escape", "Invalid path"),
+            AvailableModel::new("bad?query", "Invalid query"),
+        ]);
+
+        assert_eq!(catalog.models.len(), 2);
+        assert_eq!(catalog.models[0].id, "model-a");
+        assert_eq!(catalog.models[1].id, "model-b");
+        assert_eq!(catalog.models[1].display_name, "model-b");
+    }
+
+    #[test]
+    fn only_builtin_local_can_skip_api_key() {
+        assert!(!ProviderKind::LocalMock.requires_api_key());
+        assert!(ProviderKind::GoogleGemini.requires_api_key());
+        assert!(ProviderKind::OpenAi.requires_api_key());
     }
 }

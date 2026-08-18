@@ -7,11 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.1.0-dev] - 2026-08-19 (Re-audit #10 Remediation)
+## [0.1.0-dev] - 2026-08-19 (Re-audit #11 Remediation)
 
 패키지 SemVer는 `0.1.0`이며 이 항목은 그 개발 스냅샷이다.
 
 ### Fixed
+- **[SEC-F001] Canonical egress seal:** question, validation text digest, snapshot/ref, redaction/token 계수와 provider endpoint/model identity를 단일 digest로 결속하고 tamper matrix를 추가했다.
+- **[IMP-F001] Baseline authority:** FR-013/FR-017 원문을 복구하고 provider activation을 `DR-FR-001`로 분리했다.
+- **[DBG-F003] Incomplete snapshot:** 취소·한도 누락 scan을 `Incomplete`로 표시해 DB 저장과 로컬/클라우드 분석을 차단하고 repository switch 시 이전 scan을 취소한다.
+- **[DBG-F003] Memory budget:** scan 전체 text preview를 8MiB로 제한하고 실제 100k/2GiB profile에 peak working set 계측을 추가했다.
+- **[DBG-F002] Watcher:** `notify` OS event와 changed-path full hash로 전환해 16KiB tail edit를 검출하고 반복 전수 I/O를 제거했다.
+- **[IMP-F004] Claim invariant:** Observed/Conflict empty evidence, duplicate/missing evidence와 invalid confidence를 Unknown으로 강등한다.
+- **[SEC-F004] Gemini redirect:** secret-bearing Gemini client의 redirect를 거부하고 cross-origin key zero-leak fixture를 추가했다.
+- **[IMP-F003] Global hotkey:** OS 등록·event thread·unregister lifecycle을 연결하고 창 숨김 대신 안전한 표시·포커스/Tier 1 fallback을 적용했다.
+- **[IMP-F006] Audit roadmap:** 독립 감사 HOLD, Partial gate와 유효한 SEC-F007 risk record를 반영했다.
+- **검증 후 AI 공급자 활성화:**
+  - 제품 코드의 Gemini/OpenAI/OpenRouter/Local 모델 ID 프리셋과 스트리밍 fallback을 제거했다.
+  - 공급자 API가 반환한 모델만 동적으로 표시하며 Gemini는 `generateContent` 지원 모델만 허용한다.
+  - 외부 모델 ID의 길이·문자·경로 안전성을 검증하고 모델 검색/검증 응답 크기를 제한한다.
+  - 선택 모델에 최소 실제 생성 프로브를 실행하고 `Draft → ModelsDiscovered → ModelVerified → Active` 순서를 강제한다.
+  - Draft와 Active 프로필을 분리하고 설정 변경·오래된 비동기 결과가 기존 Active를 변조하지 못하게 했다.
+  - 내장 로컬은 키 없이 선택 가능하지만 런타임/설치 모델 부재 시 `LOCAL_RUNTIME_UNAVAILABLE`로 실패 폐쇄한다.
+- **네이티브 UI 렌더링 및 확장 복구:**
+  - OFL NanumGothic 글꼴을 한글 폴백으로 내장해 한국어가 사각형 글리프로 표시되던 문제를 수정했다.
+  - 핵심 UI 이모지 아이콘을 텍스트 조작으로 교체해 플랫폼별 글리프 의존성을 제거했다.
+  - 설정, 질문, 오류 카드, 증거 인스펙터가 각각 580×300 및 660×480 뷰포트로 실제 확장되도록 상태와 창 크기를 동기화했다.
+  - 저장소가 아직 열리지 않은 질문도 먼저 대화 카드를 열어 선행조건 오류를 표시한다.
 - **[IMP-F004] Cloud evidence contract:**
   - Approved requests now include AnswerBundle JSON schema, current snapshot ID, and per-file path/hash/line range.
   - The app validates model output with included file contents via `from_model_text_with_contents`.

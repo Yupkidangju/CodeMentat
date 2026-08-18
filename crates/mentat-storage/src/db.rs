@@ -223,6 +223,7 @@ impl SqliteStorage {
             SnapshotStatus::Ready => "Ready",
             SnapshotStatus::Stale => "Stale",
             SnapshotStatus::Indexing => "Indexing",
+            SnapshotStatus::Incomplete => "Incomplete",
         };
 
         conn.execute(
@@ -272,6 +273,7 @@ impl SqliteStorage {
                 let status = match status_str.as_str() {
                     "Stale" => SnapshotStatus::Stale,
                     "Indexing" => SnapshotStatus::Indexing,
+                    "Incomplete" => SnapshotStatus::Incomplete,
                     _ => SnapshotStatus::Ready,
                 };
 

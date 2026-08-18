@@ -2,7 +2,8 @@ use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
 use mentat_core::error::MentatError;
 use mentat_inference::{
-    BackendProfile, HealthStatus, InferenceEvent, InferenceRequest, ProviderKind,
+    AvailableModel, BackendProfile, HealthStatus, InferenceEvent, InferenceRequest, ModelCatalog,
+    ModelVerification, ProviderKind,
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::json;
@@ -14,6 +15,43 @@ pub struct OpenAiAdapter {
 }
 
 impl OpenAiAdapter {
+    async fn parse_bounded_json(
+        response: reqwest::Response,
+        limit: usize,
+        too_large_code: &str,
+        read_error_code: &str,
+        invalid_json_code: &str,
+    ) -> Result<serde_json::Value, MentatError> {
+        if response
+            .content_length()
+            .is_some_and(|length| length > limit as u64)
+        {
+            return Err(MentatError::BackendError {
+                code: too_large_code.to_string(),
+                message: format!("응답이 {limit}바이트 제한을 초과했습니다."),
+            });
+        }
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| MentatError::BackendError {
+                code: read_error_code.to_string(),
+                message: e.to_string(),
+            })?;
+            if body.len().saturating_add(chunk.len()) > limit {
+                return Err(MentatError::BackendError {
+                    code: too_large_code.to_string(),
+                    message: format!("응답이 {limit}바이트 제한을 초과했습니다."),
+                });
+            }
+            body.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&body).map_err(|e| MentatError::BackendError {
+            code: invalid_json_code.to_string(),
+            message: e.to_string(),
+        })
+    }
+
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::builder()
@@ -30,6 +68,172 @@ impl Default for OpenAiAdapter {
 }
 
 impl OpenAiAdapter {
+    fn authorization_headers(profile: &BackendProfile) -> Result<HeaderMap, MentatError> {
+        if profile.provider == ProviderKind::LocalMock {
+            return Err(MentatError::BackendError {
+                code: "LOCAL_RUNTIME_UNAVAILABLE".to_string(),
+                message: "내장 로컬 추론 런타임과 설치 모델을 찾을 수 없습니다.".to_string(),
+            });
+        }
+
+        let api_key = profile.api_key.as_deref().unwrap_or("");
+        if profile.provider.requires_api_key() && api_key.is_empty() {
+            return Err(MentatError::BackendError {
+                code: "MISSING_API_KEY".to_string(),
+                message: "선택한 공급자의 API 키가 설정되지 않았습니다.".to_string(),
+            });
+        }
+
+        let mut headers = HeaderMap::new();
+        if !api_key.is_empty() {
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {}", api_key)).map_err(|e| {
+                    MentatError::BackendError {
+                        code: "INVALID_HEADER".to_string(),
+                        message: e.to_string(),
+                    }
+                })?,
+            );
+        }
+        Ok(headers)
+    }
+
+    fn models_url(base_url: &str) -> String {
+        let base = base_url.trim_end_matches('/');
+        if let Some(prefix) = base.strip_suffix("/chat/completions") {
+            format!("{prefix}/models")
+        } else {
+            format!("{base}/models")
+        }
+    }
+
+    fn chat_completions_url(base_url: &str) -> String {
+        let base = base_url.trim_end_matches('/');
+        if base.ends_with("/chat/completions") {
+            base.to_string()
+        } else {
+            format!("{base}/chat/completions")
+        }
+    }
+
+    pub async fn discover_models(
+        &self,
+        profile: &BackendProfile,
+    ) -> Result<ModelCatalog, MentatError> {
+        profile.validate_url()?;
+        let start = Instant::now();
+        let response = self
+            .client
+            .get(Self::models_url(&profile.base_url))
+            .headers(Self::authorization_headers(profile)?)
+            .timeout(std::time::Duration::from_secs(
+                profile.timeout_secs.clamp(5, 300),
+            ))
+            .send()
+            .await
+            .map_err(|e| MentatError::BackendError {
+                code: "MODEL_DISCOVERY_NETWORK_ERROR".to_string(),
+                message: e.to_string(),
+            })?;
+
+        if !response.status().is_success() {
+            return Err(MentatError::BackendError {
+                code: format!("MODEL_DISCOVERY_HTTP_{}", response.status().as_u16()),
+                message: "모델 목록 요청이 거부되었습니다.".to_string(),
+            });
+        }
+        let value = Self::parse_bounded_json(
+            response,
+            4 * 1024 * 1024,
+            "MODEL_DISCOVERY_RESPONSE_TOO_LARGE",
+            "MODEL_DISCOVERY_READ_ERROR",
+            "MODEL_DISCOVERY_INVALID_JSON",
+        )
+        .await?;
+        let models = value
+            .get("data")
+            .and_then(|data| data.as_array())
+            .ok_or_else(|| MentatError::BackendError {
+                code: "MODEL_DISCOVERY_INVALID_SCHEMA".to_string(),
+                message: "모델 목록 응답에 data 배열이 없습니다.".to_string(),
+            })?
+            .iter()
+            .filter_map(|item| item.get("id").and_then(|id| id.as_str()))
+            .map(|id| AvailableModel::new(id, id))
+            .collect();
+
+        let catalog =
+            ModelCatalog::from_untrusted(models).with_latency(start.elapsed().as_millis() as u64);
+        if catalog.models.is_empty() {
+            return Err(MentatError::BackendError {
+                code: "MODEL_DISCOVERY_EMPTY".to_string(),
+                message: "현재 자격 증명으로 사용할 수 있는 모델이 없습니다.".to_string(),
+            });
+        }
+        Ok(catalog)
+    }
+
+    pub async fn verify_model(
+        &self,
+        profile: &BackendProfile,
+    ) -> Result<ModelVerification, MentatError> {
+        profile.validate_url()?;
+        if profile.model.trim().is_empty() {
+            return Err(MentatError::BackendError {
+                code: "MODEL_NOT_SELECTED".to_string(),
+                message: "검증할 모델을 선택해야 합니다.".to_string(),
+            });
+        }
+        let start = Instant::now();
+        let response = self
+            .client
+            .post(Self::chat_completions_url(&profile.base_url))
+            .headers(Self::authorization_headers(profile)?)
+            .timeout(std::time::Duration::from_secs(
+                profile.timeout_secs.clamp(5, 300),
+            ))
+            .json(&json!({
+                "model": profile.model,
+                "messages": [{"role": "user", "content": "Reply with OK."}],
+                "max_tokens": 1,
+                "stream": false
+            }))
+            .send()
+            .await
+            .map_err(|e| MentatError::BackendError {
+                code: "MODEL_VERIFY_NETWORK_ERROR".to_string(),
+                message: e.to_string(),
+            })?;
+        if !response.status().is_success() {
+            return Err(MentatError::BackendError {
+                code: format!("MODEL_VERIFY_HTTP_{}", response.status().as_u16()),
+                message: "선택 모델의 생성 요청이 거부되었습니다.".to_string(),
+            });
+        }
+        let value = Self::parse_bounded_json(
+            response,
+            1024 * 1024,
+            "MODEL_VERIFY_RESPONSE_TOO_LARGE",
+            "MODEL_VERIFY_READ_ERROR",
+            "MODEL_VERIFY_INVALID_JSON",
+        )
+        .await?;
+        let compatible = value
+            .pointer("/choices/0/message/content")
+            .and_then(|content| content.as_str())
+            .is_some_and(|content| !content.trim().is_empty());
+        Ok(ModelVerification {
+            compatible,
+            message: if compatible {
+                "선택 모델이 생성 요청에 정상 응답했습니다.".to_string()
+            } else {
+                "응답에 텍스트 생성 결과가 없습니다.".to_string()
+            },
+            latency_ms: Some(start.elapsed().as_millis() as u64),
+        })
+    }
+
     pub async fn health_check(
         &self,
         profile: &BackendProfile,
@@ -112,6 +316,13 @@ impl OpenAiAdapter {
             });
         }
 
+        if profile.model.trim().is_empty() {
+            return Err(MentatError::BackendError {
+                code: "MODEL_NOT_SELECTED".to_string(),
+                message: "검증되어 활성화된 모델이 없습니다.".to_string(),
+            });
+        }
+
         profile.validate_url()?;
 
         let mut headers = HeaderMap::new();
@@ -146,14 +357,8 @@ impl OpenAiAdapter {
             )
         };
 
-        let model = if profile.model.is_empty() {
-            "gpt-4o"
-        } else {
-            &profile.model
-        };
-
         let body = json!({
-            "model": model,
+            "model": profile.model,
             "stream": true,
             "messages": [
                 {

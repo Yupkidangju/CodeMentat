@@ -1,6 +1,8 @@
 use ignore::WalkBuilder;
 use mentat_core::error::MentatError;
+use notify::{RecursiveMode, Watcher};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -9,7 +11,6 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 pub const WATCHER_THROTTLE_INTERVAL: Duration = Duration::from_millis(1000);
-pub const VERIFIED_REHASH_INTERVAL: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TreeSignature {
@@ -51,58 +52,65 @@ impl RepositoryWatcher {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = stop.clone();
         let root = self.root_path.clone();
-        let mut last_signature = self.last_signature.clone();
-        let mut last_content_fp = self.last_content_fp.clone();
-        let mut last_rehash = Instant::now();
-
         let worker = std::thread::Builder::new()
             .name("mentat-watcher".to_string())
             .spawn(move || {
-                if stop_flag.load(Ordering::Relaxed) {
+                let (event_tx, event_rx) = mpsc::channel();
+                let mut watcher = match notify::recommended_watcher(
+                    move |result: notify::Result<notify::Event>| {
+                        let _ = event_tx.send(result);
+                    },
+                ) {
+                    Ok(watcher) => watcher,
+                    Err(_) => {
+                        let _ = tx.send(true);
+                        return;
+                    }
+                };
+                if watcher.watch(&root, RecursiveMode::Recursive).is_err() {
+                    let _ = tx.send(true);
                     return;
                 }
-                if last_signature.is_none() {
-                    last_signature = Self::compute_tree_signature(&root).ok();
-                }
-                if last_content_fp.is_none() {
-                    last_content_fp = Self::compute_content_fingerprint(&root).ok();
-                }
+                let mut changed_path_hashes = HashMap::<PathBuf, String>::new();
+
                 while !stop_flag.load(Ordering::Relaxed) {
-                    let started = Instant::now();
-                    while started.elapsed() < WATCHER_THROTTLE_INTERVAL {
-                        if stop_flag.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-                    if stop_flag.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    match Self::compute_tree_signature(&root) {
-                        Ok(signature) if last_signature.as_ref() != Some(&signature) => {
-                            last_signature = Some(signature);
-                            if tx.send(true).is_err() {
-                                break;
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(_) => {
-                            // Metadata failures still wake the UI so the session can go STALE.
-                            if tx.send(true).is_err() {
-                                break;
-                            }
-                        }
-                    }
-                    if last_rehash.elapsed() >= VERIFIED_REHASH_INTERVAL {
-                        last_rehash = Instant::now();
-                        if let Ok(fp) = Self::compute_content_fingerprint(&root) {
-                            if last_content_fp.as_ref() != Some(&fp) {
-                                last_content_fp = Some(fp);
-                                if tx.send(true).is_err() {
-                                    break;
+                    match event_rx.recv_timeout(Duration::from_millis(50)) {
+                        Ok(Ok(event)) => {
+                            let mut changed = false;
+                            for path in event.paths {
+                                if path
+                                    .components()
+                                    .any(|component| component.as_os_str() == ".git")
+                                {
+                                    continue;
+                                }
+                                if path.is_file() {
+                                    match Self::hash_file(&path) {
+                                        Ok(hash) => {
+                                            let previous =
+                                                changed_path_hashes.insert(path, hash.clone());
+                                            if previous.as_deref() != Some(hash.as_str()) {
+                                                changed = true;
+                                            }
+                                        }
+                                        Err(_) => changed = true,
+                                    }
+                                } else {
+                                    changed_path_hashes.remove(&path);
+                                    changed = true;
                                 }
                             }
+                            if changed && tx.send(true).is_err() {
+                                break;
+                            }
                         }
+                        Ok(Err(_)) => {
+                            if tx.send(true).is_err() {
+                                break;
+                            }
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                 }
             })
@@ -118,8 +126,9 @@ impl RepositoryWatcher {
             stop.store(true, Ordering::Relaxed);
         }
         self.change_rx = None;
-        // Non-blocking: detach the worker instead of joining on the UI thread.
-        let _ = self.worker.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 
     /// [DBG-F002] Detects same-size content edits even when mtime is restored.
@@ -238,7 +247,6 @@ impl RepositoryWatcher {
     }
 
     fn compute_content_fingerprint(root: &Path) -> Result<String, MentatError> {
-        use std::io::Read;
         let mut hasher = Sha256::new();
         let mut metadata_errors = 0usize;
         let walker = WalkBuilder::new(root)
@@ -265,20 +273,11 @@ impl RepositoryWatcher {
                 Ok(meta) if meta.is_file() => {
                     hasher.update(path.to_string_lossy().as_bytes());
                     hasher.update(meta.len().to_le_bytes());
-                    match std::fs::File::open(path) {
-                        Ok(mut file) => {
-                            let mut buf = [0u8; 8192];
-                            match file.read(&mut buf) {
-                                Ok(n) => hasher.update(&buf[..n]),
-                                Err(_) => {
-                                    metadata_errors += 1;
-                                    hasher.update(b"read-err");
-                                }
-                            }
-                        }
+                    match Self::hash_file(path) {
+                        Ok(hash) => hasher.update(hash.as_bytes()),
                         Err(_) => {
                             metadata_errors += 1;
-                            hasher.update(b"open-err");
+                            hasher.update(b"content-err");
                         }
                     }
                 }
@@ -290,6 +289,24 @@ impl RepositoryWatcher {
             }
         }
         hasher.update(metadata_errors.to_le_bytes());
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+
+    fn hash_file(path: &Path) -> Result<String, MentatError> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path)
+            .map_err(|e| MentatError::IoError(format!("파일 열기 실패: {e}")))?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .map_err(|e| MentatError::IoError(format!("파일 읽기 실패: {e}")))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
         Ok(format!("{:x}", hasher.finalize()))
     }
 }

@@ -1,5 +1,5 @@
 use mentat_core::models::{AnswerBundle, Claim, ClaimClassification, EvidenceRef, FileRecord};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -111,11 +111,17 @@ If evidence is missing, classify the claim as Unknown. Do not invent files or ha
         file_texts: &HashMap<PathBuf, String>,
     ) {
         bundle.snapshot_id = current_snapshot_id;
-        let mut invalid_ids = Vec::new();
+        let mut invalid_ids = HashSet::new();
+        let mut evidence_id_counts = HashMap::<Uuid, usize>::new();
+        for evidence in &bundle.evidence_map {
+            *evidence_id_counts.entry(evidence.id).or_default() += 1;
+        }
 
         for ev in &mut bundle.evidence_map {
-            if !citation_is_valid(ev, current_snapshot_id, snapshot_files, file_texts) {
-                invalid_ids.push(ev.id);
+            if evidence_id_counts.get(&ev.id).copied().unwrap_or_default() != 1
+                || !citation_is_valid(ev, current_snapshot_id, snapshot_files, file_texts)
+            {
+                invalid_ids.insert(ev.id);
                 if !ev.excerpt.starts_with("[INVALID_CITATION]") {
                     ev.excerpt = format!("[INVALID_CITATION] {}", ev.excerpt);
                 }
@@ -124,18 +130,41 @@ If evidence is missing, classify the claim as Unknown. Do not invent files or ha
         }
 
         for claim in &mut bundle.claims {
+            let mut seen = HashSet::new();
+            let has_duplicate = !claim.evidence_ids.iter().all(|id| seen.insert(*id));
             let has_invalid = claim.evidence_ids.iter().any(|id| {
                 invalid_ids.contains(id) || !bundle.evidence_map.iter().any(|e| e.id == *id)
             });
 
-            claim
-                .evidence_ids
-                .retain(|id| bundle.evidence_map.iter().any(|e| e.id == *id));
+            claim.evidence_ids.retain(|id| {
+                !invalid_ids.contains(id) && bundle.evidence_map.iter().any(|e| e.id == *id)
+            });
+            claim.evidence_ids.sort_unstable();
+            claim.evidence_ids.dedup();
 
-            if has_invalid {
+            let evidence_required = matches!(
+                claim.classification,
+                ClaimClassification::Observed | ClaimClassification::Conflict
+            );
+            let missing_required_evidence = evidence_required && claim.evidence_ids.is_empty();
+            let invalid_confidence =
+                !claim.confidence.is_finite() || !(0.0..=1.0).contains(&claim.confidence);
+
+            if has_invalid || has_duplicate || missing_required_evidence || invalid_confidence {
                 claim.classification = ClaimClassification::Unknown;
                 claim.confidence = 0.0;
-                claim.rationale = Some("INVALID_CITATION".to_string());
+                claim.rationale = Some(
+                    if invalid_confidence {
+                        "INVALID_CONFIDENCE"
+                    } else if has_duplicate {
+                        "DUPLICATE_EVIDENCE"
+                    } else if missing_required_evidence {
+                        "EVIDENCE_REQUIRED"
+                    } else {
+                        "INVALID_CITATION"
+                    }
+                    .to_string(),
+                );
             }
         }
     }
@@ -498,5 +527,56 @@ mod tests {
         assert!(!bundle.evidence_map[0]
             .excerpt
             .starts_with("[INVALID_CITATION]"));
+    }
+
+    #[test]
+    fn test_imp_f004_claim_invariants_reject_empty_duplicate_and_invalid_confidence() {
+        let snapshot = Uuid::new_v4();
+        let evidence_id = Uuid::new_v4();
+        let files = vec![sample_file("src/main.rs", 1, "hash", "fn main() {}\n")];
+        let evidence = EvidenceRef {
+            id: evidence_id,
+            snapshot_id: snapshot,
+            relative_path: PathBuf::from("src/main.rs"),
+            line_start: 1,
+            line_end: 1,
+            content_hash: "hash".to_string(),
+            excerpt: "fn main() {}".to_string(),
+        };
+        let make_claim = |classification, confidence, evidence_ids| Claim {
+            id: Uuid::new_v4(),
+            classification,
+            statement: "claim".to_string(),
+            confidence,
+            evidence_ids,
+            rationale: None,
+        };
+        let mut bundle = AnswerBundle {
+            request_id: Uuid::new_v4(),
+            snapshot_id: snapshot,
+            direct_answer: String::new(),
+            claims: vec![
+                make_claim(ClaimClassification::Observed, 0.9, vec![]),
+                make_claim(ClaimClassification::Conflict, 0.8, vec![]),
+                make_claim(
+                    ClaimClassification::Observed,
+                    0.9,
+                    vec![evidence_id, evidence_id],
+                ),
+                make_claim(ClaimClassification::Inferred, 1.5, vec![evidence_id]),
+            ],
+            evidence_map: vec![evidence],
+            recommendations: vec![],
+            conflicts: vec![],
+            raw_model_response: None,
+        };
+
+        AnswerBundleNormalizer::validate_citations(&mut bundle, snapshot, &files, &HashMap::new());
+
+        assert!(bundle
+            .claims
+            .iter()
+            .all(|claim| claim.classification == ClaimClassification::Unknown));
+        assert!(bundle.claims.iter().all(|claim| claim.confidence == 0.0));
     }
 }

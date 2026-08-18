@@ -13,6 +13,13 @@ use tokio_util::sync::CancellationToken;
 pub trait InferenceBackend: Send + Sync {
     async fn health_check(&self, profile: &BackendProfile) -> Result<HealthStatus, MentatError>;
 
+    async fn discover_models(&self, profile: &BackendProfile) -> Result<ModelCatalog, MentatError>;
+
+    async fn verify_model(
+        &self,
+        profile: &BackendProfile,
+    ) -> Result<ModelVerification, MentatError>;
+
     async fn infer_stream(
         &self,
         request: InferenceRequest,
