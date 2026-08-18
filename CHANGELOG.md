@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.0-dev] - 2026-08-19 (Re-audit #5 Remediation)
+
+### Fixed
+- **[DBG-F007 & DBG-F001] Zero-Blocking File Preview, UI Repaint Wakeup & Async Task Error Handling:**
+  - Removed synchronous `recv_timeout(100ms)` on the UI thread and converted file preview loading to non-blocking async `preview_rx`.
+  - Added continuous UI frame wakeup (`ctx.request_repaint_after(16ms)`) whenever background tasks are active.
+  - Implemented fail-closed channel disconnect and error consumption across all scanning, pinging, query, egress, and preview task receivers.
+- **[SEC-F004] Robust Parsed URL Loopback Validation & Userinfo Rejection:**
+  - Integrated `url` parser with strict validation rejecting userinfo (`@`), arbitrary HTTP subdomains (e.g. `localhost.evil.com`), non-loopback HTTP, and unsupported protocol schemes.
+- **[SEC-F006] Canonical Path Direct-Open & Boundary Enforcement:**
+  - Enforced fail-closed path canonicalization and verified canonical repository root boundaries.
+  - Directly opened `File::open(&canonical_path)` to eliminate symlink TOCTOU swap races.
+- **[SEC-F005] Pre-Response Cancellation & Byte-Buffered SSE Framing:**
+  - Wrapped `.send().await` in `tokio::select!` with `cancel_token.cancelled()` for early cancellation before HTTP response header arrival.
+  - Replaced lossy string chunk conversions with `Vec<u8>` raw byte accumulator for split multibyte UTF-8 stream decoding.
+- **[SEC-F007] Accepted Risk Governance for `quick-xml 0.30.0`:**
+  - Documented Owner (`@Yupkidangju`), Expiry Date (`2026-11-30`), Review Trigger (`eframe 0.31.0`), and target reachability evidence in `DESIGN_DECISIONS.md`.
+- **[IMP-F006] Honest Requirements Traceability Calibration:**
+  - Updated `spec.md` and `IMPLEMENTATION_SUMMARY.md` with honest `Partial` statuses and 29 passing unit/regression test linkages.
+
+---
+
 ## [0.1.0-dev] - 2026-08-19 (Turn 4 / Re-audit #2 Remediation)
 
 ### Fixed

@@ -88,8 +88,12 @@ impl<'a> SettingsPanel<'a> {
                     .selected_text(match self.profile.provider {
                         ProviderKind::GoogleGemini => "🌟 Google Gemini (AI Studio)",
                         ProviderKind::OpenRouter => "🚀 OpenRouter (Multi-Model)",
-                        ProviderKind::OpenAi => "⚡ OpenAI (Official API)",
-                        ProviderKind::CustomCompatible => "🔌 Custom / Local (vLLM/Ollama)",
+                        ProviderKind::OpenAi | ProviderKind::OpenAICompatible => {
+                            "⚡ OpenAI (Official API)"
+                        }
+                        ProviderKind::CustomCompatible | ProviderKind::LocalMock => {
+                            "🔌 Custom / Local (vLLM/Ollama)"
+                        }
                     })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(

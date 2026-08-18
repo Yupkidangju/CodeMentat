@@ -168,18 +168,26 @@ impl OpenAiAdapter {
         });
 
         let timeout = std::time::Duration::from_secs(profile.timeout_secs.clamp(5, 300));
-        let response = self
+        let send_future = self
             .client
             .post(&endpoint)
             .headers(headers)
             .timeout(timeout)
             .json(&body)
-            .send()
-            .await
-            .map_err(|e| MentatError::BackendError {
-                code: "HTTP_SEND_ERROR".to_string(),
-                message: e.to_string(),
-            })?;
+            .send();
+
+        // SEC-F005: Pre-response cancellation
+        let response = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Err(MentatError::Cancelled);
+            }
+            res = send_future => {
+                res.map_err(|e| MentatError::BackendError {
+                    code: "HTTP_SEND_ERROR".to_string(),
+                    message: e.to_string(),
+                })?
+            }
+        };
 
         if !response.status().is_success() {
             let status = response.status();
@@ -196,7 +204,7 @@ impl OpenAiAdapter {
         let stream = async_stream::stream! {
             yield InferenceEvent::Started { request_id: req_id };
             let mut full_text = String::new();
-            let mut buffer = String::new();
+            let mut byte_buffer = Vec::new();
 
             loop {
                 tokio::select! {
@@ -207,27 +215,32 @@ impl OpenAiAdapter {
                     chunk_opt = byte_stream.next() => {
                         match chunk_opt {
                             Some(Ok(bytes)) => {
-                                if let Ok(s) = std::str::from_utf8(&bytes) {
-                                    buffer.push_str(s);
-                                    while let Some(pos) = buffer.find('\n') {
-                                        let line = buffer[..pos].trim().to_string();
-                                        buffer = buffer[pos + 1..].to_string();
+                                byte_buffer.extend_from_slice(&bytes);
+                                while let Some(pos) = byte_buffer.iter().position(|&b| b == b'\n') {
+                                    let line_bytes = &byte_buffer[..pos];
+                                    let line = String::from_utf8_lossy(line_bytes).trim().to_string();
+                                    byte_buffer.drain(..pos + 1);
 
-                                        if line.is_empty() || line.starts_with(':') {
-                                            continue;
+                                    if line.is_empty() || line.starts_with(':') {
+                                        continue;
+                                    }
+
+                                    if let Some(data) = line.strip_prefix("data: ") {
+                                        if data.trim() == "[DONE]" {
+                                            yield InferenceEvent::Completed { full_text: full_text.clone() };
+                                            return;
                                         }
 
-                                        if let Some(data) = line.strip_prefix("data: ") {
-                                            if data == "[DONE]" {
-                                                yield InferenceEvent::Completed { full_text: full_text.clone() };
-                                                return;
-                                            }
-
-                                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
-                                                if let Some(content) = val["choices"][0]["delta"]["content"].as_str() {
-                                                    full_text.push_str(content);
-                                                    yield InferenceEvent::TextDelta(content.to_string());
-                                                }
+                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                            if let Some(delta) = json
+                                                .get("choices")
+                                                .and_then(|c| c.get(0))
+                                                .and_then(|c| c.get("delta"))
+                                                .and_then(|d| d.get("content"))
+                                                .and_then(|c| c.as_str())
+                                            {
+                                                full_text.push_str(delta);
+                                                yield InferenceEvent::TextDelta(delta.to_string());
                                             }
                                         }
                                     }

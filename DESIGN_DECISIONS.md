@@ -56,12 +56,15 @@
 - **결과:** 읽기 전용 불변조건의 완벽한 런타임 강제.
 
 ### [DEC-SEC-004] 공급망 보안 감사 및 `quick-xml 0.30.0` 위험 수용 (Accepted Risk - SEC-F007)
+- **책임 관리자 (Owner):** Security Lead (`@Yupkidangju`)
+- **만료 기한 (Expiry Date):** 2026-11-30 (차기 분기별 의존성 릴리스 사이클)
+- **정기 재검토 조건:** `eframe 0.31.0` 릴리스 또는 상위 `accesskit_unix` 패치 릴리스 시 즉시 업그레이드
 - **배경:** `eframe 0.30.0`의 전이적 의존성(`accesskit_unix` -> `atspi` -> `quick-xml 0.30.0`)에서 `RUSTSEC-2026-0194`, `RUSTSEC-2026-0195` (CVSS 7.5 High) 발견.
 - **도달 가능성(Reachability) 분석:**
   - `CodeMentat`는 Windows 데스크톱 타깃 애플리케이션이며, `quick-xml`은 오직 Linux `atspi` 접근성 경로에서만 조건부 컴파일됨.
   - 외부 또는 신뢰할 수 없는 XML 문서를 파싱하는 런타임 실행 경로가 존재하지 않음.
 - **결정 및 완화 조치:**
-  - 상위 GUI 프레임워크(`eframe`)의 패치 릴리스 시 즉각 업그레이드하기로 하며, 현재 Windows 타깃 빌드에서는 도달 불가능(Unreachable)한 Accepted Risk로 승인함.
+  - 상위 GUI 프레임워크(`eframe`)의 패치 릴리스 시 즉각 업그레이드하기로 하며, 만료일(2026-11-30) 이전까지는 도달 불가능(Unreachable)한 위험 수용(Accepted Risk)으로 공식 승인함.
 - **결과:** 프로덕션 보안 상태 명문화 및 추적성 확보.
 
 ---

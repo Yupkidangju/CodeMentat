@@ -139,18 +139,27 @@ impl GeminiAdapter {
         }
 
         let timeout = Duration::from_secs(profile.timeout_secs.clamp(5, 300));
-        let response = self
+
+        // SEC-F005: Pre-response cancellation check during connect and request dispatch
+        let send_future = self
             .client
             .post(&endpoint)
             .headers(headers)
             .timeout(timeout)
             .json(&body)
-            .send()
-            .await
-            .map_err(|e| MentatError::BackendError {
-                code: "GEMINI_NETWORK_ERROR".to_string(),
-                message: e.to_string(),
-            })?;
+            .send();
+
+        let response = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Err(MentatError::Cancelled);
+            }
+            res = send_future => {
+                res.map_err(|e| MentatError::BackendError {
+                    code: "GEMINI_NETWORK_ERROR".to_string(),
+                    message: e.to_string(),
+                })?
+            }
+        };
 
         if !response.status().is_success() {
             let status = response.status();
@@ -173,7 +182,7 @@ impl GeminiAdapter {
             };
 
             let mut full_accumulated = String::new();
-            let mut line_buffer = String::new();
+            let mut byte_buffer = Vec::new();
 
             loop {
                 tokio::select! {
@@ -184,12 +193,12 @@ impl GeminiAdapter {
                     chunk_opt = byte_stream.next() => {
                         match chunk_opt {
                             Some(Ok(bytes)) => {
-                                let chunk_str = String::from_utf8_lossy(&bytes);
-                                line_buffer.push_str(&chunk_str);
+                                byte_buffer.extend_from_slice(&bytes);
 
-                                while let Some(pos) = line_buffer.find('\n') {
-                                    let line = line_buffer[..pos].trim().to_string();
-                                    line_buffer = line_buffer[pos + 1..].to_string();
+                                while let Some(pos) = byte_buffer.iter().position(|&b| b == b'\n') {
+                                    let line_bytes = &byte_buffer[..pos];
+                                    let line = String::from_utf8_lossy(line_bytes).trim().to_string();
+                                    byte_buffer.drain(..pos + 1);
 
                                     if let Some(data) = line.strip_prefix("data: ") {
                                         if data.trim() == "[DONE]" {

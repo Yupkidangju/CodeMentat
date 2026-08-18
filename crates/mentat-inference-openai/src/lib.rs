@@ -37,9 +37,11 @@ impl InferenceBackend for MultiProviderAdapter {
     async fn health_check(&self, profile: &BackendProfile) -> Result<HealthStatus, MentatError> {
         match profile.provider {
             ProviderKind::GoogleGemini => self.gemini.health_check(profile).await,
-            ProviderKind::OpenRouter | ProviderKind::OpenAi | ProviderKind::CustomCompatible => {
-                self.openai.health_check(profile).await
-            }
+            ProviderKind::OpenRouter
+            | ProviderKind::OpenAi
+            | ProviderKind::OpenAICompatible
+            | ProviderKind::CustomCompatible
+            | ProviderKind::LocalMock => self.openai.health_check(profile).await,
         }
     }
 
@@ -50,9 +52,11 @@ impl InferenceBackend for MultiProviderAdapter {
     ) -> Result<BoxStream<'static, InferenceEvent>, MentatError> {
         match request.profile.provider {
             ProviderKind::GoogleGemini => self.gemini.infer_stream(request, cancel_token).await,
-            ProviderKind::OpenRouter | ProviderKind::OpenAi | ProviderKind::CustomCompatible => {
-                self.openai.infer_stream(request, cancel_token).await
-            }
+            ProviderKind::OpenRouter
+            | ProviderKind::OpenAi
+            | ProviderKind::OpenAICompatible
+            | ProviderKind::CustomCompatible
+            | ProviderKind::LocalMock => self.openai.infer_stream(request, cancel_token).await,
         }
     }
 }

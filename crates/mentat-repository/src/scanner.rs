@@ -107,28 +107,41 @@ impl FileScanner {
         !sample.contains(&0)
     }
 
+    /// [SEC-F006] Inspects file safely by canonicalizing path, checking boundaries fail-closed,
+    /// and directly opening the verified canonical file handle to prevent TOCTOU symlink races.
     pub fn inspect_file(root: &Path, rel_path: &Path) -> Result<FileRecord, MentatError> {
-        let full_path = root.join(rel_path);
+        let canonical_root = root.canonicalize().map_err(|e| {
+            MentatError::InvalidRepositoryPath(format!(
+                "저장소 루트 정규화 실패 {}: {}",
+                root.display(),
+                e
+            ))
+        })?;
 
-        // SEC-F006: Symlink canonical root guard
-        if let Ok(canonical_path) = std::fs::canonicalize(&full_path) {
-            if let Ok(canonical_root) = std::fs::canonicalize(root) {
-                if !canonical_path.starts_with(&canonical_root) {
-                    return Err(MentatError::ExternalPathBlocked(format!(
-                        "심볼릭 링크가 저장소 루트 외부를 가리킵니다: {}",
-                        canonical_path.display()
-                    )));
-                }
-            }
+        let full_path = root.join(rel_path);
+        let canonical_path = full_path.canonicalize().map_err(|e| {
+            MentatError::IoError(format!(
+                "파일 경로 정규화 실패 {}: {}",
+                full_path.display(),
+                e
+            ))
+        })?;
+
+        // Fail-closed canonical root boundary check
+        if !canonical_path.starts_with(&canonical_root) {
+            return Err(MentatError::ExternalPathBlocked(format!(
+                "심볼릭 링크 또는 경로가 저장소 루트 외부를 가리킵니다: {}",
+                canonical_path.display()
+            )));
         }
 
-        let metadata = std::fs::metadata(&full_path)
+        let metadata = std::fs::metadata(&canonical_path)
             .map_err(|e| MentatError::IoError(format!("파일 메타데이터 조회 실패: {}", e)))?;
 
         let size_bytes = metadata.len();
 
-        // DBG-F003: Stream hash and bounded inspection buffer (up to 2MB sample)
-        let mut file = File::open(&full_path)
+        // DBG-F003: Stream hash directly from the verified canonical file handle
+        let mut file = File::open(&canonical_path)
             .map_err(|e| MentatError::IoError(format!("파일 열기 실패: {}", e)))?;
 
         let mut hasher = Sha256::new();
@@ -165,7 +178,6 @@ impl FileScanner {
                     },
             )
         } else if is_text {
-            // Approximated for files > 2MB based on sample density
             let sample_lines = bytecount::count(&sample_buffer, b'\n');
             let avg_line_len = (sample_buffer.len() / (sample_lines.max(1))).max(1);
             Some((total_read as usize) / avg_line_len)

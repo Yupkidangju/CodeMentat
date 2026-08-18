@@ -59,3 +59,23 @@ async fn test_external_path_blocked() {
     let result = session.read_file_content(&escaped_rel).await;
     assert!(result.is_err());
 }
+
+#[test]
+fn test_sec_f006_inspect_file_canonical_safety() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let sub = root.join("src");
+    fs::create_dir(&sub).unwrap();
+    let file_path = sub.join("lib.rs");
+    fs::write(&file_path, "pub fn test() {}").unwrap();
+
+    let record =
+        crate::scanner::FileScanner::inspect_file(root, std::path::Path::new("src/lib.rs"))
+            .expect("Valid inside-root file should pass");
+    assert!(record.is_text);
+
+    // Path traversal attempt should fail
+    let bad_path = std::path::Path::new("../outside.txt");
+    let err = crate::scanner::FileScanner::inspect_file(root, bad_path);
+    assert!(err.is_err());
+}

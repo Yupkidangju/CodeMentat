@@ -67,11 +67,12 @@ pub struct MentatApp {
     pub streaming_cancel: Option<CancellationToken>,
     pub stream_rx: Option<Receiver<InferenceEvent>>,
 
-    // Async task channels (Non-blocking UI loop DBG-F001)
+    // Async task channels (Non-blocking UI loop DBG-F001 & DBG-F007)
     pub scan_rx: Option<ScanChannel>,
     pub ping_rx: Option<Receiver<Result<mentat_inference::HealthStatus, MentatError>>>,
     pub local_query_rx: Option<Receiver<Result<AnswerBundle, MentatError>>>,
     pub egress_packet_rx: Option<Receiver<Result<EgressPacket, MentatError>>>,
+    pub preview_rx: Option<Receiver<Result<String, MentatError>>>,
 
     // Egress Consent Sheet state (SEC-F001 Fail-Closed single-use receipt)
     pub repo_consent_given: bool,
@@ -132,6 +133,7 @@ impl MentatApp {
             ping_rx: None,
             local_query_rx: None,
             egress_packet_rx: None,
+            preview_rx: None,
             repo_consent_given: false,
             pending_egress_packet: None,
             pending_query: None,
@@ -329,23 +331,22 @@ impl MentatApp {
         self.status_text = "추론이 취소되었습니다.".to_string();
     }
 
+    /// [DBG-F001] Fully asynchronous preview loading with zero blocking on the UI thread
     pub fn load_file_preview(&mut self, idx: usize) {
         if let Some(file) = self.files.get(idx) {
             self.selected_file_idx = Some(idx);
+            self.selected_file_content = Some("파일을 불러오는 중...".to_string());
             if let Some(session) = &self.session {
                 let rt = self.rt.clone();
                 let s = session.clone();
                 let rel = file.relative_path.clone();
 
                 let (tx, rx) = std::sync::mpsc::channel();
+                self.preview_rx = Some(rx);
                 rt.spawn(async move {
                     let content = s.read_file_content(&rel).await;
                     let _ = tx.send(content);
                 });
-
-                if let Ok(Ok(content)) = rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                    self.selected_file_content = Some(content);
-                }
             }
         }
     }
@@ -353,109 +354,172 @@ impl MentatApp {
 
 impl eframe::App for MentatApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
-        // 1. Poll scanning task (Non-blocking)
+        // [DBG-F007] Keep UI awake and active whenever background tasks are running
+        let has_pending_tasks = self.scan_rx.is_some()
+            || self.ping_rx.is_some()
+            || self.local_query_rx.is_some()
+            || self.egress_packet_rx.is_some()
+            || self.preview_rx.is_some()
+            || self.is_streaming;
+
+        if has_pending_tasks {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
+
+        // 1. Poll scanning task (Non-blocking & full terminal error state consumption)
         if let Some(ref rx) = self.scan_rx {
-            if let Ok((Ok(files), Ok(snap))) = rx.try_recv() {
-                let summary = ProjectDetector::summarize(&files);
-                let kernel = SemanticKernelBuilder::build(&summary);
+            match rx.try_recv() {
+                Ok((Ok(files), Ok(snap))) => {
+                    let summary = ProjectDetector::summarize(&files);
+                    let kernel = SemanticKernelBuilder::build(&summary);
 
-                self.status_text = format!(
-                    "{}개 파일 ({} - {}) 인덱싱 완료",
-                    snap.file_count,
-                    summary.primary_language.as_deref().unwrap_or("General"),
-                    snap.tree_digest.chars().take(8).collect::<String>()
-                );
+                    self.status_text = format!(
+                        "{}개 파일 ({} - {}) 인덱싱 완료",
+                        snap.file_count,
+                        summary.primary_language.as_deref().unwrap_or("General"),
+                        snap.tree_digest.chars().take(8).collect::<String>()
+                    );
 
-                self.files = files;
-                self.summary = Some(summary);
-                self.kernel = Some(kernel);
-                self.snapshot = Some(snap);
-                self.scan_rx = None;
-            }
-        }
-
-        // 2. Poll ping task (Non-blocking)
-        if let Some(ref rx) = self.ping_rx {
-            if let Ok(res) = rx.try_recv() {
-                match res {
-                    Ok(status) => {
-                        self.ping_status = if status.healthy {
-                            format!(
-                                "✅ {} ({}ms)",
-                                status.message,
-                                status.latency_ms.unwrap_or(0)
-                            )
-                        } else {
-                            format!("❌ {}", status.message)
-                        };
-                    }
-                    Err(e) => {
-                        self.ping_status = format!("❌ {}", e);
-                    }
+                    self.files = files;
+                    self.summary = Some(summary);
+                    self.kernel = Some(kernel);
+                    self.snapshot = Some(snap);
+                    self.scan_rx = None;
                 }
-                self.is_pinging = false;
-                self.ping_rx = None;
+                Ok((Err(e), _)) | Ok((_, Err(e))) => {
+                    self.status_text = format!("인덱싱 실패: {}", e);
+                    self.scan_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.status_text = "인덱싱 작업 채널이 중단되었습니다.".to_string();
+                    self.scan_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
 
-        // 3. Poll local query workflow (Non-blocking)
+        // 2. Poll ping task (Non-blocking & full terminal error state consumption)
+        if let Some(ref rx) = self.ping_rx {
+            match rx.try_recv() {
+                Ok(Ok(status)) => {
+                    self.ping_status = if status.healthy {
+                        format!(
+                            "✅ {} ({}ms)",
+                            status.message,
+                            status.latency_ms.unwrap_or(0)
+                        )
+                    } else {
+                        format!("❌ {}", status.message)
+                    };
+                    self.is_pinging = false;
+                    self.ping_rx = None;
+                }
+                Ok(Err(e)) => {
+                    self.ping_status = format!("❌ {}", e);
+                    self.is_pinging = false;
+                    self.ping_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.ping_status = "❌ 연결 시험 채널 중단".to_string();
+                    self.is_pinging = false;
+                    self.ping_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        // 3. Poll local query workflow (Non-blocking & full terminal error state consumption)
         if let Some(ref rx) = self.local_query_rx {
-            if let Ok(Ok(bundle)) = rx.try_recv() {
-                let rendered = PersonaRenderer::render(&bundle, self.persona);
-                self.answer_preview = Some(rendered.direct_answer);
-                self.recent_claims = rendered.claims;
-                self.recent_recommendations = rendered.recommendations;
-                self.recent_conflicts = rendered.conflicts;
-                self.evidence_map = rendered.evidence_map;
-                self.local_query_rx = None;
+            match rx.try_recv() {
+                Ok(Ok(bundle)) => {
+                    let rendered = PersonaRenderer::render(&bundle, self.persona);
+                    self.answer_preview = Some(rendered.direct_answer);
+                    self.recent_claims = rendered.claims;
+                    self.recent_recommendations = rendered.recommendations;
+                    self.recent_conflicts = rendered.conflicts;
+                    self.evidence_map = rendered.evidence_map;
+                    self.local_query_rx = None;
+                }
+                Ok(Err(e)) => {
+                    self.status_text = format!("로컬 분석 오류: {}", e);
+                    self.local_query_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.status_text = "로컬 분석 채널이 중단되었습니다.".to_string();
+                    self.local_query_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
 
-        // 4. Poll egress packet assembly (Non-blocking)
+        // 4. Poll egress packet assembly (Non-blocking & full terminal error state consumption)
         if let Some(ref rx) = self.egress_packet_rx {
-            if let Ok(res) = rx.try_recv() {
-                match res {
-                    Ok(packet) => {
-                        let snap_id = self
-                            .snapshot
-                            .as_ref()
-                            .map(|s| s.id)
-                            .unwrap_or_else(uuid::Uuid::new_v4);
-                        if !self.repo_consent_given {
-                            self.pending_egress_packet = Some(packet);
-                        } else {
-                            let receipt = EgressReceipt {
-                                receipt_id: uuid::Uuid::new_v4(),
-                                packet_hash: packet.packet_hash.clone(),
-                                snapshot_id: snap_id,
-                                token_count: packet.estimated_tokens,
-                                file_count: packet.included_files.len(),
-                                granted_at: chrono::Utc::now().to_rfc3339(),
-                            };
+            match rx.try_recv() {
+                Ok(Ok(packet)) => {
+                    let snap_id = self
+                        .snapshot
+                        .as_ref()
+                        .map(|s| s.id)
+                        .unwrap_or_else(uuid::Uuid::new_v4);
+                    if !self.repo_consent_given {
+                        self.pending_egress_packet = Some(packet);
+                    } else {
+                        let receipt = EgressReceipt {
+                            receipt_id: uuid::Uuid::new_v4(),
+                            packet_hash: packet.packet_hash.clone(),
+                            snapshot_id: snap_id,
+                            token_count: packet.estimated_tokens,
+                            file_count: packet.included_files.len(),
+                            granted_at: chrono::Utc::now().to_rfc3339(),
+                        };
 
-                            let q = self.pending_query.take().unwrap_or_default();
-                            if let Ok(approved_req) = ApprovedInferenceRequest::new(
-                                receipt,
-                                packet,
-                                q,
-                                snap_id,
-                                self.profile.clone(),
-                            ) {
-                                self.start_inference_stream_with_approved_request(approved_req);
-                            }
+                        let q = self.pending_query.take().unwrap_or_default();
+                        if let Ok(approved_req) = ApprovedInferenceRequest::new(
+                            receipt,
+                            packet,
+                            q,
+                            snap_id,
+                            self.profile.clone(),
+                        ) {
+                            self.start_inference_stream_with_approved_request(approved_req);
                         }
                     }
-                    Err(e) => {
-                        self.status_text = format!("🛡️ 컨텍스트 조립 실패: {}", e);
-                    }
+                    self.egress_packet_rx = None;
                 }
-                self.egress_packet_rx = None;
+                Ok(Err(e)) => {
+                    self.status_text = format!("🛡️ 컨텍스트 조립 실패: {}", e);
+                    self.egress_packet_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.status_text = "컨텍스트 조립 채널이 중단되었습니다.".to_string();
+                    self.egress_packet_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
 
-        // 5. Poll streaming events
+        // 5. Poll file preview task (Non-blocking & full terminal error state consumption)
+        if let Some(ref rx) = self.preview_rx {
+            match rx.try_recv() {
+                Ok(Ok(content)) => {
+                    self.selected_file_content = Some(content);
+                    self.preview_rx = None;
+                }
+                Ok(Err(e)) => {
+                    self.selected_file_content = Some(format!("파일 로드 오류: {}", e));
+                    self.preview_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.selected_file_content =
+                        Some("파일 로드 채널이 중단되었습니다.".to_string());
+                    self.preview_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        // 6. Poll streaming events
         if self.is_streaming {
-            ctx.request_repaint();
             let mut finished = false;
 
             if let Some(ref rx) = self.stream_rx {
