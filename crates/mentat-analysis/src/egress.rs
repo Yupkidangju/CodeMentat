@@ -327,6 +327,19 @@ impl EgressFilter {
                 }
             }
 
+            // 7. Generic Bearer Token (Bearer <token>)
+            if let Some(pos) = current.find("Bearer ") {
+                let token_start = pos + 7;
+                if let Some(end) = Self::find_token_end(&current, token_start, 20) {
+                    Self::update_earliest(
+                        &mut earliest_match,
+                        pos,
+                        end,
+                        "Bearer [REDACTED_BEARER_TOKEN]",
+                    );
+                }
+            }
+
             if let Some((start, end, replacement)) = earliest_match {
                 buf.push_str(&current[..start]);
                 buf.push_str(replacement);
@@ -541,6 +554,17 @@ impl EgressFilter {
         summary: &ProjectStructureSummary,
         user_question: &str,
     ) -> Result<EgressPacket, MentatError> {
+        Self::assemble_packet_with_user_exclusions(reader, files, summary, user_question, &[]).await
+    }
+
+    /// [SEC-F002] Query-aware context assembly with per-request user exclusions and exact file/line preview
+    pub async fn assemble_packet_with_user_exclusions(
+        reader: &(impl RepositoryReader + ?Sized),
+        files: &[FileRecord],
+        summary: &ProjectStructureSummary,
+        user_question: &str,
+        user_excluded_files: &[std::path::PathBuf],
+    ) -> Result<EgressPacket, MentatError> {
         let mut included_files = Vec::new();
         let mut included_file_refs = Vec::new();
         let mut excluded_sensitive_files = Vec::new();
@@ -596,6 +620,11 @@ impl EgressFilter {
         scored_files.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         for (file, _) in scored_files {
+            if user_excluded_files.contains(&file.relative_path) {
+                excluded_sensitive_files.push(file.relative_path.clone());
+                continue;
+            }
+
             if Self::is_sensitive_filename(&file.relative_path) {
                 excluded_sensitive_files.push(file.relative_path.clone());
                 continue;
@@ -862,5 +891,14 @@ pub mod tests {
             profile,
         );
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_bearer_token_redaction() {
+        let sample = "Authorization: Bearer my_super_secret_token_1234567890abcdef\n";
+        let (redacted, count) = EgressFilter::scan_and_redact_secrets(sample);
+        assert_eq!(count, 1);
+        assert!(!redacted.contains("my_super_secret_token_1234567890abcdef"));
+        assert!(redacted.contains("Bearer [REDACTED_BEARER_TOKEN]"));
     }
 }

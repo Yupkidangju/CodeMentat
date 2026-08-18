@@ -16,3 +16,6 @@ tokio-util.workspace = true
 futures-util.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true

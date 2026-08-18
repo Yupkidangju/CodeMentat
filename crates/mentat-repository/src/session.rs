@@ -11,6 +11,10 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+pub const MAX_SCAN_FILES_LIMIT: usize = 100_000;
+pub const MAX_SCAN_TOTAL_BYTES_LIMIT: u64 = 2 * 1024 * 1024 * 1024; // 2GiB
+pub const MAX_SINGLE_FILE_BYTES: u64 = 10 * 1024 * 1024; // 10MB
+
 pub struct ReadOnlySession {
     root_path: PathBuf,
     profile: RepositoryProfile,
@@ -70,6 +74,30 @@ impl ReadOnlySession {
 
         Ok(canonical_path)
     }
+
+    /// [DBG-F002] Constructs snapshot directly from already-scanned file records (Single-Scan)
+    pub fn create_snapshot_from_files(&self, files: &[FileRecord]) -> RepositorySnapshot {
+        let mut hasher = Sha256::new();
+        let mut total_bytes = 0;
+
+        for file in files {
+            hasher.update(file.relative_path.to_string_lossy().as_bytes());
+            hasher.update(file.content_hash.as_bytes());
+            total_bytes += file.size_bytes;
+        }
+
+        let tree_digest = format!("{:x}", hasher.finalize());
+
+        RepositorySnapshot {
+            id: Uuid::new_v4(),
+            repo_id: self.profile.id,
+            created_at: Utc::now(),
+            tree_digest,
+            status: SnapshotStatus::Ready,
+            file_count: files.len(),
+            total_bytes,
+        }
+    }
 }
 
 #[async_trait]
@@ -82,10 +110,13 @@ impl RepositoryReader for ReadOnlySession {
         &self.profile
     }
 
+    /// [DBG-F003] Scans files under resource budgets (max 100,000 files, max 2GiB total scanned size)
     async fn scan_files(&self) -> Result<Vec<FileRecord>, MentatError> {
         let root = self.root_path.clone();
         tokio::task::spawn_blocking(move || {
             let mut records = Vec::new();
+            let mut accumulated_bytes = 0u64;
+
             let walker = WalkBuilder::new(&root)
                 .hidden(false)
                 .git_ignore(true)
@@ -94,16 +125,28 @@ impl RepositoryReader for ReadOnlySession {
                 .build();
 
             for entry in walker {
-                let entry = entry.map_err(|e| MentatError::IoError(e.to_string()))?;
+                if records.len() >= MAX_SCAN_FILES_LIMIT {
+                    break;
+                }
+                if accumulated_bytes >= MAX_SCAN_TOTAL_BYTES_LIMIT {
+                    break;
+                }
+
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+
                 let path = entry.path();
                 if path.is_file() {
-                    // Check if inside .git metadata dir
+                    // Skip .git internal files
                     if path.components().any(|c| c.as_os_str() == ".git") {
                         continue;
                     }
 
                     if let Ok(rel_path) = path.strip_prefix(&root) {
                         if let Ok(record) = FileScanner::inspect_file(&root, rel_path) {
+                            accumulated_bytes += record.size_bytes;
                             records.push(record);
                         }
                     }
@@ -121,8 +164,8 @@ impl RepositoryReader for ReadOnlySession {
             .await
             .map_err(|e| MentatError::IoError(format!("파일 메타데이터 조회 실패: {}", e)))?;
 
-        // DBG-F003: 10MB max file read bound
-        if meta.len() > 10 * 1024 * 1024 {
+        // DBG-F003: 10MB max single file read bound
+        if meta.len() > MAX_SINGLE_FILE_BYTES {
             return Err(MentatError::IoError(format!(
                 "파일 크기({} bytes)가 10MB 한도를 초과하여 읽기가 제한됩니다.",
                 meta.len()
@@ -157,25 +200,6 @@ impl RepositoryReader for ReadOnlySession {
 
     async fn create_snapshot(&self) -> Result<RepositorySnapshot, MentatError> {
         let files = self.scan_files().await?;
-        let mut hasher = Sha256::new();
-        let mut total_bytes = 0;
-
-        for file in &files {
-            hasher.update(file.relative_path.to_string_lossy().as_bytes());
-            hasher.update(file.content_hash.as_bytes());
-            total_bytes += file.size_bytes;
-        }
-
-        let tree_digest = format!("{:x}", hasher.finalize());
-
-        Ok(RepositorySnapshot {
-            id: Uuid::new_v4(),
-            repo_id: self.profile.id,
-            created_at: Utc::now(),
-            tree_digest,
-            status: SnapshotStatus::Ready,
-            file_count: files.len(),
-            total_bytes,
-        })
+        Ok(self.create_snapshot_from_files(&files))
     }
 }

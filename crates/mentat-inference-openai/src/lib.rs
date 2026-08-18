@@ -13,15 +13,15 @@ use mentat_inference::{
 use tokio_util::sync::CancellationToken;
 
 pub struct MultiProviderAdapter {
-    openai: OpenAiAdapter,
     gemini: GeminiAdapter,
+    openai: OpenAiAdapter,
 }
 
 impl MultiProviderAdapter {
     pub fn new() -> Self {
         Self {
-            openai: OpenAiAdapter::new(),
             gemini: GeminiAdapter::new(),
+            openai: OpenAiAdapter::new(),
         }
     }
 }
@@ -64,6 +64,7 @@ impl InferenceBackend for MultiProviderAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn test_multi_provider_adapter_default_initialization() {
@@ -83,5 +84,65 @@ mod tests {
         let adapter_status = adapter.health_check(&BackendProfile::default()).await;
         assert!(adapter_status.is_ok());
         assert!(!adapter_status.unwrap().healthy);
+    }
+
+    #[tokio::test]
+    async fn test_gemini_and_openai_missing_key_infer_fail_closed() {
+        let gemini = GeminiAdapter::default();
+        let openai = OpenAiAdapter::default();
+        let cancel_token = CancellationToken::new();
+
+        let req = InferenceRequest {
+            request_id: Uuid::new_v4(),
+            system_contract: "sys".to_string(),
+            prompt_context: "ctx".to_string(),
+            user_question: "q".to_string(),
+            profile: BackendProfile::default(),
+        };
+
+        let gemini_res = gemini.infer_stream(req.clone(), cancel_token.clone()).await;
+        assert!(gemini_res.is_err());
+        if let Err(MentatError::BackendError { code, .. }) = gemini_res {
+            assert_eq!(code, "MISSING_GEMINI_KEY");
+        } else {
+            panic!("Expected MISSING_GEMINI_KEY BackendError");
+        }
+
+        let openai_res = openai.infer_stream(req, cancel_token).await;
+        assert!(openai_res.is_err());
+        if let Err(MentatError::BackendError { code, .. }) = openai_res {
+            assert_eq!(code, "MISSING_API_KEY");
+        } else {
+            panic!("Expected MISSING_API_KEY BackendError");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pre_response_cancellation_aborts_immediately() {
+        let gemini = GeminiAdapter::default();
+        let cancel_token = CancellationToken::new();
+        // Cancel token before network call
+        cancel_token.cancel();
+
+        let profile = BackendProfile {
+            api_key: Some("dummy_key".to_string()),
+            ..Default::default()
+        };
+
+        let req = InferenceRequest {
+            request_id: Uuid::new_v4(),
+            system_contract: "sys".to_string(),
+            prompt_context: "ctx".to_string(),
+            user_question: "q".to_string(),
+            profile,
+        };
+
+        let res = gemini.infer_stream(req, cancel_token).await;
+        assert!(res.is_err());
+        match res {
+            Err(MentatError::Cancelled) => {}
+            Err(e) => panic!("Expected MentatError::Cancelled, got {:?}", e),
+            Ok(_) => panic!("Expected Err(MentatError::Cancelled), got Ok(_)"),
+        }
     }
 }

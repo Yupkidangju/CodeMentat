@@ -2227,6 +2227,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2276,6 +2277,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "mentat-core",
+ "mentat-inference",
  "rusqlite",
  "tempfile",
  "tokio",

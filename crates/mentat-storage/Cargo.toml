@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 mentat-core.workspace = true
+mentat-inference.workspace = true
 rusqlite.workspace = true
 async-trait.workspace = true
 tokio.workspace = true

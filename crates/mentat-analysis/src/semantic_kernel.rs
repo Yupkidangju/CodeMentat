@@ -63,7 +63,7 @@ impl SemanticKernelBuilder {
         }
     }
 
-    /// Generates structured advice bundle for standard workflows without requiring an external AI model
+    /// [IMP-F004] Generates structured advice bundle for standard workflows with verified EvidenceRef linkages
     pub async fn run_local_workflow(
         workflow: &str,
         reader: &(impl RepositoryReader + ?Sized),
@@ -75,6 +75,7 @@ impl SemanticKernelBuilder {
         let mut recommendations = Vec::new();
         let mut conflicts = Vec::new();
         let mut evidence_map = Vec::new();
+        let mut index = EvidenceIndex::new(snapshot_id);
 
         let direct_answer: String;
 
@@ -87,9 +88,9 @@ impl SemanticKernelBuilder {
                 );
 
                 if let Some(manifest) = summary.manifests.first() {
-                    let mut index = EvidenceIndex::new(snapshot_id);
                     if let Ok(ev) = index.create_evidence_ref(reader, manifest, 1, 10).await {
-                        evidence_map.push(ev.clone());
+                        let ev_id = ev.id;
+                        evidence_map.push(ev);
                         claims.push(Claim {
                             id: Uuid::new_v4(),
                             classification: ClaimClassification::Observed,
@@ -98,22 +99,22 @@ impl SemanticKernelBuilder {
                                 manifest.display()
                             ),
                             confidence: 1.0,
-                            evidence_ids: vec![ev.id],
+                            evidence_ids: vec![ev_id],
                             rationale: Some("빌드 시스템 정의 파일".to_string()),
                         });
                     }
                 }
 
                 if let Some(entry) = summary.entry_points.first() {
-                    let mut index = EvidenceIndex::new(snapshot_id);
                     if let Ok(ev) = index.create_evidence_ref(reader, entry, 1, 15).await {
-                        evidence_map.push(ev.clone());
+                        let ev_id = ev.id;
+                        evidence_map.push(ev);
                         claims.push(Claim {
                             id: Uuid::new_v4(),
                             classification: ClaimClassification::Observed,
                             statement: format!("메인 진입점 파일 발견: {}", entry.display()),
                             confidence: 0.95,
-                            evidence_ids: vec![ev.id],
+                            evidence_ids: vec![ev_id],
                             rationale: Some("애플리케이션 시작 지점".to_string()),
                         });
                     }
@@ -124,7 +125,7 @@ impl SemanticKernelBuilder {
                     basis: RecommendationBasis::ProjectIntentAligned,
                     impact: "프로젝트 빠른 파악".to_string(),
                     rationale: "진입점과 권위 문서를 먼저 검토하는 것이 좋습니다.".to_string(),
-                    evidence_ids: vec![],
+                    evidence_ids: evidence_map.iter().map(|e| e.id).collect(),
                     decision_required: false,
                 });
             }
@@ -138,12 +139,17 @@ impl SemanticKernelBuilder {
                 );
 
                 for doc in &summary.documents {
+                    let mut ev_ids = Vec::new();
+                    if let Ok(ev) = index.create_evidence_ref(reader, doc, 1, 5).await {
+                        ev_ids.push(ev.id);
+                        evidence_map.push(ev);
+                    }
                     claims.push(Claim {
                         id: Uuid::new_v4(),
                         classification: ClaimClassification::Observed,
                         statement: format!("문서 파일: {}", doc.display()),
                         confidence: 1.0,
-                        evidence_ids: vec![],
+                        evidence_ids: ev_ids,
                         rationale: Some("설계 및 사양 문서".to_string()),
                     });
                 }
@@ -160,6 +166,13 @@ impl SemanticKernelBuilder {
                         unresolved_question: "공식 사양서(spec.md) 작성이 필요합니까?".to_string(),
                     });
                 } else {
+                    let mut doc_ev_ids = Vec::new();
+                    for doc in &summary.documents {
+                        if let Ok(ev) = index.create_evidence_ref(reader, doc, 1, 5).await {
+                            doc_ev_ids.push(ev.id);
+                            evidence_map.push(ev);
+                        }
+                    }
                     claims.push(Claim {
                         id: Uuid::new_v4(),
                         classification: ClaimClassification::Observed,
@@ -168,32 +181,80 @@ impl SemanticKernelBuilder {
                             summary.documents.len()
                         ),
                         confidence: 0.9,
-                        evidence_ids: vec![],
-                        rationale: None,
+                        evidence_ids: doc_ev_ids,
+                        rationale: Some("기록된 설계 문서와 소스 코드 대조".to_string()),
                     });
                 }
             }
             "/where" | "where" => {
                 direct_answer = "주요 진입점 및 빌드 설정 파일 위치입니다.".to_string();
                 for entry in &summary.entry_points {
+                    let mut ev_ids = Vec::new();
+                    if let Ok(ev) = index.create_evidence_ref(reader, entry, 1, 10).await {
+                        ev_ids.push(ev.id);
+                        evidence_map.push(ev);
+                    }
                     claims.push(Claim {
                         id: Uuid::new_v4(),
                         classification: ClaimClassification::Observed,
                         statement: format!("진입점: {}", entry.display()),
                         confidence: 1.0,
-                        evidence_ids: vec![],
+                        evidence_ids: ev_ids,
                         rationale: Some("애플리케이션 진입점".to_string()),
                     });
                 }
                 for manifest in &summary.manifests {
+                    let mut ev_ids = Vec::new();
+                    if let Ok(ev) = index.create_evidence_ref(reader, manifest, 1, 10).await {
+                        ev_ids.push(ev.id);
+                        evidence_map.push(ev);
+                    }
                     claims.push(Claim {
                         id: Uuid::new_v4(),
                         classification: ClaimClassification::Observed,
                         statement: format!("매니페스트: {}", manifest.display()),
                         confidence: 1.0,
-                        evidence_ids: vec![],
+                        evidence_ids: ev_ids,
                         rationale: Some("빌드 및 의존성 매니페스트".to_string()),
                     });
+                }
+            }
+            "/risks" | "risks" => {
+                direct_answer = "프로젝트의 위험 요소 및 미확정 결정 분석 결과입니다.".to_string();
+                if summary.test_files.is_empty() {
+                    claims.push(Claim {
+                        id: Uuid::new_v4(),
+                        classification: ClaimClassification::Conflict,
+                        statement: "자동화 회귀 테스트 스위트 부재".to_string(),
+                        confidence: 0.95,
+                        evidence_ids: vec![],
+                        rationale: Some("소스 파일 대비 테스트 파일 0건 감지".to_string()),
+                    });
+                    recommendations.push(Recommendation {
+                        id: Uuid::new_v4(),
+                        basis: RecommendationBasis::NeedsUserDecision,
+                        impact: "품질 게이트 및 리팩터링 안정성 확보".to_string(),
+                        rationale: "단위 테스트 또는 통합 테스트 픽스처 추가가 권장됩니다."
+                            .to_string(),
+                        evidence_ids: vec![],
+                        decision_required: true,
+                    });
+                } else {
+                    for test_file in summary.test_files.iter().take(3) {
+                        let mut ev_ids = Vec::new();
+                        if let Ok(ev) = index.create_evidence_ref(reader, test_file, 1, 10).await {
+                            ev_ids.push(ev.id);
+                            evidence_map.push(ev);
+                        }
+                        claims.push(Claim {
+                            id: Uuid::new_v4(),
+                            classification: ClaimClassification::Observed,
+                            statement: format!("테스트 파일 검증됨: {}", test_file.display()),
+                            confidence: 1.0,
+                            evidence_ids: ev_ids,
+                            rationale: Some("회귀 테스트 스위트".to_string()),
+                        });
+                    }
                 }
             }
             _ => {

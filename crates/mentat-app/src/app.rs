@@ -107,6 +107,12 @@ impl MentatApp {
             .and_then(|s| s.list_recent_repos().ok())
             .unwrap_or_default();
 
+        // [IMP-F005] Restore saved backend profile if available
+        let profile = storage
+            .as_ref()
+            .and_then(|s| s.load_backend_profile().ok().flatten())
+            .unwrap_or_default();
+
         Self {
             session: None,
             snapshot: None,
@@ -119,7 +125,7 @@ impl MentatApp {
             status_text: "준비됨".to_string(),
             rt,
             backend: Arc::new(MultiProviderAdapter::new()),
-            profile: BackendProfile::default(),
+            profile,
             persona: PersonaKind::DefaultAnalyst,
             settings_open: false,
             ping_status: String::new(),
@@ -192,12 +198,15 @@ impl MentatApp {
                 let rt = self.rt.clone();
                 let s = session_arc.clone();
 
-                // DBG-F001: Asynchronously scan files and snapshot without blocking UI loop
+                // DBG-F001 & DBG-F002: Single-scan async indexing without double disk traversal
                 let (tx, rx) = std::sync::mpsc::channel();
                 self.scan_rx = Some(rx);
                 rt.spawn(async move {
                     let files_res = s.scan_files().await;
-                    let snap_res = s.create_snapshot().await;
+                    let snap_res = files_res
+                        .as_ref()
+                        .map(|files| s.create_snapshot_from_files(files))
+                        .map_err(|e| e.clone());
                     let _ = tx.send((files_res, snap_res));
                 });
 
@@ -380,6 +389,10 @@ impl eframe::App for MentatApp {
                         snap.tree_digest.chars().take(8).collect::<String>()
                     );
 
+                    if let Some(ref s) = self.storage {
+                        let _ = s.save_snapshot_meta(&snap);
+                    }
+
                     self.files = files;
                     self.summary = Some(summary);
                     self.kernel = Some(kernel);
@@ -518,38 +531,52 @@ impl eframe::App for MentatApp {
             }
         }
 
-        // 6. Poll streaming events
+        // 6. Poll streaming events (DBG-F007: Handle TryRecvError::Disconnected terminal state)
         if self.is_streaming {
             let mut finished = false;
 
             if let Some(ref rx) = self.stream_rx {
-                while let Ok(event) = rx.try_recv() {
-                    match event {
-                        InferenceEvent::Started { .. } => {
-                            self.status_text = format!("🤖 {} 스트리밍 중...", self.profile.model);
-                        }
-                        InferenceEvent::TextDelta(delta) => {
-                            if let Some(ref mut text) = self.answer_preview {
-                                text.push_str(&delta);
+                loop {
+                    match rx.try_recv() {
+                        Ok(event) => match event {
+                            InferenceEvent::Started { .. } => {
+                                self.status_text =
+                                    format!("🤖 {} 스트리밍 중...", self.profile.model);
                             }
+                            InferenceEvent::TextDelta(delta) => {
+                                if let Some(ref mut text) = self.answer_preview {
+                                    text.push_str(&delta);
+                                }
+                            }
+                            InferenceEvent::Completed { full_text } => {
+                                self.answer_preview = Some(full_text);
+                                self.status_text = "완료됨".to_string();
+                                finished = true;
+                                break;
+                            }
+                            InferenceEvent::Cancelled => {
+                                self.status_text = "취소됨".to_string();
+                                finished = true;
+                                break;
+                            }
+                            InferenceEvent::Failed {
+                                error_code,
+                                message,
+                            } => {
+                                self.status_text = format!("오류 [{}] {}", error_code, message);
+                                finished = true;
+                                break;
+                            }
+                            _ => {}
+                        },
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                            break;
                         }
-                        InferenceEvent::Completed { full_text } => {
-                            self.answer_preview = Some(full_text);
-                            self.status_text = "완료됨".to_string();
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            self.status_text = "스트리밍 연결이 종료되었습니다.".to_string();
                             finished = true;
+                            break;
                         }
-                        InferenceEvent::Cancelled => {
-                            self.status_text = "취소됨".to_string();
-                            finished = true;
-                        }
-                        InferenceEvent::Failed {
-                            error_code,
-                            message,
-                        } => {
-                            self.status_text = format!("오류 [{}] {}", error_code, message);
-                            finished = true;
-                        }
-                        _ => {}
                     }
                 }
             }
@@ -657,6 +684,9 @@ impl eframe::App for MentatApp {
                     self.ping_backend();
                 }
                 if settings_action.close_clicked {
+                    if let Some(ref s) = self.storage {
+                        let _ = s.save_backend_profile(&self.profile);
+                    }
                     self.settings_open = false;
                 }
             }
@@ -766,6 +796,12 @@ impl eframe::App for MentatApp {
                     }
                     if ui.small_button("/conflicts").clicked() {
                         self.handle_query(ctx, "/conflicts".to_string());
+                    }
+                    if ui.small_button("/where").clicked() {
+                        self.handle_query(ctx, "/where".to_string());
+                    }
+                    if ui.small_button("/risks").clicked() {
+                        self.handle_query(ctx, "/risks".to_string());
                     }
 
                     if self.is_streaming {

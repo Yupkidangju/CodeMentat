@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.0-dev] - 2026-08-19 (Re-audit #6 Remediation)
+
+### Fixed
+- **[DBG-F002 & DBG-F003] Single-Scan Snapshot, Recursive Tree Watcher & Scan Budget Limits:**
+  - Implemented `create_snapshot_from_files` in `ReadOnlySession` to construct tree digests directly from scanned file records without redundant second disk traversals.
+  - Upgraded `RepositoryWatcher` to perform recursive bounded file mtime inspections across subdirectories.
+  - Enforced scan budgets (maximum 100,000 files, 2GiB total scanned size, 10MB per-file read limit) to guard against resource exhaustion.
+- **[IMP-F004] Evidence-Linked Workflows & `/risks` Analysis:**
+  - Attached verified `EvidenceRef` items with exact line numbers and content hashes to all local workflows (`/onboard`, `/structure`, `/conflicts`, `/where`).
+  - Added new `/risks` workflow analyzing missing regression tests and unconfirmed decisions.
+- **[IMP-F005] Profile & Snapshot History Persistence:**
+  - Implemented SQLite persistence for active `BackendProfile` configuration (excluding plaintext API keys per CON-007).
+  - Added repository snapshot history tracking (`snapshot_history` table) and automatic profile restoration on app launch.
+- **[SEC-F002] Generic Bearer Token Redaction & Per-Request User Exclusions:**
+  - Added pattern detection for generic `Bearer <token>` authorization headers in `EgressFilter`.
+  - Added `assemble_packet_with_user_exclusions` supporting per-request user file exclusions.
+- **[DBG-F005 & DBG-F007] Production Adapter Integration Tests & Stream Disconnect Terminal Handling:**
+  - Handled `TryRecvError::Disconnected` in UI streaming event loop to transition cleanly out of streaming state upon abnormal background termination.
+  - Added adapter integration tests verifying missing key fail-closed behavior and pre-response cancellation abort.
+- **[IMP-F006] Calibrated Traceability Matrix:**
+  - Recalibrated remaining baseline items in `spec.md` to honest `Partial` statuses with 34 passing tests.
+
+---
+
 ## [0.1.0-dev] - 2026-08-19 (Re-audit #5 Remediation)
 
 ### Fixed
