@@ -1,0 +1,21 @@
+[package]
+name = "mentat-analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mentat-core.workspace = true
+mentat-repository.workspace = true
+mentat-inference.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "mentat-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mentat-core.workspace = true
+dirs.workspace = true
+rfd.workspace = true
+arboard.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "mentat-inference-llama"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+native-llama = []
+
+[dependencies]
+mentat-core.workspace = true
+mentat-inference.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+uuid.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }

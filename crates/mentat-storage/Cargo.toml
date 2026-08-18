@@ -1,0 +1,17 @@
+[package]
+name = "mentat-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mentat-core.workspace = true
+rusqlite.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

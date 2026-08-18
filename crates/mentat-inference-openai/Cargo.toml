@@ -1,0 +1,18 @@
+[package]
+name = "mentat-inference-openai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mentat-core.workspace = true
+mentat-inference.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+async-stream.workspace = true
+async-trait.workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "mentat-repository"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mentat-core.workspace = true
+async-trait.workspace = true
+ignore.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

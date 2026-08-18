@@ -1,0 +1,25 @@
+[package]
+name = "mentat-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mentat-core.workspace = true
+mentat-repository.workspace = true
+mentat-analysis.workspace = true
+mentat-inference.workspace = true
+mentat-inference-openai.workspace = true
+mentat-persona.workspace = true
+mentat-storage.workspace = true
+mentat-platform.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+eframe.workspace = true
+egui.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
