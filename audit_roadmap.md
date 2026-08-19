@@ -4,11 +4,12 @@
 - **참조 표준:** `AI_AUDIT_DOC_STANDARD.md`
 - **기존 baseline 감사:** `docs/audit/audit_report_17.md` — `PASS WITH KNOWN RISKS`
 - **최신 확장 범위 감사:** `docs/audit/audit_report_23.md` — `HOLD`
-- **신규 변경 상태:** `REPORT 23 PROCESS LOCK REMEDIATION / CLEAN GATE PENDING`
+- **신규 변경 상태:** `REPORT 23 PROCESS LOCK REMEDIATION CLEAN / RE-AUDIT REQUESTED`
 - **전체 판정:** `기존 HOLD 유지 — 새 clean commit 독립 재감사 전 PASS 아님`
 - **재감사 요청:** `docs/audit/re_audit_request_21.md` — 대상 `4918c3e`
 - **최신 재감사 요청:** `docs/audit/re_audit_request_22.md` — 대상 `b0ef425`
 - **runtime ownership 재감사 요청:** `docs/audit/re_audit_request_23.md` — 대상 `a03da5d`
+- **process lock 재감사 요청:** `docs/audit/re_audit_request_24.md` — 대상 `6c6e946`
 
 기존 audit PASS는 `c8684b4` 이전 구조화 조언자 baseline에 대한 판정이다. CR-UX-001 구현 완료를 의미하지 않는다. 기존 SEC-F007 Accepted Risk는 그대로 유지한다.
 
@@ -148,5 +149,5 @@ Process lifetime lock re-audit: HOLD (audit_report_23)
 CR-UX-001 CR-0: APPROVED
 CR-UX-001 CR-1~7: PRODUCTION PARTIAL — AgentLoop/egress/Grounding·Audit remediation 구현, 29/43 Verified
 Implementation approval: RECEIVED
-Final decision: REPORT 23 REMEDIATION GATES PENDING — 새 감사가 대체하기 전까지 HOLD
+Final decision: RE-AUDIT REQUESTED for 6c6e946 — 새 감사가 대체하기 전까지 HOLD
 ```
