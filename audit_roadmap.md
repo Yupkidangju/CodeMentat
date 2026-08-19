@@ -3,9 +3,9 @@
 - **문서 버전:** 2.0.0-plan
 - **참조 표준:** `AI_AUDIT_DOC_STANDARD.md`
 - **기존 baseline 감사:** `docs/audit/audit_report_17.md` — `PASS WITH KNOWN RISKS`
-- **최신 확장 범위 감사:** `docs/audit/audit_report_18.md` — `HOLD`
-- **신규 변경 상태:** `CR-0~2 PASS / CR-3~7 IMPLEMENTED OR PARTIAL / CR-8 RE-AUDIT PENDING`
-- **전체 판정:** `CLEAN COMMIT 및 전체 재감사 진행 중 — 아직 PASS 아님`
+- **최신 확장 범위 감사:** `docs/audit/audit_report_19.md` — `HOLD`
+- **신규 변경 상태:** `CR-0~2 PASS / CR-3~7 PARTIAL / CR-8 HOLD`
+- **전체 판정:** `HOLD — Major 4건 및 SEC-F007 Accepted Risk`
 
 기존 audit PASS는 `c8684b4` 이전 구조화 조언자 baseline에 대한 판정이다. CR-UX-001 구현 완료를 의미하지 않는다. 기존 SEC-F007 Accepted Risk는 그대로 유지한다.
 
@@ -138,8 +138,9 @@ docs/audit/CR-UX-001_FINAL_REAUDIT.md
 ```text
 Baseline audit: PASS WITH KNOWN RISKS (audit_report_17)
 Expanded working-tree audit: HOLD (audit_report_18)
+Clean-commit full re-audit: HOLD (audit_report_19)
 CR-UX-001 CR-0: APPROVED
-CR-UX-001 CR-1~7: IMPLEMENTED OR PARTIAL — clean commit 재검증 대상
+CR-UX-001 CR-1~7: PARTIAL — AgentLoop/egress/Grounding·Audit 연결 필요
 Implementation approval: RECEIVED
-Final decision: CR-8 CLEAN-COMMIT RE-AUDIT PENDING
+Final decision: CR-8 HOLD — Major 4건
 ```
