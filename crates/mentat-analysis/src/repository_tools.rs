@@ -1,3 +1,4 @@
+use crate::egress::EgressFilter;
 use mentat_core::{
     FileRecord, MentatError, RepositoryReader, RepositorySnapshot, RepositoryToolArguments,
     RepositoryToolCall, RepositoryToolName, RepositoryToolResult, SnapshotStatus, SourceRef,
@@ -171,6 +172,16 @@ impl RepositoryToolGateway {
             }
         };
         let (content, omissions) = bound_content(content, omissions);
+        let (content, _) = EgressFilter::scan_and_redact_secrets(&content);
+        let (content, omissions) = bound_content(content, omissions);
+        let source_refs = source_refs
+            .into_iter()
+            .map(|mut source| {
+                source.excerpt = EgressFilter::scan_and_redact_secrets(&source.excerpt).0;
+                source.excerpt = source.excerpt.trim_end_matches('\n').to_string();
+                source
+            })
+            .collect();
         Ok(RepositoryToolResult {
             call_id: call.call_id,
             snapshot_id: call.snapshot_id,
@@ -609,6 +620,13 @@ mod tests {
         RepositoryToolGateway::new(session, snapshot, files)
     }
 
+    async fn fixture_for_path(path: &Path) -> RepositoryToolGateway {
+        let session = Arc::new(ReadOnlySession::open(path).unwrap());
+        let files = session.scan_files().await.unwrap();
+        let snapshot = session.create_snapshot_from_files(&files);
+        RepositoryToolGateway::new(session, snapshot, files)
+    }
+
     #[tokio::test]
     async fn search_then_read_returns_bounded_source_refs() {
         let gateway = fixture().await;
@@ -653,6 +671,38 @@ mod tests {
         );
         assert_eq!(read.source_refs[0].line_start, 1);
         assert_eq!(read.source_refs[0].line_end, 3);
+    }
+
+    #[tokio::test]
+    async fn repository_tool_result_redacts_secrets_before_provider_boundary() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.txt"),
+            "token = ghp_abcdefghijklmnopqrstuvwxyz1234567890\n",
+        )
+        .unwrap();
+        let gateway = fixture_for_path(dir.path()).await;
+        let snapshot_id = gateway.snapshot().id;
+        let result = gateway
+            .execute(
+                RepositoryToolCall {
+                    call_id: Uuid::new_v4(),
+                    snapshot_id,
+                    name: RepositoryToolName::ReadFileLines,
+                    arguments: RepositoryToolArguments::ReadFileLines {
+                        relative_path: PathBuf::from("config.txt"),
+                        start_line: 1,
+                        end_line: 1,
+                    },
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.content.contains("ghp_"));
+        assert!(result.content.contains("[REDACTED"));
+        assert!(!result.source_refs[0].excerpt.contains("ghp_"));
     }
 
     #[tokio::test]

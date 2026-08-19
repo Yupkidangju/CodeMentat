@@ -6,7 +6,7 @@ use mentat_core::{
 };
 use mentat_inference::{
     AgentEvent, AgentMessage, AgentMessageContent, AgentRequest, CancelledPayload,
-    CompletedPayload, InferenceBackend, InferenceRoundEvent, ProviderKind,
+    CompletedPayload, InferenceBackend, InferenceRoundEvent, ProviderBodyEgressGate,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -17,6 +17,9 @@ use uuid::Uuid;
 pub struct AgentLoop<B> {
     backend: Arc<B>,
     gateway: Option<Arc<RepositoryToolGateway>>,
+    egress_gate: Option<Arc<dyn ProviderBodyEgressGate>>,
+    trace_id: Option<Uuid>,
+    event_sink: Option<Arc<dyn Fn(AgentEvent) + Send + Sync>>,
 }
 
 pub struct AgentLoopOutcome {
@@ -26,7 +29,28 @@ pub struct AgentLoopOutcome {
 
 impl<B: InferenceBackend> AgentLoop<B> {
     pub fn new(backend: Arc<B>, gateway: Option<Arc<RepositoryToolGateway>>) -> Self {
-        Self { backend, gateway }
+        Self {
+            backend,
+            gateway,
+            egress_gate: None,
+            trace_id: None,
+            event_sink: None,
+        }
+    }
+
+    pub fn with_egress_gate(mut self, gate: Arc<dyn ProviderBodyEgressGate>) -> Self {
+        self.egress_gate = Some(gate);
+        self
+    }
+
+    pub fn with_trace_id(mut self, trace_id: Uuid) -> Self {
+        self.trace_id = Some(trace_id);
+        self
+    }
+
+    pub fn with_event_sink(mut self, sink: Arc<dyn Fn(AgentEvent) + Send + Sync>) -> Self {
+        self.event_sink = Some(sink);
+        self
     }
 
     pub async fn run(
@@ -45,14 +69,18 @@ impl<B: InferenceBackend> AgentLoop<B> {
         mut request: AgentRequest,
         cancel: CancellationToken,
     ) -> Result<AgentLoopOutcome, MentatError> {
-        let mut events = vec![AgentEvent::Started {
-            request_id: request.request_id,
-        }];
+        let mut events = Vec::new();
+        self.emit(
+            &mut events,
+            AgentEvent::Started {
+                request_id: request.request_id,
+            },
+        );
         let mut trace = request
             .repository_context
             .as_ref()
             .map(|context| GroundingTrace {
-                id: Uuid::new_v4(),
+                id: self.trace_id.unwrap_or_else(Uuid::new_v4),
                 conversation_id: request.conversation_id,
                 turn_id: request.turn_id,
                 snapshot_id: Some(context.snapshot_id),
@@ -67,9 +95,13 @@ impl<B: InferenceBackend> AgentLoop<B> {
 
         for round in 1..=request.limits.max_rounds {
             if cancel.is_cancelled() {
-                events.push(AgentEvent::Cancelled {
-                    payload: cancellation_payload(&request.response_contract, String::new()),
-                });
+                self.emit(
+                    &mut events,
+                    AgentEvent::Cancelled {
+                        payload: cancellation_payload(&request.response_contract, String::new()),
+                    },
+                );
+                self.attach_receipt_ids(&mut trace)?;
                 return Ok(AgentLoopOutcome {
                     events,
                     grounding_trace: trace,
@@ -77,7 +109,11 @@ impl<B: InferenceBackend> AgentLoop<B> {
             }
             let mut stream = self
                 .backend
-                .infer_round_stream(request.clone(), cancel.clone())
+                .infer_round_stream_guarded(
+                    request.clone(),
+                    cancel.clone(),
+                    self.egress_gate.clone(),
+                )
                 .await?;
             let mut round_text = String::new();
             let mut tool_calls = None;
@@ -86,7 +122,7 @@ impl<B: InferenceBackend> AgentLoop<B> {
                 match event {
                     InferenceRoundEvent::Started { .. } => {}
                     InferenceRoundEvent::ThinkingDelta(delta) => {
-                        events.push(AgentEvent::ThinkingDelta(delta));
+                        self.emit(&mut events, AgentEvent::ThinkingDelta(delta));
                     }
                     InferenceRoundEvent::TextDelta(delta) => {
                         round_text.push_str(&delta);
@@ -94,16 +130,19 @@ impl<B: InferenceBackend> AgentLoop<B> {
                             request.response_contract,
                             mentat_core::ResponseContract::AdvisorMarkdown
                         ) {
-                            events.push(AgentEvent::TextDelta(delta));
+                            self.emit(&mut events, AgentEvent::TextDelta(delta));
                         }
                     }
                     InferenceRoundEvent::UsageUpdate {
                         prompt_tokens,
                         completion_tokens,
-                    } => events.push(AgentEvent::UsageUpdate {
-                        prompt_tokens,
-                        completion_tokens,
-                    }),
+                    } => self.emit(
+                        &mut events,
+                        AgentEvent::UsageUpdate {
+                            prompt_tokens,
+                            completion_tokens,
+                        },
+                    ),
                     InferenceRoundEvent::ToolCallsRequested { calls, .. } => {
                         tool_calls = Some(calls);
                         break;
@@ -126,10 +165,13 @@ impl<B: InferenceBackend> AgentLoop<B> {
                 match result {
                     Ok(full_text) => match request.response_contract {
                         mentat_core::ResponseContract::AdvisorMarkdown => {
-                            events.push(AgentEvent::Completed {
-                                payload: CompletedPayload::AdvisorMarkdown(full_text),
-                                trace_id: trace.as_ref().map(|trace| trace.id),
-                            });
+                            self.emit(
+                                &mut events,
+                                AgentEvent::Completed {
+                                    payload: CompletedPayload::AdvisorMarkdown(full_text),
+                                    trace_id: trace.as_ref().map(|trace| trace.id),
+                                },
+                            );
                         }
                         mentat_core::ResponseContract::AuditAnswerBundle { .. } => {
                             match validate_audit_bundle(
@@ -137,31 +179,47 @@ impl<B: InferenceBackend> AgentLoop<B> {
                                 request.request_id,
                                 trace.as_ref(),
                             ) {
-                                Ok(bundle) => events.push(AgentEvent::Completed {
-                                    payload: CompletedPayload::ValidatedAuditBundle(bundle),
-                                    trace_id: trace.as_ref().map(|trace| trace.id),
-                                }),
-                                Err(_) => events.push(AgentEvent::Failed {
-                                    error_code: "AUDIT_RESPONSE_INVALID".to_string(),
-                                    safe_message:
-                                        "Audit 응답의 schema/evidence 검증에 실패했습니다."
-                                            .to_string(),
-                                }),
+                                Ok(bundle) => self.emit(
+                                    &mut events,
+                                    AgentEvent::Completed {
+                                        payload: CompletedPayload::ValidatedAuditBundle(bundle),
+                                        trace_id: trace.as_ref().map(|trace| trace.id),
+                                    },
+                                ),
+                                Err(_) => self.emit(
+                                    &mut events,
+                                    AgentEvent::Failed {
+                                        error_code: "AUDIT_RESPONSE_INVALID".to_string(),
+                                        safe_message:
+                                            "Audit 응답의 schema/evidence 검증에 실패했습니다."
+                                                .to_string(),
+                                    },
+                                ),
                             }
                         }
                     },
                     Err((error_code, _safe_message)) if error_code == "CANCELLED" => {
-                        events.push(AgentEvent::Cancelled {
-                            payload: cancellation_payload(&request.response_contract, round_text),
-                        });
+                        self.emit(
+                            &mut events,
+                            AgentEvent::Cancelled {
+                                payload: cancellation_payload(
+                                    &request.response_contract,
+                                    round_text,
+                                ),
+                            },
+                        );
                     }
                     Err((error_code, safe_message)) => {
-                        events.push(AgentEvent::Failed {
-                            error_code,
-                            safe_message,
-                        });
+                        self.emit(
+                            &mut events,
+                            AgentEvent::Failed {
+                                error_code,
+                                safe_message,
+                            },
+                        );
                     }
                 }
+                self.attach_receipt_ids(&mut trace)?;
                 return Ok(AgentLoopOutcome {
                     events,
                     grounding_trace: trace,
@@ -174,12 +232,6 @@ impl<B: InferenceBackend> AgentLoop<B> {
                     "provider round가 terminal event 없이 종료되었습니다.",
                 )
             })?;
-            if request.profile.provider != ProviderKind::LocalMock {
-                return Err(loop_error(
-                    "TOOL_EGRESS_CONSENT_REQUIRED",
-                    "외부 provider tool result는 durable consent/receipt 없이 전송할 수 없습니다.",
-                ));
-            }
             let gateway = self.gateway.as_ref().ok_or_else(|| {
                 loop_error(
                     "REPOSITORY_TOOL_UNAVAILABLE",
@@ -242,17 +294,34 @@ impl<B: InferenceBackend> AgentLoop<B> {
                     role: mentat_inference::AgentRole::Tool,
                     content: AgentMessageContent::ToolResult(result),
                 });
-                events.push(AgentEvent::ToolProgress {
-                    round,
-                    completed_calls: u16::try_from(index + 1).unwrap_or(u16::MAX),
-                    total_calls: call_count,
-                });
+                self.emit(
+                    &mut events,
+                    AgentEvent::ToolProgress {
+                        round,
+                        completed_calls: u16::try_from(index + 1).unwrap_or(u16::MAX),
+                        total_calls: call_count,
+                    },
+                );
             }
         }
         Err(loop_error(
             "AGENT_LOOP_LIMIT_REACHED",
             "AgentLoop round 한도를 초과했습니다.",
         ))
+    }
+
+    fn attach_receipt_ids(&self, trace: &mut Option<GroundingTrace>) -> Result<(), MentatError> {
+        if let (Some(trace), Some(gate)) = (trace.as_mut(), self.egress_gate.as_ref()) {
+            trace.egress_receipt_ids = gate.receipt_ids()?;
+        }
+        Ok(())
+    }
+
+    fn emit(&self, events: &mut Vec<AgentEvent>, event: AgentEvent) {
+        if let Some(sink) = &self.event_sink {
+            sink(event.clone());
+        }
+        events.push(event);
     }
 }
 
@@ -386,7 +455,8 @@ mod tests {
         RepositoryReader, RepositoryToolArguments, RepositoryToolCall, RepositoryToolName,
     };
     use mentat_inference::{
-        AgentLimits, AgentMessage, BackendProfile, FakeInferenceBackend, RepositoryContext,
+        AgentLimits, AgentMessage, BackendProfile, FakeInferenceBackend, ProviderKind,
+        RepositoryContext,
     };
     use mentat_repository::ReadOnlySession;
     use std::collections::VecDeque;

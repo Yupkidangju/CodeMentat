@@ -1,7 +1,8 @@
 use crate::db::{parse_datetime, parse_uuid, storage_error, SqliteStorage};
 use mentat_core::{
-    GroundingTrace, MentatError, ProviderBinding, RepositoryConsentKind, RepositoryConsentScope,
-    RepositoryToolName, ToolEgressReceipt, ToolEgressStatus,
+    GroundingFreshness, GroundingTrace, MentatError, ProviderBinding, RepositoryConsentKind,
+    RepositoryConsentScope, RepositoryToolCallRecord, RepositoryToolCallStatus, RepositoryToolName,
+    SourceRef, ToolEgressReceipt, ToolEgressStatus,
 };
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use uuid::Uuid;
@@ -16,7 +17,12 @@ impl SqliteStorage {
             .execute(
                 "INSERT INTO grounding_traces (
                     id, conversation_id, turn_id, snapshot_id, freshness, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(id) DO UPDATE SET
+                    conversation_id = excluded.conversation_id,
+                    turn_id = excluded.turn_id,
+                    snapshot_id = excluded.snapshot_id,
+                    freshness = excluded.freshness",
                 params![
                     trace.id.to_string(),
                     trace.conversation_id.to_string(),
@@ -30,6 +36,20 @@ impl SqliteStorage {
                 ],
             )
             .map_err(|error| storage_error("GROUNDING_TRACE_INSERT_FAILED", &error.to_string()))?;
+        transaction
+            .execute(
+                "DELETE FROM tool_call_records WHERE trace_id = ?1",
+                [trace.id.to_string()],
+            )
+            .map_err(|error| {
+                storage_error("GROUNDING_TOOL_RECORD_RESET_FAILED", &error.to_string())
+            })?;
+        transaction
+            .execute(
+                "DELETE FROM source_refs WHERE trace_id = ?1",
+                [trace.id.to_string()],
+            )
+            .map_err(|error| storage_error("GROUNDING_SOURCE_RESET_FAILED", &error.to_string()))?;
         for record in &trace.tool_calls {
             transaction
                 .execute(
@@ -91,6 +111,156 @@ impl SqliteStorage {
             .commit()
             .map_err(|error| storage_error("GROUNDING_TRACE_COMMIT_FAILED", &error.to_string()))?;
         Ok(())
+    }
+
+    pub fn load_grounding_trace(&self, id: Uuid) -> Result<Option<GroundingTrace>, MentatError> {
+        let conn = self.lock_conn()?;
+        let header = conn
+            .query_row(
+                "SELECT conversation_id, turn_id, snapshot_id, freshness
+                 FROM grounding_traces WHERE id = ?1",
+                [id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| storage_error("GROUNDING_TRACE_READ_FAILED", &error.to_string()))?;
+        let Some((conversation_id, turn_id, snapshot_id, freshness)) = header else {
+            return Ok(None);
+        };
+        let mut record_statement = conn
+            .prepare(
+                "SELECT call_id, round, tool_name, canonical_arguments_digest,
+                        result_digest, content_bytes, source_ref_ids, status
+                 FROM tool_call_records WHERE trace_id = ?1 ORDER BY round, call_id",
+            )
+            .map_err(|error| storage_error("GROUNDING_TOOL_READ_FAILED", &error.to_string()))?;
+        let record_rows = record_statement
+            .query_map([id.to_string()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            })
+            .map_err(|error| storage_error("GROUNDING_TOOL_READ_FAILED", &error.to_string()))?;
+        let mut tool_calls = Vec::new();
+        for row in record_rows {
+            let row = row
+                .map_err(|error| storage_error("GROUNDING_TOOL_READ_FAILED", &error.to_string()))?;
+            tool_calls.push(RepositoryToolCallRecord {
+                trace_id: id,
+                call_id: parse_uuid(&row.0, "tool_call_records.call_id")?,
+                round: u8::try_from(row.1).map_err(|_| {
+                    storage_error(
+                        "STORAGE_DECODE_INTEGER",
+                        "tool call round가 유효하지 않습니다.",
+                    )
+                })?,
+                name: parse_tool_name(&row.2)?,
+                canonical_arguments_digest: row.3,
+                result_digest: row.4,
+                content_bytes: u32::try_from(row.5).map_err(|_| {
+                    storage_error(
+                        "STORAGE_DECODE_INTEGER",
+                        "tool result bytes가 유효하지 않습니다.",
+                    )
+                })?,
+                source_ref_ids: serde_json::from_str(&row.6).map_err(|error| {
+                    storage_error("GROUNDING_SOURCE_IDS_DECODE_FAILED", &error.to_string())
+                })?,
+                status: parse_tool_call_status(&row.7)?,
+            });
+        }
+        drop(record_statement);
+
+        let mut source_statement = conn
+            .prepare(
+                "SELECT id, snapshot_id, relative_path, line_start, line_end, content_hash, excerpt
+                 FROM source_refs WHERE trace_id = ?1 ORDER BY ordinal",
+            )
+            .map_err(|error| storage_error("GROUNDING_SOURCE_READ_FAILED", &error.to_string()))?;
+        let source_rows = source_statement
+            .query_map([id.to_string()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })
+            .map_err(|error| storage_error("GROUNDING_SOURCE_READ_FAILED", &error.to_string()))?;
+        let mut source_refs = Vec::new();
+        for row in source_rows {
+            let row = row.map_err(|error| {
+                storage_error("GROUNDING_SOURCE_READ_FAILED", &error.to_string())
+            })?;
+            source_refs.push(SourceRef {
+                id: parse_uuid(&row.0, "source_refs.id")?,
+                snapshot_id: parse_uuid(&row.1, "source_refs.snapshot_id")?,
+                relative_path: std::path::PathBuf::from(row.2),
+                line_start: usize::try_from(row.3).map_err(|_| {
+                    storage_error(
+                        "STORAGE_DECODE_INTEGER",
+                        "source line_start가 유효하지 않습니다.",
+                    )
+                })?,
+                line_end: usize::try_from(row.4).map_err(|_| {
+                    storage_error(
+                        "STORAGE_DECODE_INTEGER",
+                        "source line_end가 유효하지 않습니다.",
+                    )
+                })?,
+                content_hash: row.5,
+                excerpt: row.6,
+            });
+        }
+        drop(source_statement);
+
+        let mut receipt_statement = conn
+            .prepare("SELECT id FROM tool_egress_receipts WHERE trace_id = ?1 ORDER BY prepared_at")
+            .map_err(|error| storage_error("GROUNDING_RECEIPT_READ_FAILED", &error.to_string()))?;
+        let receipt_rows = receipt_statement
+            .query_map([id.to_string()], |row| row.get::<_, String>(0))
+            .map_err(|error| storage_error("GROUNDING_RECEIPT_READ_FAILED", &error.to_string()))?;
+        let mut egress_receipt_ids = Vec::new();
+        for row in receipt_rows {
+            egress_receipt_ids.push(parse_uuid(
+                &row.map_err(|error| {
+                    storage_error("GROUNDING_RECEIPT_READ_FAILED", &error.to_string())
+                })?,
+                "tool_egress_receipts.id",
+            )?);
+        }
+        Ok(Some(GroundingTrace {
+            id,
+            conversation_id: parse_uuid(&conversation_id, "grounding_traces.conversation_id")?,
+            turn_id: parse_uuid(&turn_id, "grounding_traces.turn_id")?,
+            snapshot_id: snapshot_id
+                .as_deref()
+                .map(|value| parse_uuid(value, "grounding_traces.snapshot_id"))
+                .transpose()?,
+            tool_calls,
+            source_refs,
+            egress_receipt_ids,
+            freshness: serde_json::from_str::<GroundingFreshness>(&freshness).map_err(|error| {
+                storage_error("GROUNDING_FRESHNESS_DECODE_FAILED", &error.to_string())
+            })?,
+        }))
     }
 
     pub fn save_repository_consent_scope(
@@ -300,6 +470,19 @@ fn parse_tool_name(value: &str) -> Result<RepositoryToolName, MentatError> {
         })
 }
 
+fn parse_tool_call_status(value: &str) -> Result<RepositoryToolCallStatus, MentatError> {
+    match value {
+        "Pending" => Ok(RepositoryToolCallStatus::Pending),
+        "Completed" => Ok(RepositoryToolCallStatus::Completed),
+        "Omitted" => Ok(RepositoryToolCallStatus::Omitted),
+        "Failed" => Ok(RepositoryToolCallStatus::Failed),
+        _ => Err(storage_error(
+            "STORAGE_DECODE_ENUM",
+            "tool_call_records.status 값이 유효하지 않습니다.",
+        )),
+    }
+}
+
 fn egress_status_text(status: ToolEgressStatus) -> &'static str {
     match status {
         ToolEgressStatus::Prepared => "Prepared",
@@ -483,5 +666,9 @@ mod tests {
                 ToolEgressStatus::Failed,
             )
             .is_err());
+        let restored = storage.load_grounding_trace(trace_id).unwrap().unwrap();
+        assert_eq!(restored.id, trace_id);
+        assert_eq!(restored.snapshot_id, Some(snapshot_id));
+        assert_eq!(restored.egress_receipt_ids, vec![receipt_id]);
     }
 }

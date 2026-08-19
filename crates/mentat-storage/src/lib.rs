@@ -13,10 +13,11 @@ pub use secret_preferences::ProviderSecretPreference;
 mod tests {
     use super::*;
     use mentat_core::models::{
-        ChatMessage, ChatRole, ConversationPersistence, ConversationTurn, ExperiencePreset,
-        MessageStatus, NewConversation, PromptContentSource, PromptDraft, PromptLayerDraft,
-        RepositoryProfile, RepositorySnapshot, RepositoryType, ResponseContract, SnapshotStatus,
-        SystemPreset, TurnStart, TurnTerminalUpdate, UiPreferences,
+        AnswerBundle, ChatMessage, ChatRole, ConversationPersistence, ConversationTurn,
+        ExperiencePreset, GroundingFreshness, GroundingTrace, MessageStatus, NewConversation,
+        PromptContentSource, PromptDraft, PromptLayerDraft, RepositoryProfile, RepositorySnapshot,
+        RepositoryType, ResponseContract, SnapshotStatus, SystemPreset, TurnStart,
+        TurnTerminalUpdate, UiPreferences,
     };
     use mentat_inference::{BackendProfile, ProviderKind};
     use rusqlite::Connection;
@@ -601,6 +602,118 @@ mod tests {
         assert_eq!(conversation.messages.len(), 2);
         assert_eq!(conversation.messages[1].markdown, expected_markdown);
         assert_eq!(conversation.messages[1].status, MessageStatus::Completed);
+    }
+
+    #[test]
+    fn validated_audit_result_and_grounding_restore_by_turn() {
+        let dir = tempdir().unwrap();
+        let storage = SqliteStorage::open(dir.path().join("mentat.db")).unwrap();
+        let profile = storage
+            .seed_factory_prompt_profile(&factory_seed())
+            .unwrap();
+        let active = storage
+            .load_active_prompt_profile(profile.id)
+            .unwrap()
+            .unwrap();
+        let repository_id = Uuid::new_v4();
+        let snapshot_id = Uuid::new_v4();
+        let conversation = storage
+            .create_conversation(&NewConversation {
+                repository_id: Some(repository_id),
+                active_snapshot_id: Some(snapshot_id),
+                prompt_profile_id: profile.id,
+                persistence: ConversationPersistence::Durable,
+            })
+            .unwrap();
+        let turn_id = Uuid::new_v4();
+        let assistant = ChatMessage::new(
+            conversation.id,
+            turn_id,
+            ChatRole::Assistant,
+            1,
+            "",
+            MessageStatus::Pending,
+        );
+        storage
+            .begin_turn(&TurnStart {
+                turn: ConversationTurn {
+                    id: turn_id,
+                    conversation_id: conversation.id,
+                    sequence: 1,
+                    prompt_profile_id: profile.id,
+                    prompt_profile_revision_id: active.revision.id,
+                    kernel_version: "kernel.v1".to_string(),
+                    kernel_digest: "kernel".to_string(),
+                    snapshot_id: Some(snapshot_id),
+                    response_contract: ResponseContract::AuditAnswerBundle {
+                        schema_version: "answer_bundle.v1".to_string(),
+                    },
+                    audit_result_id: None,
+                    started_at: chrono::Utc::now(),
+                    completed_at: None,
+                },
+                user_message: ChatMessage::new(
+                    conversation.id,
+                    turn_id,
+                    ChatRole::User,
+                    0,
+                    "감사",
+                    MessageStatus::Completed,
+                ),
+                assistant_placeholder: assistant.clone(),
+            })
+            .unwrap();
+        let trace_id = Uuid::new_v4();
+        storage
+            .prepare_grounding_trace(&GroundingTrace {
+                id: trace_id,
+                conversation_id: conversation.id,
+                turn_id,
+                snapshot_id: Some(snapshot_id),
+                tool_calls: Vec::new(),
+                source_refs: Vec::new(),
+                egress_receipt_ids: Vec::new(),
+                freshness: GroundingFreshness::FreshAtSend,
+            })
+            .unwrap();
+        let result = AnswerBundle {
+            request_id: Uuid::new_v4(),
+            snapshot_id,
+            direct_answer: "검증됨".to_string(),
+            claims: Vec::new(),
+            evidence_map: Vec::new(),
+            recommendations: Vec::new(),
+            conflicts: Vec::new(),
+            raw_model_response: None,
+        };
+        storage
+            .finish_turn(&TurnTerminalUpdate::AuditCompleted {
+                turn_id,
+                assistant_message_id: assistant.id,
+                result: result.clone(),
+                grounding_trace_id: trace_id,
+                freshness: GroundingFreshness::FreshAtSend,
+                completed_at: chrono::Utc::now(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            storage
+                .load_audit_result_for_turn(turn_id)
+                .unwrap()
+                .unwrap()
+                .direct_answer,
+            result.direct_answer
+        );
+        assert_eq!(
+            storage
+                .load_conversation(conversation.id)
+                .unwrap()
+                .unwrap()
+                .messages[1]
+                .grounding_trace_id,
+            Some(trace_id)
+        );
     }
 
     #[test]

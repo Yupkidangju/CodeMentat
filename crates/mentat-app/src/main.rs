@@ -6,6 +6,7 @@ mod credential_state;
 mod hotkeys;
 mod provider_setup;
 mod theme;
+mod tool_egress_gate;
 mod widgets;
 
 use chat_app::MentatChatApp;

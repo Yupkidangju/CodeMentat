@@ -16,6 +16,7 @@ mentat-platform.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 sha2.workspace = true
+serde_json.workspace = true
 eframe.workspace = true
 egui.workspace = true
 pulldown-cmark.workspace = true

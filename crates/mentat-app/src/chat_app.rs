@@ -2,20 +2,24 @@ use crate::credential_state::CredentialController;
 use crate::hotkeys::GlobalShortcutController;
 use crate::provider_setup::ProviderSetupState;
 use crate::theme::MentatTheme;
+use crate::tool_egress_gate::DurableToolEgressGate;
 use crate::widgets::markdown::render_markdown;
 use crate::widgets::settings_panel::SettingsPanel;
 use eframe::egui::{self, RichText, ScrollArea, ViewportCommand};
-use futures_util::StreamExt;
+use mentat_analysis::agent_loop::AgentLoop;
 use mentat_analysis::repository_tools::{repository_tool_definitions, RepositoryToolGateway};
+use mentat_analysis::tool_egress::RuntimeConsentCapability;
+use mentat_analysis::AnswerBundleNormalizer;
 use mentat_core::{
-    ChatMessage, ChatRole, ComposerSubmitMode, Conversation, ConversationPersistence,
-    ConversationTurn, ExperiencePreset, FileRecord, MessageStatus, NewConversation,
+    AnswerBundle, ChatMessage, ChatRole, ComposerSubmitMode, Conversation, ConversationPersistence,
+    ConversationTurn, ExperiencePreset, FileRecord, GroundingFreshness, GroundingTrace,
+    MessageStatus, NewConversation, ProviderBinding, RepositoryConsentKind, RepositoryConsentScope,
     RepositoryReader, RepositorySnapshot, ResponseContract, SystemPreset, TurnStart,
     TurnTerminalUpdate, UiPreferences,
 };
 use mentat_inference::{
-    AgentCapabilities, AgentLimits, AgentMessage, AgentRequest, InferenceBackend,
-    InferenceRoundEvent, ModelCatalog, ModelVerification,
+    AgentCapabilities, AgentEvent, AgentLimits, AgentMessage, AgentRequest, CancelledPayload,
+    CompletedPayload, InferenceBackend, ModelCatalog, ModelVerification,
 };
 use mentat_inference_openai::MultiProviderAdapter;
 use mentat_persona::{
@@ -25,6 +29,7 @@ use mentat_persona::{
 use mentat_platform::PlatformManager;
 use mentat_repository::{ReadOnlySession, ScanLimits};
 use mentat_storage::{FactoryPromptSeed, SqliteStorage};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
@@ -49,13 +54,24 @@ enum AsyncResult {
         session: Arc<ReadOnlySession>,
         result: Result<(RepositorySnapshot, Vec<FileRecord>), mentat_core::MentatError>,
     },
-    Agent(InferenceRoundEvent),
+    AgentEvent(AgentEvent),
+    AgentFinished {
+        assistant_message_id: Uuid,
+        result: Result<Option<GroundingTrace>, mentat_core::MentatError>,
+    },
 }
 
 struct ActiveTurn {
     turn_id: Uuid,
     assistant_message_id: Uuid,
     accumulated: String,
+    response_contract: ResponseContract,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConversationMode {
+    Advisor,
+    Audit,
 }
 
 struct RepositoryBinding {
@@ -105,6 +121,12 @@ pub struct MentatChatApp {
     status: String,
     global_shortcuts: GlobalShortcutController,
     pending_dirty_action: Option<DirtyPromptAction>,
+    mode: ConversationMode,
+    repository_egress_approved: bool,
+    grounding_by_message: HashMap<Uuid, GroundingTrace>,
+    audit_by_message: HashMap<Uuid, AnswerBundle>,
+    selected_grounding_message: Option<Uuid>,
+    selected_source: Option<mentat_core::SourceRef>,
 }
 
 impl MentatChatApp {
@@ -224,6 +246,10 @@ impl MentatChatApp {
                     false,
                 )
             });
+        let (grounding_by_message, audit_by_message) = storage
+            .as_ref()
+            .map(|storage| restore_message_projections(storage, &conversation))
+            .unwrap_or_default();
 
         Self {
             runtime,
@@ -259,6 +285,12 @@ impl MentatChatApp {
             status,
             global_shortcuts: GlobalShortcutController::register(&creation_context.egui_ctx),
             pending_dirty_action: None,
+            mode: ConversationMode::Advisor,
+            repository_egress_approved: false,
+            grounding_by_message,
+            audit_by_message,
+            selected_grounding_message: None,
+            selected_source: None,
         }
     }
 
@@ -412,13 +444,129 @@ impl MentatChatApp {
                                 .color(MentatTheme::TEXT_MUTED),
                             );
                         });
+                        let repository_capable = self
+                            .provider_setup
+                            .active_capabilities()
+                            .is_some_and(|capabilities| capabilities.repository_advisor_capable)
+                            && repository.snapshot.status == mentat_core::SnapshotStatus::Ready;
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(
+                                &mut self.mode,
+                                ConversationMode::Advisor,
+                                "Advisor",
+                            );
+                            ui.add_enabled_ui(repository_capable, |ui| {
+                                ui.selectable_value(
+                                    &mut self.mode,
+                                    ConversationMode::Audit,
+                                    "Audit",
+                                );
+                            });
+                        });
+                        if !repository_capable && self.mode == ConversationMode::Audit {
+                            self.mode = ConversationMode::Advisor;
+                        }
+                        if self
+                            .provider_setup
+                            .active_profile()
+                            .is_some_and(|profile| profile.provider.requires_api_key())
+                            && repository_capable
+                        {
+                            ui.checkbox(
+                                &mut self.repository_egress_approved,
+                                "이 세션에서 필요한 저장소 발췌의 공급자 전송 허용",
+                            )
+                            .on_hover_text(
+                                "현재 대화·snapshot·provider·model에만 결속됩니다. 변경 시 자동 해제됩니다.",
+                            );
+                        }
                     }
+                    let mut open_grounding = None;
                     for message in &self.conversation.messages {
-                        render_message(ui, message);
+                        render_message(ui, message, self.audit_by_message.get(&message.id));
+                        if message.role == ChatRole::Assistant {
+                            if let Some(trace) = self.grounding_by_message.get(&message.id) {
+                                if ui
+                                    .small_button(format!(
+                                        "근거 {} · 도구 {}",
+                                        trace.source_refs.len(),
+                                        trace.tool_calls.len()
+                                    ))
+                                    .clicked()
+                                {
+                                    open_grounding = Some(message.id);
+                                }
+                            }
+                        }
                         ui.add_space(10.0);
+                    }
+                    if let Some(message_id) = open_grounding {
+                        self.selected_grounding_message = Some(message_id);
                     }
                 });
         });
+        self.show_grounding_drawer(ctx);
+    }
+
+    fn show_grounding_drawer(&mut self, ctx: &egui::Context) {
+        let Some(message_id) = self.selected_grounding_message else {
+            return;
+        };
+        let Some(trace) = self.grounding_by_message.get(&message_id).cloned() else {
+            self.selected_grounding_message = None;
+            return;
+        };
+        let mut open = true;
+        egui::Window::new("Grounding")
+            .open(&mut open)
+            .default_width(300.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "{:?} · tool {} · receipt {}",
+                        trace.freshness,
+                        trace.tool_calls.len(),
+                        trace.egress_receipt_ids.len()
+                    ))
+                    .small()
+                    .color(MentatTheme::TEXT_MUTED),
+                );
+                ui.separator();
+                if trace.source_refs.is_empty() {
+                    ui.label("표시할 SourceRef가 없습니다.");
+                }
+                for source in &trace.source_refs {
+                    let label = format!(
+                        "{}:{}-{}",
+                        source.relative_path.display(),
+                        source.line_start,
+                        source.line_end
+                    );
+                    if ui.button(label).clicked() {
+                        self.selected_source = Some(source.clone());
+                    }
+                }
+                if let Some(source) = &self.selected_source {
+                    ui.separator();
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · lines {}-{}",
+                            source.relative_path.display(),
+                            source.line_start,
+                            source.line_end
+                        ))
+                        .strong(),
+                    );
+                    ScrollArea::horizontal().show(ui, |ui| {
+                        ui.monospace(&source.excerpt);
+                    });
+                }
+            });
+        if !open {
+            self.selected_grounding_message = None;
+            self.selected_source = None;
+        }
     }
 
     fn show_settings(&mut self, ctx: &egui::Context) {
@@ -443,6 +591,8 @@ impl MentatChatApp {
                     != self.provider_setup.draft_profile.provider
                     || previous.base_url != self.provider_setup.draft_profile.base_url;
                 if provider_target_changed {
+                    self.repository_egress_approved = false;
+                    self.mode = ConversationMode::Advisor;
                     self.provider_setup.draft_profile.api_key = None;
                     self.remember_api_key = false;
                     if let Some(storage) = &self.storage {
@@ -468,6 +618,9 @@ impl MentatChatApp {
                 if let Some(model) = action.selected_model {
                     if let Err(error) = self.provider_setup.select_model(&model) {
                         self.provider_status = error;
+                    } else {
+                        self.repository_egress_approved = false;
+                        self.mode = ConversationMode::Advisor;
                     }
                 }
                 if action.discover_clicked {
@@ -1006,10 +1159,37 @@ impl MentatChatApp {
         if question.is_empty() {
             return;
         }
+        let capabilities = self
+            .provider_setup
+            .active_capabilities()
+            .unwrap_or(AgentCapabilities::CHAT_ONLY);
+        let repository_capable = capabilities.repository_advisor_capable
+            && self.repository.as_ref().is_some_and(|repository| {
+                repository.snapshot.status == mentat_core::SnapshotStatus::Ready
+            });
+        if self.mode == ConversationMode::Audit && !repository_capable {
+            self.status =
+                "Audit은 Ready 저장소와 repository advisor 검증 모델이 필요합니다.".to_string();
+            return;
+        }
+        if repository_capable
+            && profile.provider.requires_api_key()
+            && !self.repository_egress_approved
+        {
+            self.status =
+                "저장소 발췌를 공급자에 전송하려면 위 동의 항목을 먼저 선택하세요.".to_string();
+            return;
+        }
+        if repository_capable && profile.provider.requires_api_key() && self.storage.is_none() {
+            self.status =
+                "durable receipt 저장소가 없어 cloud repository 도구를 실행할 수 없습니다."
+                    .to_string();
+            return;
+        }
         if self.conversation.messages.is_empty() && self.storage.is_some() {
             self.ensure_durable_conversation();
         }
-        let composition = match self.compose_prompt() {
+        let mut composition = match self.compose_prompt() {
             Ok(value) => value,
             Err(error) => {
                 self.status = error.to_string();
@@ -1017,6 +1197,29 @@ impl MentatChatApp {
             }
         };
         let turn_id = Uuid::new_v4();
+        let response_contract = match self.mode {
+            ConversationMode::Advisor => ResponseContract::AdvisorMarkdown,
+            ConversationMode::Audit => ResponseContract::AuditAnswerBundle {
+                schema_version: "answer_bundle.v1".to_string(),
+            },
+        };
+        let repository = if repository_capable {
+            self.repository.as_ref()
+        } else {
+            None
+        };
+        if matches!(
+            response_contract,
+            ResponseContract::AuditAnswerBundle { .. }
+        ) {
+            let snapshot_id = repository
+                .map(|repository| repository.snapshot.id)
+                .expect("Audit repository capability가 앞에서 검증됨");
+            composition.effective_system_prompt.push_str("\n\n");
+            composition
+                .effective_system_prompt
+                .push_str(&AnswerBundleNormalizer::system_contract(snapshot_id));
+        }
         let next_ordinal = self.conversation.messages.len() as u64;
         let user_message = ChatMessage::new(
             self.conversation.id,
@@ -1053,8 +1256,8 @@ impl MentatChatApp {
             prompt_profile_revision_id: revision_id,
             kernel_version: KERNEL_VERSION.to_string(),
             kernel_digest: composition.kernel_digest.clone(),
-            snapshot_id: None,
-            response_contract: ResponseContract::AdvisorMarkdown,
+            snapshot_id: repository.map(|repository| repository.snapshot.id),
+            response_contract: response_contract.clone(),
             audit_result_id: None,
             started_at: chrono::Utc::now(),
             completed_at: None,
@@ -1076,12 +1279,8 @@ impl MentatChatApp {
             .filter_map(chat_to_agent_message)
             .collect();
         messages.push(AgentMessage::user(user_message.markdown.clone()));
-        self.conversation.messages.push(user_message);
-        self.conversation.messages.push(assistant_message.clone());
-        self.composer.clear();
-        self.status.clear();
 
-        let repository = self.repository.as_ref().map(|binding| {
+        let repository_request = repository.map(|binding| {
             (
                 &binding.snapshot,
                 binding.session.profile().display_name.as_str(),
@@ -1090,43 +1289,138 @@ impl MentatChatApp {
         let request = build_agent_request(
             self.conversation.id,
             turn_id,
-            profile,
+            profile.clone(),
             composition.effective_system_prompt,
             messages,
-            repository,
-            ResponseContract::AdvisorMarkdown,
+            repository_request,
+            response_contract.clone(),
         );
+        let trace_id = repository.map(|_| Uuid::new_v4());
+        if let (Some(storage), Some(repository), Some(trace_id)) =
+            (&self.storage, repository, trace_id)
+        {
+            let empty_trace = GroundingTrace {
+                id: trace_id,
+                conversation_id: self.conversation.id,
+                turn_id,
+                snapshot_id: Some(repository.snapshot.id),
+                tool_calls: Vec::new(),
+                source_refs: Vec::new(),
+                egress_receipt_ids: Vec::new(),
+                freshness: GroundingFreshness::FreshAtSend,
+            };
+            if let Err(error) = storage.prepare_grounding_trace(&empty_trace) {
+                let _ = storage.finish_turn(&TurnTerminalUpdate::Failed {
+                    turn_id,
+                    assistant_message_id: assistant_message.id,
+                    error_code: "TOOL_EGRESS_RECEIPT_FAILED".to_string(),
+                    safe_message: "Grounding trace를 준비하지 못했습니다.".to_string(),
+                    completed_at: chrono::Utc::now(),
+                });
+                self.status = format!("Grounding 준비 실패: {error}");
+                return;
+            }
+        }
+        let egress_gate = if profile.provider.requires_api_key() {
+            match (&self.storage, repository, trace_id) {
+                (Some(storage), Some(repository), Some(trace_id)) => {
+                    let endpoint = MultiProviderAdapter::agent_endpoint(&profile);
+                    let binding = match ProviderBinding::new(
+                        profile.id,
+                        format!("{:?}", profile.provider),
+                        &endpoint,
+                        profile.model.clone(),
+                    ) {
+                        Ok(binding) => binding,
+                        Err(error) => {
+                            fail_started_turn(
+                                storage,
+                                turn_id,
+                                assistant_message.id,
+                                "TOOL_EGRESS_BINDING_INVALID",
+                            );
+                            self.status = error.to_string();
+                            return;
+                        }
+                    };
+                    let scope = RepositoryConsentScope {
+                        id: Uuid::new_v4(),
+                        conversation_id: self.conversation.id,
+                        repository_id: repository.snapshot.repo_id,
+                        snapshot_id: repository.snapshot.id,
+                        provider_binding: binding,
+                        kind: RepositoryConsentKind::RepositorySession,
+                        granted_at: chrono::Utc::now(),
+                        revoked_at: None,
+                    };
+                    if let Err(error) = storage.save_repository_consent_scope(&scope) {
+                        fail_started_turn(
+                            storage,
+                            turn_id,
+                            assistant_message.id,
+                            "TOOL_EGRESS_RECEIPT_FAILED",
+                        );
+                        self.status = format!("동의 기록 저장 실패: {error}");
+                        return;
+                    }
+                    Some(Arc::new(DurableToolEgressGate::new(
+                        storage.clone(),
+                        RuntimeConsentCapability::new(scope),
+                        trace_id,
+                    ))
+                        as Arc<dyn mentat_inference::ProviderBodyEgressGate>)
+                }
+                _ if repository.is_some() => {
+                    self.status = "cloud tool egress에 durable storage가 필요합니다.".to_string();
+                    return;
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        self.conversation.messages.push(user_message);
+        self.conversation.messages.push(assistant_message.clone());
+        self.composer.clear();
+        self.status.clear();
         let cancel = CancellationToken::new();
         self.stream_cancel = Some(cancel.clone());
         self.active_turn = Some(ActiveTurn {
             turn_id,
             assistant_message_id: assistant_message.id,
             accumulated: String::new(),
+            response_contract,
         });
         let backend = self.backend.clone();
         let tx = self.async_tx.clone();
+        let assistant_message_id = assistant_message.id;
+        let gateway = repository.map(|repository| repository.gateway.clone());
         self.runtime.spawn(async move {
-            match backend.infer_round_stream(request, cancel).await {
-                Ok(mut stream) => {
-                    while let Some(event) = stream.next().await {
-                        let terminal = matches!(
-                            event,
-                            InferenceRoundEvent::RawCompleted { .. }
-                                | InferenceRoundEvent::Failed { .. }
-                        );
-                        let _ = tx.send(AsyncResult::Agent(event));
-                        if terminal {
-                            break;
-                        }
-                    }
-                }
-                Err(error) => {
-                    let _ = tx.send(AsyncResult::Agent(InferenceRoundEvent::Failed {
-                        error_code: "CHAT_BACKEND_ERROR".to_string(),
-                        safe_message: error.to_string(),
-                    }));
-                }
+            let event_tx = tx.clone();
+            let mut agent =
+                AgentLoop::new(backend, gateway).with_event_sink(Arc::new(move |event| {
+                    let _ = event_tx.send(AsyncResult::AgentEvent(event));
+                }));
+            if let Some(trace_id) = trace_id {
+                agent = agent.with_trace_id(trace_id);
             }
+            if let Some(gate) = egress_gate {
+                agent = agent.with_egress_gate(gate);
+            }
+            let result = agent
+                .run(request, cancel)
+                .await
+                .map(|outcome| outcome.grounding_trace);
+            if let Err(error) = &result {
+                let _ = tx.send(AsyncResult::AgentEvent(AgentEvent::Failed {
+                    error_code: "AGENT_LOOP_FAILED".to_string(),
+                    safe_message: error.to_string(),
+                }));
+            }
+            let _ = tx.send(AsyncResult::AgentFinished {
+                assistant_message_id,
+                result,
+            });
         });
     }
 
@@ -1160,7 +1454,12 @@ impl MentatChatApp {
                 repository_id: Some(repository.gateway.snapshot().repo_id),
                 snapshot_id: Some(repository.gateway.snapshot().id),
                 status: Some(repository.gateway.snapshot().status.clone()),
-                tools_available: false,
+                tools_available: repository.gateway.snapshot().status
+                    == mentat_core::SnapshotStatus::Ready
+                    && self
+                        .provider_setup
+                        .active_capabilities()
+                        .is_some_and(|capabilities| capabilities.repository_advisor_capable),
             })
             .unwrap_or_else(RepositoryPromptState::none);
         PromptComposer::compose(&PromptCompositionInput {
@@ -1226,6 +1525,8 @@ impl MentatChatApp {
                             }
                             self.conversation.repository_id = Some(snapshot.repo_id);
                             self.conversation.active_snapshot_id = Some(snapshot.id);
+                            self.repository_egress_approved = false;
+                            self.mode = ConversationMode::Advisor;
                             self.repository = Some(RepositoryBinding {
                                 gateway: Arc::new(RepositoryToolGateway::new(
                                     session.clone(),
@@ -1245,20 +1546,48 @@ impl MentatChatApp {
                         Err(error) => self.status = error.to_string(),
                     }
                 }
-                AsyncResult::Agent(event) => self.apply_agent_event(event),
+                AsyncResult::AgentEvent(event) => self.apply_agent_event(event),
+                AsyncResult::AgentFinished {
+                    assistant_message_id,
+                    result,
+                } => match result {
+                    Ok(Some(trace)) => {
+                        if let Some(storage) = &self.storage {
+                            if let Err(error) = storage.prepare_grounding_trace(&trace) {
+                                self.status = format!("Grounding 저장 실패: {error}");
+                            }
+                        }
+                        self.grounding_by_message
+                            .insert(assistant_message_id, trace);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        if self.status.is_empty() {
+                            self.status = error.to_string();
+                        }
+                    }
+                },
             }
         }
     }
 
-    fn apply_agent_event(&mut self, event: InferenceRoundEvent) {
+    fn apply_agent_event(&mut self, event: AgentEvent) {
         let Some(active) = self.active_turn.as_mut() else {
             return;
         };
         match event {
-            InferenceRoundEvent::Started { .. }
-            | InferenceRoundEvent::ThinkingDelta(_)
-            | InferenceRoundEvent::UsageUpdate { .. } => {}
-            InferenceRoundEvent::TextDelta(delta) => {
+            AgentEvent::Started { .. }
+            | AgentEvent::ThinkingDelta(_)
+            | AgentEvent::UsageUpdate { .. } => {}
+            AgentEvent::ToolProgress {
+                round,
+                completed_calls,
+                total_calls,
+            } => {
+                self.status =
+                    format!("저장소 조사 중 · round {round} · {completed_calls}/{total_calls}");
+            }
+            AgentEvent::TextDelta(delta) => {
                 active.accumulated.push_str(&delta);
                 if let Some(message) = self
                     .conversation
@@ -1277,24 +1606,54 @@ impl MentatChatApp {
                     }
                 }
             }
-            InferenceRoundEvent::RawCompleted { full_text } => {
-                let update = TurnTerminalUpdate::AdvisorCompleted {
-                    turn_id: active.turn_id,
-                    assistant_message_id: active.assistant_message_id,
-                    markdown: full_text.clone(),
-                    grounding_trace_id: None,
-                    freshness: None,
-                    completed_at: chrono::Utc::now(),
+            AgentEvent::Completed { payload, trace_id } => {
+                let completed_at = chrono::Utc::now();
+                let update = match payload {
+                    CompletedPayload::AdvisorMarkdown(markdown) => {
+                        if let Some(message) = self
+                            .conversation
+                            .messages
+                            .iter_mut()
+                            .find(|message| message.id == active.assistant_message_id)
+                        {
+                            message.markdown = markdown.clone();
+                            message.status = MessageStatus::Completed;
+                        }
+                        TurnTerminalUpdate::AdvisorCompleted {
+                            turn_id: active.turn_id,
+                            assistant_message_id: active.assistant_message_id,
+                            markdown,
+                            grounding_trace_id: trace_id,
+                            freshness: trace_id.map(|_| GroundingFreshness::FreshAtSend),
+                            completed_at,
+                        }
+                    }
+                    CompletedPayload::ValidatedAuditBundle(bundle) => {
+                        let Some(trace_id) = trace_id else {
+                            self.status = "Audit 결과에 GroundingTrace가 없습니다.".to_string();
+                            return;
+                        };
+                        if let Some(message) = self
+                            .conversation
+                            .messages
+                            .iter_mut()
+                            .find(|message| message.id == active.assistant_message_id)
+                        {
+                            message.markdown.clear();
+                            message.status = MessageStatus::Completed;
+                        }
+                        self.audit_by_message
+                            .insert(active.assistant_message_id, bundle.clone());
+                        TurnTerminalUpdate::AuditCompleted {
+                            turn_id: active.turn_id,
+                            assistant_message_id: active.assistant_message_id,
+                            result: bundle,
+                            grounding_trace_id: trace_id,
+                            freshness: GroundingFreshness::FreshAtSend,
+                            completed_at,
+                        }
+                    }
                 };
-                if let Some(message) = self
-                    .conversation
-                    .messages
-                    .iter_mut()
-                    .find(|message| message.id == active.assistant_message_id)
-                {
-                    message.markdown = full_text;
-                    message.status = MessageStatus::Completed;
-                }
                 if let Some(storage) = &self.storage {
                     if let Err(error) = storage.finish_turn(&update) {
                         self.status = format!("완료 상태 저장 실패: {error}");
@@ -1303,16 +1662,67 @@ impl MentatChatApp {
                 self.active_turn = None;
                 self.stream_cancel = None;
             }
-            InferenceRoundEvent::Failed {
+            AgentEvent::Cancelled { payload } => {
+                let update = match payload {
+                    CancelledPayload::AdvisorPartialMarkdown(partial_markdown) => {
+                        if let Some(message) = self
+                            .conversation
+                            .messages
+                            .iter_mut()
+                            .find(|message| message.id == active.assistant_message_id)
+                        {
+                            message.markdown = partial_markdown.clone();
+                            message.status = MessageStatus::Cancelled;
+                        }
+                        TurnTerminalUpdate::AdvisorCancelled {
+                            turn_id: active.turn_id,
+                            assistant_message_id: active.assistant_message_id,
+                            partial_markdown,
+                            completed_at: chrono::Utc::now(),
+                        }
+                    }
+                    CancelledPayload::AuditNoContent => {
+                        if let Some(message) = self
+                            .conversation
+                            .messages
+                            .iter_mut()
+                            .find(|message| message.id == active.assistant_message_id)
+                        {
+                            message.markdown.clear();
+                            message.status = MessageStatus::Cancelled;
+                        }
+                        TurnTerminalUpdate::AuditCancelled {
+                            turn_id: active.turn_id,
+                            assistant_message_id: active.assistant_message_id,
+                            completed_at: chrono::Utc::now(),
+                        }
+                    }
+                };
+                if let Some(storage) = &self.storage {
+                    let _ = storage.finish_turn(&update);
+                }
+                self.status = "요청이 취소되었습니다.".to_string();
+                self.active_turn = None;
+                self.stream_cancel = None;
+            }
+            AgentEvent::Failed {
                 error_code,
                 safe_message,
             } => {
                 let cancelled = error_code == "CANCELLED";
-                let update = if cancelled {
+                let update = if cancelled
+                    && matches!(active.response_contract, ResponseContract::AdvisorMarkdown)
+                {
                     TurnTerminalUpdate::AdvisorCancelled {
                         turn_id: active.turn_id,
                         assistant_message_id: active.assistant_message_id,
                         partial_markdown: active.accumulated.clone(),
+                        completed_at: chrono::Utc::now(),
+                    }
+                } else if cancelled {
+                    TurnTerminalUpdate::AuditCancelled {
+                        turn_id: active.turn_id,
+                        assistant_message_id: active.assistant_message_id,
                         completed_at: chrono::Utc::now(),
                     }
                 } else {
@@ -1346,13 +1756,6 @@ impl MentatChatApp {
                 self.active_turn = None;
                 self.stream_cancel = None;
             }
-            InferenceRoundEvent::ToolCallsRequested { .. } => {
-                self.status =
-                    "chat-only 단계에서 예기치 않은 tool 요청을 차단했습니다.".to_string();
-                if let Some(token) = &self.stream_cancel {
-                    token.cancel();
-                }
-            }
         }
     }
 
@@ -1376,6 +1779,12 @@ impl MentatChatApp {
         }
         self.active_turn = None;
         self.stream_cancel = None;
+        self.mode = ConversationMode::Advisor;
+        self.repository_egress_approved = false;
+        self.grounding_by_message.clear();
+        self.audit_by_message.clear();
+        self.selected_grounding_message = None;
+        self.selected_source = None;
         self.conversation = self
             .storage
             .as_ref()
@@ -1544,6 +1953,44 @@ fn chat_to_agent_message(message: &ChatMessage) -> Option<AgentMessage> {
     }
 }
 
+fn restore_message_projections(
+    storage: &SqliteStorage,
+    conversation: &Conversation,
+) -> (HashMap<Uuid, GroundingTrace>, HashMap<Uuid, AnswerBundle>) {
+    let mut grounding = HashMap::new();
+    let mut audit = HashMap::new();
+    for message in conversation
+        .messages
+        .iter()
+        .filter(|message| message.role == ChatRole::Assistant)
+    {
+        if let Some(trace_id) = message.grounding_trace_id {
+            if let Ok(Some(trace)) = storage.load_grounding_trace(trace_id) {
+                grounding.insert(message.id, trace);
+            }
+        }
+        if let Ok(Some(result)) = storage.load_audit_result_for_turn(message.turn_id) {
+            audit.insert(message.id, result);
+        }
+    }
+    (grounding, audit)
+}
+
+fn fail_started_turn(
+    storage: &SqliteStorage,
+    turn_id: Uuid,
+    assistant_message_id: Uuid,
+    error_code: &str,
+) {
+    let _ = storage.finish_turn(&TurnTerminalUpdate::Failed {
+        turn_id,
+        assistant_message_id,
+        error_code: error_code.to_string(),
+        safe_message: "요청 준비 단계가 실패했습니다.".to_string(),
+        completed_at: chrono::Utc::now(),
+    });
+}
+
 fn build_agent_request(
     conversation_id: Uuid,
     turn_id: Uuid,
@@ -1592,14 +2039,16 @@ fn append_status(status: &mut String, message: &str) {
     status.push_str(message);
 }
 
-fn render_message(ui: &mut egui::Ui, message: &ChatMessage) {
+fn render_message(ui: &mut egui::Ui, message: &ChatMessage, audit: Option<&AnswerBundle>) {
     ui.group(|ui| {
         let role = match message.role {
             ChatRole::User => "나",
             ChatRole::Assistant => "MENTAT",
         };
         ui.label(RichText::new(role).strong().size(12.0));
-        if message.markdown.is_empty() {
+        if let Some(audit) = audit {
+            render_audit_result(ui, audit);
+        } else if message.markdown.is_empty() {
             ui.label(RichText::new("응답 준비 중…").italics());
         } else if message.role == ChatRole::Assistant {
             render_markdown(ui, &message.markdown);
@@ -1624,6 +2073,28 @@ fn render_message(ui: &mut egui::Ui, message: &ChatMessage) {
             _ => {}
         }
     });
+}
+
+fn render_audit_result(ui: &mut egui::Ui, result: &AnswerBundle) {
+    ui.label(RichText::new("검증된 Audit 결과").strong());
+    ui.add(egui::Label::new(&result.direct_answer).wrap());
+    if !result.claims.is_empty() {
+        ui.collapsing(format!("Claims {}", result.claims.len()), |ui| {
+            for claim in &result.claims {
+                ui.label(format!("{:?} · {}", claim.classification, claim.statement));
+            }
+        });
+    }
+    if !result.conflicts.is_empty() {
+        ui.collapsing(format!("Conflicts {}", result.conflicts.len()), |ui| {
+            for conflict in &result.conflicts {
+                ui.label(format!(
+                    "{} ↔ {} · {}",
+                    conflict.side_a, conflict.side_b, conflict.impact
+                ));
+            }
+        });
+    }
 }
 
 fn system_preset_label(preset: SystemPreset) -> &'static str {
@@ -1787,5 +2258,34 @@ mod tests {
 
         assert_eq!(request.tools.len(), 6);
         assert_eq!(request.repository_context.unwrap().snapshot_id, snapshot.id);
+    }
+
+    #[test]
+    fn production_chat_source_uses_agent_loop_instead_of_direct_round_stream() {
+        let source = include_str!("chat_app.rs");
+        assert!(source.contains("AgentLoop::new"));
+        let forbidden = ["backend", ".infer_round_stream(request"].join("");
+        assert!(!source.contains(&forbidden));
+        assert!(source.contains("AsyncResult::AgentFinished"));
+    }
+
+    #[test]
+    fn audit_request_keeps_tagged_response_contract() {
+        let request = build_agent_request(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            mentat_inference::BackendProfile::default(),
+            "system".to_string(),
+            vec![AgentMessage::user("감사")],
+            None,
+            ResponseContract::AuditAnswerBundle {
+                schema_version: "answer_bundle.v1".to_string(),
+            },
+        );
+        assert!(matches!(
+            request.response_contract,
+            ResponseContract::AuditAnswerBundle { ref schema_version }
+                if schema_version == "answer_bundle.v1"
+        ));
     }
 }

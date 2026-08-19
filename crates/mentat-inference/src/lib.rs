@@ -15,6 +15,7 @@ pub trait ProviderBodyEgressGate: Send + Sync {
     fn authorize_exact_body(
         &self,
         request: &AgentRequest,
+        endpoint_identity: &str,
         exact_provider_body: &[u8],
     ) -> Result<Vec<uuid::Uuid>, MentatError>;
 

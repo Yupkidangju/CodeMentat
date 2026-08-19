@@ -1,13 +1,15 @@
+use crate::agent_wire::{gemini_body, parse_repository_tool_call, request_has_tool_results};
 use async_stream::stream;
 use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
-use mentat_core::error::MentatError;
+use mentat_core::{MentatError, ToolEgressStatus};
 use mentat_inference::{
-    AvailableModel, BackendProfile, HealthStatus, InferenceEvent, InferenceRequest, ModelCatalog,
-    ModelVerification,
+    AgentRequest, AvailableModel, BackendProfile, HealthStatus, InferenceEvent, InferenceRequest,
+    InferenceRoundEvent, ModelCatalog, ModelVerification, ProviderBodyEgressGate,
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use serde_json::json;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -524,6 +526,175 @@ impl GeminiAdapter {
             }
         };
 
+        Ok(Box::pin(output_stream))
+    }
+
+    pub fn agent_endpoint(profile: &BackendProfile) -> String {
+        let model = profile.model.trim().trim_start_matches("models/");
+        format!(
+            "{}/v1beta/models/{}:streamGenerateContent",
+            profile.base_url.trim_end_matches('/'),
+            model
+        )
+    }
+
+    pub async fn infer_agent_round(
+        &self,
+        request: AgentRequest,
+        cancel_token: CancellationToken,
+        egress_gate: Option<Arc<dyn ProviderBodyEgressGate>>,
+    ) -> Result<BoxStream<'static, InferenceRoundEvent>, MentatError> {
+        let profile = &request.profile;
+        if profile.api_key.as_deref().unwrap_or("").is_empty() {
+            return Err(MentatError::BackendError {
+                code: "MISSING_GEMINI_KEY".to_string(),
+                message: "Gemini API 키가 비어 있습니다.".to_string(),
+            });
+        }
+        if profile.model.trim().is_empty() {
+            return Err(MentatError::BackendError {
+                code: "MODEL_NOT_SELECTED".to_string(),
+                message: "검증되어 활성화된 Gemini 모델이 없습니다.".to_string(),
+            });
+        }
+        profile.validate_url()?;
+        let endpoint_identity = Self::agent_endpoint(profile);
+        let endpoint = format!("{endpoint_identity}?alt=sse");
+        let exact_body = serde_json::to_vec(&gemini_body(&request)?).map_err(|error| {
+            MentatError::BackendError {
+                code: "AGENT_BODY_ENCODE_FAILED".to_string(),
+                message: error.to_string(),
+            }
+        })?;
+        let receipt_ids = if request_has_tool_results(&request) {
+            let gate = egress_gate
+                .as_ref()
+                .ok_or_else(|| MentatError::BackendError {
+                    code: "TOOL_EGRESS_GATE_REQUIRED".to_string(),
+                    message: "외부 provider tool result 전송 승인이 없습니다.".to_string(),
+                })?;
+            gate.authorize_exact_body(&request, &endpoint_identity, &exact_body)?
+        } else {
+            Vec::new()
+        };
+        let mut headers = Self::api_key_header(profile)?;
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let send_future = self
+            .client()?
+            .post(&endpoint)
+            .headers(headers)
+            .timeout(Duration::from_secs(profile.timeout_secs.clamp(5, 300)))
+            .body(exact_body)
+            .send();
+        let response = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                if let Some(gate) = &egress_gate {
+                    gate.finish(&receipt_ids, ToolEgressStatus::OutcomeUnknown)?;
+                }
+                return Err(MentatError::Cancelled);
+            }
+            result = send_future => match result {
+                Ok(response) => response,
+                Err(error) => {
+                    if let Some(gate) = &egress_gate {
+                        gate.finish(&receipt_ids, ToolEgressStatus::OutcomeUnknown)?;
+                    }
+                    return Err(MentatError::BackendError {
+                        code: "GEMINI_NETWORK_ERROR".to_string(),
+                        message: error.to_string(),
+                    });
+                }
+            }
+        };
+        if let Some(gate) = &egress_gate {
+            gate.finish(&receipt_ids, ToolEgressStatus::Sent)?;
+        }
+        if !response.status().is_success() {
+            let status = response.status();
+            return Err(MentatError::BackendError {
+                code: format!("GEMINI_HTTP_{}", status.as_u16()),
+                message: "Gemini가 agent round 요청을 거부했습니다.".to_string(),
+            });
+        }
+        let mut byte_stream = response.bytes_stream();
+        let request_id = request.request_id;
+        let snapshot_id = request
+            .repository_context
+            .as_ref()
+            .map(|context| context.snapshot_id);
+        let output_stream = stream! {
+            yield InferenceRoundEvent::Started { request_id };
+            let mut full_text = String::new();
+            let mut byte_buffer = Vec::new();
+            let mut tool_calls = Vec::new();
+            loop {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        yield InferenceRoundEvent::Failed {
+                            error_code: "CANCELLED".to_string(),
+                            safe_message: "요청이 취소되었습니다.".to_string(),
+                        };
+                        return;
+                    }
+                    chunk = byte_stream.next() => match chunk {
+                        Some(Ok(bytes)) => {
+                            byte_buffer.extend_from_slice(&bytes);
+                            while let Some(position) = byte_buffer.iter().position(|byte| *byte == b'\n') {
+                                let line = String::from_utf8_lossy(&byte_buffer[..position]).trim().to_string();
+                                byte_buffer.drain(..position + 1);
+                                let Some(data) = line.strip_prefix("data: ") else { continue; };
+                                if data.trim() == "[DONE]" { break; }
+                                let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else { continue; };
+                                let Some(parts) = value.pointer("/candidates/0/content/parts").and_then(|value| value.as_array()) else { continue; };
+                                for part in parts {
+                                    if part.get("thought").and_then(|value| value.as_bool()) == Some(true) {
+                                        continue;
+                                    }
+                                    if let Some(text) = part.get("text").and_then(|value| value.as_str()) {
+                                        full_text.push_str(text);
+                                        yield InferenceRoundEvent::TextDelta(text.to_string());
+                                    }
+                                    if let Some(function) = part.get("functionCall") {
+                                        let Some(name) = function.get("name").and_then(|value| value.as_str()) else { continue; };
+                                        let args = function.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
+                                        let Some(snapshot_id) = snapshot_id else {
+                                            yield InferenceRoundEvent::Failed {
+                                                error_code: "AGENT_TOOL_CONTEXT_MISSING".to_string(),
+                                                safe_message: "tool call에 repository snapshot이 없습니다.".to_string(),
+                                            };
+                                            return;
+                                        };
+                                        match parse_repository_tool_call(name, &args, None, snapshot_id) {
+                                            Ok(call) => tool_calls.push(call),
+                                            Err(_) => {
+                                                yield InferenceRoundEvent::Failed {
+                                                    error_code: "AGENT_TOOL_SCHEMA_INVALID".to_string(),
+                                                    safe_message: "Gemini tool call 형식이 유효하지 않습니다.".to_string(),
+                                                };
+                                                return;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Some(Err(_)) => {
+                            yield InferenceRoundEvent::Failed {
+                                error_code: "STREAM_READ_ERROR".to_string(),
+                                safe_message: "Gemini stream을 읽지 못했습니다.".to_string(),
+                            };
+                            return;
+                        }
+                        None => break,
+                    }
+                }
+            }
+            if tool_calls.is_empty() {
+                yield InferenceRoundEvent::RawCompleted { full_text };
+            } else {
+                yield InferenceRoundEvent::ToolCallsRequested { round: 0, calls: tool_calls };
+            }
+        };
         Ok(Box::pin(output_stream))
     }
 }

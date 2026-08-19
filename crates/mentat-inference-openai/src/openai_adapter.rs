@@ -1,17 +1,27 @@
+use crate::agent_wire::{openai_body, parse_repository_tool_call, request_has_tool_results};
 use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
-use mentat_core::error::MentatError;
+use mentat_core::{MentatError, ToolEgressStatus};
 use mentat_inference::{
-    AvailableModel, BackendProfile, HealthStatus, InferenceEvent, InferenceRequest, ModelCatalog,
-    ModelVerification, ProviderKind,
+    AgentRequest, AvailableModel, BackendProfile, HealthStatus, InferenceEvent, InferenceRequest,
+    InferenceRoundEvent, ModelCatalog, ModelVerification, ProviderBodyEgressGate, ProviderKind,
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::json;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub struct OpenAiAdapter {
-    client: reqwest::Client,
+    client: Option<reqwest::Client>,
+}
+
+#[derive(Default)]
+struct PendingOpenAiToolCall {
+    id: String,
+    name: String,
+    arguments: String,
 }
 
 impl OpenAiAdapter {
@@ -55,9 +65,19 @@ impl OpenAiAdapter {
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+                .ok(),
         }
+    }
+
+    fn client(&self) -> Result<&reqwest::Client, MentatError> {
+        self.client
+            .as_ref()
+            .ok_or_else(|| MentatError::BackendError {
+                code: "OPENAI_CLIENT_INIT_FAILED".to_string(),
+                message: "OpenAI 호환 보안 HTTP client를 초기화하지 못했습니다.".to_string(),
+            })
     }
 }
 
@@ -117,6 +137,10 @@ impl OpenAiAdapter {
         }
     }
 
+    pub fn agent_endpoint(profile: &BackendProfile) -> String {
+        Self::chat_completions_url(&profile.base_url)
+    }
+
     pub async fn discover_models(
         &self,
         profile: &BackendProfile,
@@ -124,7 +148,7 @@ impl OpenAiAdapter {
         profile.validate_url()?;
         let start = Instant::now();
         let response = self
-            .client
+            .client()?
             .get(Self::models_url(&profile.base_url))
             .headers(Self::authorization_headers(profile)?)
             .timeout(std::time::Duration::from_secs(
@@ -187,7 +211,7 @@ impl OpenAiAdapter {
         }
         let start = Instant::now();
         let response = self
-            .client
+            .client()?
             .post(Self::chat_completions_url(&profile.base_url))
             .headers(Self::authorization_headers(profile)?)
             .timeout(std::time::Duration::from_secs(
@@ -269,7 +293,7 @@ impl OpenAiAdapter {
 
         let timeout = std::time::Duration::from_secs(profile.timeout_secs.clamp(5, 300));
         let res = self
-            .client
+            .client()?
             .get(&url)
             .headers(headers)
             .timeout(timeout)
@@ -381,7 +405,7 @@ impl OpenAiAdapter {
 
         let timeout = std::time::Duration::from_secs(profile.timeout_secs.clamp(5, 300));
         let send_future = self
-            .client
+            .client()?
             .post(&endpoint)
             .headers(headers)
             .timeout(timeout)
@@ -475,6 +499,199 @@ impl OpenAiAdapter {
             }
         };
 
+        Ok(Box::pin(stream))
+    }
+
+    pub async fn infer_agent_round(
+        &self,
+        request: AgentRequest,
+        cancel_token: CancellationToken,
+        egress_gate: Option<Arc<dyn ProviderBodyEgressGate>>,
+    ) -> Result<BoxStream<'static, InferenceRoundEvent>, MentatError> {
+        let profile = &request.profile;
+        if profile.api_key.as_deref().unwrap_or("").is_empty() {
+            return Err(MentatError::BackendError {
+                code: "MISSING_API_KEY".to_string(),
+                message: "OpenAI/OpenRouter API 키가 설정되지 않았습니다.".to_string(),
+            });
+        }
+        if profile.model.trim().is_empty() {
+            return Err(MentatError::BackendError {
+                code: "MODEL_NOT_SELECTED".to_string(),
+                message: "검증되어 활성화된 모델이 없습니다.".to_string(),
+            });
+        }
+        profile.validate_url()?;
+        let endpoint = Self::agent_endpoint(profile);
+        let exact_body = serde_json::to_vec(&openai_body(&request)?).map_err(|error| {
+            MentatError::BackendError {
+                code: "AGENT_BODY_ENCODE_FAILED".to_string(),
+                message: error.to_string(),
+            }
+        })?;
+        let receipt_ids = if request_has_tool_results(&request) {
+            let gate = egress_gate
+                .as_ref()
+                .ok_or_else(|| MentatError::BackendError {
+                    code: "TOOL_EGRESS_GATE_REQUIRED".to_string(),
+                    message: "외부 provider tool result 전송 승인이 없습니다.".to_string(),
+                })?;
+            gate.authorize_exact_body(&request, &endpoint, &exact_body)?
+        } else {
+            Vec::new()
+        };
+        let mut headers = Self::authorization_headers(profile)?;
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        if profile.provider == ProviderKind::OpenRouter {
+            headers.insert(
+                HeaderName::from_static("http-referer"),
+                HeaderValue::from_static("https://github.com/Yupkidangju/CodeMentat"),
+            );
+            headers.insert(
+                HeaderName::from_static("x-title"),
+                HeaderValue::from_static("Code Mentat"),
+            );
+        }
+        let send_future = self
+            .client()?
+            .post(&endpoint)
+            .headers(headers)
+            .timeout(std::time::Duration::from_secs(
+                profile.timeout_secs.clamp(5, 300),
+            ))
+            .body(exact_body)
+            .send();
+        let response = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                if let Some(gate) = &egress_gate {
+                    gate.finish(&receipt_ids, ToolEgressStatus::OutcomeUnknown)?;
+                }
+                return Err(MentatError::Cancelled);
+            }
+            result = send_future => match result {
+                Ok(response) => response,
+                Err(error) => {
+                    if let Some(gate) = &egress_gate {
+                        gate.finish(&receipt_ids, ToolEgressStatus::OutcomeUnknown)?;
+                    }
+                    return Err(MentatError::BackendError {
+                        code: "HTTP_SEND_ERROR".to_string(),
+                        message: error.to_string(),
+                    });
+                }
+            }
+        };
+        if let Some(gate) = &egress_gate {
+            gate.finish(&receipt_ids, ToolEgressStatus::Sent)?;
+        }
+        if !response.status().is_success() {
+            let status = response.status();
+            return Err(MentatError::BackendError {
+                code: format!("HTTP_{}", status.as_u16()),
+                message: "provider가 agent round 요청을 거부했습니다.".to_string(),
+            });
+        }
+        let mut byte_stream = response.bytes_stream();
+        let request_id = request.request_id;
+        let snapshot_id = request
+            .repository_context
+            .as_ref()
+            .map(|context| context.snapshot_id);
+        let stream = async_stream::stream! {
+            yield InferenceRoundEvent::Started { request_id };
+            let mut full_text = String::new();
+            let mut byte_buffer = Vec::new();
+            let mut pending = BTreeMap::<u64, PendingOpenAiToolCall>::new();
+            loop {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        yield InferenceRoundEvent::Failed {
+                            error_code: "CANCELLED".to_string(),
+                            safe_message: "요청이 취소되었습니다.".to_string(),
+                        };
+                        return;
+                    }
+                    chunk = byte_stream.next() => match chunk {
+                        Some(Ok(bytes)) => {
+                            byte_buffer.extend_from_slice(&bytes);
+                            while let Some(position) = byte_buffer.iter().position(|byte| *byte == b'\n') {
+                                let line = String::from_utf8_lossy(&byte_buffer[..position]).trim().to_string();
+                                byte_buffer.drain(..position + 1);
+                                let Some(data) = line.strip_prefix("data: ") else { continue; };
+                                if data.trim() == "[DONE]" {
+                                    if !pending.is_empty() {
+                                        let Some(snapshot_id) = snapshot_id else {
+                                            yield InferenceRoundEvent::Failed {
+                                                error_code: "AGENT_TOOL_CONTEXT_MISSING".to_string(),
+                                                safe_message: "tool call에 repository snapshot이 없습니다.".to_string(),
+                                            };
+                                            return;
+                                        };
+                                        let parsed = pending.values().map(|item| {
+                                            let args = serde_json::from_str::<serde_json::Value>(&item.arguments)
+                                                .map_err(|error| MentatError::BackendError {
+                                                    code: "AGENT_TOOL_SCHEMA_INVALID".to_string(),
+                                                    message: error.to_string(),
+                                                })?;
+                                            parse_repository_tool_call(&item.name, &args, Some(&item.id), snapshot_id)
+                                        }).collect::<Result<Vec<_>, MentatError>>();
+                                        match parsed {
+                                            Ok(calls) => yield InferenceRoundEvent::ToolCallsRequested { round: 0, calls },
+                                            Err(_) => yield InferenceRoundEvent::Failed {
+                                                error_code: "AGENT_TOOL_SCHEMA_INVALID".to_string(),
+                                                safe_message: "provider tool call 형식이 유효하지 않습니다.".to_string(),
+                                            },
+                                        }
+                                    } else {
+                                        yield InferenceRoundEvent::RawCompleted { full_text };
+                                    }
+                                    return;
+                                }
+                                let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else { continue; };
+                                let Some(choice) = value.pointer("/choices/0") else { continue; };
+                                if let Some(delta) = choice.pointer("/delta/content").and_then(|value| value.as_str()) {
+                                    full_text.push_str(delta);
+                                    yield InferenceRoundEvent::TextDelta(delta.to_string());
+                                }
+                                if let Some(tool_deltas) = choice.pointer("/delta/tool_calls").and_then(|value| value.as_array()) {
+                                    for tool_delta in tool_deltas {
+                                        let index = tool_delta.get("index").and_then(|value| value.as_u64()).unwrap_or(0);
+                                        let entry = pending.entry(index).or_default();
+                                        if let Some(id) = tool_delta.get("id").and_then(|value| value.as_str()) {
+                                            entry.id.push_str(id);
+                                        }
+                                        if let Some(name) = tool_delta.pointer("/function/name").and_then(|value| value.as_str()) {
+                                            entry.name.push_str(name);
+                                        }
+                                        if let Some(arguments) = tool_delta.pointer("/function/arguments").and_then(|value| value.as_str()) {
+                                            entry.arguments.push_str(arguments);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Some(Err(_)) => {
+                            yield InferenceRoundEvent::Failed {
+                                error_code: "STREAM_READ_ERROR".to_string(),
+                                safe_message: "provider stream을 읽지 못했습니다.".to_string(),
+                            };
+                            return;
+                        }
+                        None => {
+                            if pending.is_empty() {
+                                yield InferenceRoundEvent::RawCompleted { full_text };
+                            } else {
+                                yield InferenceRoundEvent::Failed {
+                                    error_code: "AGENT_TOOL_STREAM_INCOMPLETE".to_string(),
+                                    safe_message: "provider tool call stream이 완결되지 않았습니다.".to_string(),
+                                };
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+        };
         Ok(Box::pin(stream))
     }
 }

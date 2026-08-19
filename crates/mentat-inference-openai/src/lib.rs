@@ -1,3 +1,4 @@
+mod agent_wire;
 pub mod gemini_adapter;
 pub mod openai_adapter;
 
@@ -6,11 +7,14 @@ pub use openai_adapter::OpenAiAdapter;
 
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
+use futures_util::StreamExt;
 use mentat_core::error::MentatError;
 use mentat_inference::{
-    BackendProfile, HealthStatus, InferenceBackend, InferenceEvent, InferenceRequest, ModelCatalog,
-    ModelVerification, ProviderKind,
+    AgentCapabilities, AgentLimits, AgentMessage, AgentRequest, BackendProfile, HealthStatus,
+    InferenceBackend, InferenceEvent, InferenceRequest, InferenceRoundEvent, ModelCatalog,
+    ModelVerification, ProviderBodyEgressGate, ProviderKind, RepositoryContext, ToolDefinition,
 };
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 pub struct MultiProviderAdapter {
@@ -23,6 +27,13 @@ impl MultiProviderAdapter {
         Self {
             gemini: GeminiAdapter::new(),
             openai: OpenAiAdapter::new(),
+        }
+    }
+
+    pub fn agent_endpoint(profile: &BackendProfile) -> String {
+        match profile.provider {
+            ProviderKind::GoogleGemini => GeminiAdapter::agent_endpoint(profile),
+            _ => OpenAiAdapter::agent_endpoint(profile),
         }
     }
 }
@@ -85,12 +96,143 @@ impl InferenceBackend for MultiProviderAdapter {
             | ProviderKind::LocalMock => self.openai.infer_stream(request, cancel_token).await,
         }
     }
+
+    async fn verify_capabilities(
+        &self,
+        profile: &BackendProfile,
+    ) -> Result<AgentCapabilities, MentatError> {
+        let snapshot_id = uuid::Uuid::new_v4();
+        let request = AgentRequest {
+            request_id: uuid::Uuid::new_v4(),
+            conversation_id: uuid::Uuid::new_v4(),
+            turn_id: uuid::Uuid::new_v4(),
+            profile: profile.clone(),
+            effective_system_prompt:
+                "Capability probe입니다. repo_status 함수를 정확히 한 번 호출하세요.".to_string(),
+            messages: vec![AgentMessage::user("현재 저장소 상태를 확인하세요.")],
+            tools: vec![ToolDefinition {
+                name: "repo_status".to_string(),
+                schema_version: "repository-tool.v1".to_string(),
+                description: "현재 repository snapshot metadata를 조회합니다.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object", "properties": {}, "additionalProperties": false
+                }),
+            }],
+            repository_context: Some(RepositoryContext {
+                repository_id: uuid::Uuid::new_v4(),
+                snapshot_id,
+                snapshot_status: mentat_core::SnapshotStatus::Ready,
+                tools_available: true,
+                display_name: "capability-probe".to_string(),
+            }),
+            response_contract: mentat_core::ResponseContract::AdvisorMarkdown,
+            limits: AgentLimits {
+                max_rounds: 1,
+                max_tool_calls: 1,
+                max_tool_result_bytes: 1024,
+                timeout_secs: profile.timeout_secs.clamp(5, 30),
+            },
+        };
+        let stream = self
+            .infer_round_stream_guarded(request, CancellationToken::new(), None)
+            .await;
+        let Ok(mut stream) = stream else {
+            return Ok(AgentCapabilities::CHAT_ONLY);
+        };
+        while let Some(event) = stream.next().await {
+            if let InferenceRoundEvent::ToolCallsRequested { calls, .. } = event {
+                let native = calls.len() == 1
+                    && calls[0].name == mentat_core::RepositoryToolName::RepoStatus
+                    && calls[0].snapshot_id == snapshot_id;
+                return Ok(AgentCapabilities {
+                    chat_capable: true,
+                    native_tool_capable: native,
+                    emulated_tool_capable: false,
+                    repository_advisor_capable: native,
+                });
+            }
+        }
+        Ok(AgentCapabilities::CHAT_ONLY)
+    }
+
+    async fn infer_round_stream_guarded(
+        &self,
+        request: AgentRequest,
+        cancel_token: CancellationToken,
+        egress_gate: Option<Arc<dyn ProviderBodyEgressGate>>,
+    ) -> Result<BoxStream<'static, InferenceRoundEvent>, MentatError> {
+        match request.profile.provider {
+            ProviderKind::GoogleGemini => {
+                self.gemini
+                    .infer_agent_round(request, cancel_token, egress_gate)
+                    .await
+            }
+            ProviderKind::OpenRouter
+            | ProviderKind::OpenAi
+            | ProviderKind::OpenAICompatible
+            | ProviderKind::CustomCompatible
+            | ProviderKind::LocalMock => {
+                self.openai
+                    .infer_agent_round(request, cancel_token, egress_gate)
+                    .await
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mentat_core::{
+        RepositoryToolArguments, RepositoryToolCall, RepositoryToolName, RepositoryToolResult,
+        ToolEgressStatus,
+    };
+    use mentat_inference::{
+        AgentMessageContent, AgentRole, ProviderBodyEgressGate, RepositoryContext,
+    };
+    use std::sync::Mutex;
     use uuid::Uuid;
+
+    #[derive(Default)]
+    struct RecordingEgressGate {
+        bodies: Mutex<Vec<Vec<u8>>>,
+        statuses: Mutex<Vec<ToolEgressStatus>>,
+        reject: bool,
+        receipt_id: Uuid,
+    }
+
+    impl ProviderBodyEgressGate for RecordingEgressGate {
+        fn authorize_exact_body(
+            &self,
+            _request: &AgentRequest,
+            _endpoint_identity: &str,
+            exact_provider_body: &[u8],
+        ) -> Result<Vec<Uuid>, MentatError> {
+            if self.reject {
+                return Err(MentatError::EgressViolation(
+                    "fixture rejection".to_string(),
+                ));
+            }
+            self.bodies
+                .lock()
+                .unwrap()
+                .push(exact_provider_body.to_vec());
+            Ok(vec![self.receipt_id])
+        }
+
+        fn finish(
+            &self,
+            _receipt_ids: &[Uuid],
+            status: ToolEgressStatus,
+        ) -> Result<(), MentatError> {
+            self.statuses.lock().unwrap().push(status);
+            Ok(())
+        }
+
+        fn receipt_ids(&self) -> Result<Vec<Uuid>, MentatError> {
+            Ok(vec![self.receipt_id])
+        }
+    }
 
     #[tokio::test]
     async fn test_multi_provider_adapter_default_initialization() {
@@ -278,6 +420,311 @@ mod tests {
             user_question: "q".to_string(),
             profile,
         }
+    }
+
+    fn agent_request_with_tool_result(profile: BackendProfile) -> AgentRequest {
+        let snapshot_id = Uuid::new_v4();
+        let call_id = Uuid::new_v4();
+        let call = RepositoryToolCall {
+            call_id,
+            snapshot_id,
+            name: RepositoryToolName::RepoStatus,
+            arguments: RepositoryToolArguments::RepoStatus,
+        };
+        AgentRequest {
+            request_id: Uuid::new_v4(),
+            conversation_id: Uuid::new_v4(),
+            turn_id: Uuid::new_v4(),
+            profile,
+            effective_system_prompt: "system".to_string(),
+            messages: vec![
+                AgentMessage::user("status"),
+                AgentMessage {
+                    role: AgentRole::Assistant,
+                    content: AgentMessageContent::ToolCalls(vec![call]),
+                },
+                AgentMessage {
+                    role: AgentRole::Tool,
+                    content: AgentMessageContent::ToolResult(RepositoryToolResult {
+                        call_id,
+                        snapshot_id,
+                        content: "{\"status\":\"Ready\"}".to_string(),
+                        source_refs: Vec::new(),
+                        omissions: Vec::new(),
+                        content_bytes: 18,
+                    }),
+                },
+            ],
+            tools: Vec::new(),
+            repository_context: Some(RepositoryContext {
+                repository_id: Uuid::new_v4(),
+                snapshot_id,
+                snapshot_status: mentat_core::SnapshotStatus::Ready,
+                tools_available: true,
+                display_name: "fixture".to_string(),
+            }),
+            response_contract: mentat_core::ResponseContract::AdvisorMarkdown,
+            limits: mentat_inference::AgentLimits::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_tool_result_uses_exact_body_gate_before_network_send() {
+        use tokio::io::AsyncWriteExt;
+        let (listener, port) = bind_listener().await;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let request = read_http_request(&mut stream).await;
+            let body = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|position| request[position + 4..].to_vec())
+                .unwrap();
+            let response_body =
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(), response_body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            body
+        });
+        let gate = Arc::new(RecordingEgressGate {
+            receipt_id: Uuid::new_v4(),
+            ..Default::default()
+        });
+        let request = agent_request_with_tool_result(openai_profile(port));
+        let mut stream = OpenAiAdapter::new()
+            .infer_agent_round(request, CancellationToken::new(), Some(gate.clone()))
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let wire_body = server.await.unwrap();
+
+        assert_eq!(gate.bodies.lock().unwrap().as_slice(), &[wire_body]);
+        assert_eq!(
+            gate.statuses.lock().unwrap().as_slice(),
+            &[ToolEgressStatus::Sent]
+        );
+    }
+
+    #[tokio::test]
+    async fn gemini_tool_result_uses_exact_body_gate_before_network_send() {
+        use tokio::io::AsyncWriteExt;
+        let (listener, port) = bind_listener().await;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let request = read_http_request(&mut stream).await;
+            assert!(String::from_utf8_lossy(&request)
+                .starts_with("POST /v1beta/models/dynamic-gemini:streamGenerateContent?alt=sse "));
+            let body = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|position| request[position + 4..].to_vec())
+                .unwrap();
+            let response_body =
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]}}]}\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(), response_body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            body
+        });
+        let profile = BackendProfile {
+            provider: ProviderKind::GoogleGemini,
+            base_url: format!("http://127.0.0.1:{port}"),
+            model: "dynamic-gemini".to_string(),
+            api_key: Some("test-key".to_string()),
+            ..Default::default()
+        };
+        let gate = Arc::new(RecordingEgressGate {
+            receipt_id: Uuid::new_v4(),
+            ..Default::default()
+        });
+        let mut stream = GeminiAdapter::new()
+            .infer_agent_round(
+                agent_request_with_tool_result(profile),
+                CancellationToken::new(),
+                Some(gate.clone()),
+            )
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let wire_body = server.await.unwrap();
+
+        assert_eq!(gate.bodies.lock().unwrap().as_slice(), &[wire_body]);
+        assert_eq!(
+            gate.statuses.lock().unwrap().as_slice(),
+            &[ToolEgressStatus::Sent]
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_exact_body_gate_causes_zero_network_bytes() {
+        let (listener, port) = bind_listener().await;
+        let server = tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_millis(300), listener.accept())
+                .await
+                .is_err()
+        });
+        let gate = Arc::new(RecordingEgressGate {
+            reject: true,
+            receipt_id: Uuid::new_v4(),
+            ..Default::default()
+        });
+        let result = OpenAiAdapter::new()
+            .infer_agent_round(
+                agent_request_with_tool_result(openai_profile(port)),
+                CancellationToken::new(),
+                Some(gate),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(server.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn openai_tool_egress_redirect_never_replays_body_or_key() {
+        use tokio::io::AsyncWriteExt;
+        let (redirect_listener, redirect_port) = bind_listener().await;
+        let (target_listener, target_port) = bind_listener().await;
+        let redirect = tokio::spawn(async move {
+            let (mut stream, _) = redirect_listener.accept().await.unwrap();
+            let _ = read_http_request(&mut stream).await;
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{target_port}/capture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let target = tokio::spawn(async move {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(300),
+                target_listener.accept(),
+            )
+            .await
+            .is_err()
+        });
+        let gate = Arc::new(RecordingEgressGate {
+            receipt_id: Uuid::new_v4(),
+            ..Default::default()
+        });
+        let result = OpenAiAdapter::new()
+            .infer_agent_round(
+                agent_request_with_tool_result(openai_profile(redirect_port)),
+                CancellationToken::new(),
+                Some(gate),
+            )
+            .await;
+        redirect.await.unwrap();
+
+        assert!(matches!(
+            result,
+            Err(MentatError::BackendError { code, .. }) if code == "HTTP_302"
+        ));
+        assert!(target.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn production_agent_loop_executes_provider_tool_round_and_returns_grounding() {
+        use mentat_analysis::agent_loop::AgentLoop;
+        use mentat_analysis::repository_tools::RepositoryToolGateway;
+        use mentat_core::RepositoryReader;
+        use mentat_repository::ReadOnlySession;
+        use tokio::io::AsyncWriteExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("lib.rs"),
+            "pub fn mentor() { println!(\"safe\"); }\n",
+        )
+        .unwrap();
+        let session = Arc::new(ReadOnlySession::open(directory.path()).unwrap());
+        let files = session.scan_files().await.unwrap();
+        let snapshot = session.create_snapshot_from_files(&files);
+        let gateway = Arc::new(RepositoryToolGateway::new(session, snapshot.clone(), files));
+        let (listener, port) = bind_listener().await;
+        let call_id = Uuid::new_v4();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            let _ = read_http_request(&mut first).await;
+            let arguments = serde_json::json!({
+                "query": "mentor", "path_filter": null, "limit": 10
+            })
+            .to_string();
+            let event = serde_json::json!({
+                "choices": [{"delta": {"tool_calls": [{
+                    "index": 0,
+                    "id": call_id.to_string(),
+                    "function": {"name": "search_text", "arguments": arguments}
+                }]}}]
+            });
+            let response_body = format!("data: {event}\n\ndata: [DONE]\n\n");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(), response_body
+            );
+            first.write_all(response.as_bytes()).await.unwrap();
+
+            let (mut second, _) = listener.accept().await.unwrap();
+            let second_request = read_http_request(&mut second).await;
+            let request_text = String::from_utf8_lossy(&second_request);
+            assert!(request_text.contains("tool_call_id"));
+            assert!(request_text.contains("mentor"));
+            let final_body = "data: {\"choices\":[{\"delta\":{\"content\":\"근거 확인 완료\"}}]}\n\ndata: [DONE]\n\n";
+            let final_response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                final_body.len(), final_body
+            );
+            second.write_all(final_response.as_bytes()).await.unwrap();
+        });
+        let profile = openai_profile(port);
+        let request = AgentRequest {
+            request_id: Uuid::new_v4(),
+            conversation_id: Uuid::new_v4(),
+            turn_id: Uuid::new_v4(),
+            profile,
+            effective_system_prompt: "system".to_string(),
+            messages: vec![AgentMessage::user("mentor 구현을 찾아줘")],
+            tools: vec![ToolDefinition {
+                name: "search_text".to_string(),
+                schema_version: "repository-tool.v1".to_string(),
+                description: "검색".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
+            repository_context: Some(RepositoryContext {
+                repository_id: snapshot.repo_id,
+                snapshot_id: snapshot.id,
+                snapshot_status: snapshot.status.clone(),
+                tools_available: true,
+                display_name: "fixture".to_string(),
+            }),
+            response_contract: mentat_core::ResponseContract::AdvisorMarkdown,
+            limits: AgentLimits::default(),
+        };
+        let gate = Arc::new(RecordingEgressGate {
+            receipt_id: Uuid::new_v4(),
+            ..Default::default()
+        });
+        let outcome = AgentLoop::new(Arc::new(MultiProviderAdapter::new()), Some(gateway))
+            .with_egress_gate(gate.clone())
+            .run(request, CancellationToken::new())
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        let trace = outcome.grounding_trace.unwrap();
+        assert_eq!(trace.tool_calls.len(), 1);
+        assert_eq!(trace.source_refs.len(), 1);
+        assert_eq!(trace.egress_receipt_ids, vec![gate.receipt_id]);
+        assert!(matches!(
+            outcome.events.last(),
+            Some(mentat_inference::AgentEvent::Completed {
+                payload: mentat_inference::CompletedPayload::AdvisorMarkdown(text),
+                ..
+            }) if text == "근거 확인 완료"
+        ));
     }
 
     #[tokio::test]

@@ -8,6 +8,28 @@ use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use uuid::Uuid;
 
 impl SqliteStorage {
+    pub fn load_audit_result_for_turn(
+        &self,
+        turn_id: Uuid,
+    ) -> Result<Option<mentat_core::AnswerBundle>, MentatError> {
+        let conn = self.lock_conn()?;
+        let encoded = conn
+            .query_row(
+                "SELECT validated_bundle FROM audit_turn_results WHERE turn_id = ?1",
+                [turn_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| storage_error("AUDIT_RESULT_READ_FAILED", &error.to_string()))?;
+        encoded
+            .map(|value| {
+                serde_json::from_str::<mentat_core::AnswerBundle>(&value).map_err(|error| {
+                    storage_error("AUDIT_RESULT_DECODE_FAILED", &error.to_string())
+                })
+            })
+            .transpose()
+    }
+
     pub fn create_conversation(
         &self,
         draft: &NewConversation,
