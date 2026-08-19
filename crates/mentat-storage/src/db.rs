@@ -3,10 +3,14 @@ use mentat_core::models::{RepositoryProfile, RepositorySnapshot, RepositoryType,
 use mentat_inference::{BackendProfile, ProviderKind};
 use rusqlite::{params, Connection, DatabaseName, OptionalExtension, TransactionBehavior};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard};
+use std::thread::JoinHandle;
+use std::time::Duration;
 use uuid::Uuid;
 
-const CURRENT_SCHEMA_VERSION: u32 = 5;
+const CURRENT_SCHEMA_VERSION: u32 = 6;
+const OWNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+const OWNER_STALE_AFTER_SECONDS: i64 = 30;
 
 #[derive(Clone)]
 pub struct SqliteStorage {
@@ -14,6 +18,14 @@ pub struct SqliteStorage {
     db_path: PathBuf,
     migration_backup_path: Option<PathBuf>,
     recovery_quarantine_path: Option<PathBuf>,
+    runtime_owner: Arc<RuntimeOwnershipGuard>,
+}
+
+struct RuntimeOwnershipGuard {
+    owner_id: Uuid,
+    db_path: PathBuf,
+    stop_tx: Option<mpsc::Sender<()>>,
+    worker: Option<JoinHandle<()>>,
 }
 
 impl SqliteStorage {
@@ -27,7 +39,7 @@ impl SqliteStorage {
         let existed_nonempty = std::fs::metadata(&path)
             .map(|metadata| metadata.len() > 0)
             .unwrap_or(false);
-        let (conn, migration_backup_path, recovery_quarantine_path) =
+        let (mut conn, migration_backup_path, recovery_quarantine_path) =
             match open_and_migrate(&path, existed_nonempty) {
                 Ok((conn, backup)) => (conn, backup, None),
                 Err(error) if existed_nonempty && should_quarantine(&error) => {
@@ -44,12 +56,14 @@ impl SqliteStorage {
                 }
                 Err(error) => return Err(error),
             };
+        let runtime_owner = Arc::new(acquire_runtime_ownership(&mut conn, &path)?);
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             db_path: path,
             migration_backup_path,
             recovery_quarantine_path,
+            runtime_owner,
         })
     }
 
@@ -73,6 +87,10 @@ impl SqliteStorage {
 
     pub fn recovery_quarantine_path(&self) -> Option<&Path> {
         self.recovery_quarantine_path.as_deref()
+    }
+
+    pub(crate) fn runtime_owner_id(&self) -> Uuid {
+        self.runtime_owner.owner_id
     }
 
     pub fn save_recent_repo(&self, repo: &RepositoryProfile) -> Result<(), MentatError> {
@@ -383,12 +401,56 @@ fn open_and_migrate(
     };
     run_migrations(&mut conn, version)?;
     verify_database(&conn)?;
-    reconcile_stale_prepared_receipts(&mut conn)?;
     Ok((conn, backup))
 }
 
-fn reconcile_stale_prepared_receipts(conn: &mut Connection) -> Result<(), MentatError> {
-    let receipt_table_exists: bool = conn
+fn acquire_runtime_ownership(
+    conn: &mut Connection,
+    db_path: &Path,
+) -> Result<RuntimeOwnershipGuard, MentatError> {
+    let owner_id = Uuid::new_v4();
+    let now = chrono::Utc::now();
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| sqlite_storage_error("STORAGE_RUNTIME_OWNER_BEGIN_FAILED", error))?;
+    let existing = transaction
+        .query_row(
+            "SELECT owner_id, heartbeat_at FROM runtime_ownership WHERE id = 1",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| sqlite_storage_error("STORAGE_RUNTIME_OWNER_READ_FAILED", error))?;
+    if let Some((existing_owner, heartbeat)) = existing {
+        let heartbeat = parse_datetime(&heartbeat, "runtime_ownership.heartbeat_at")?;
+        if now.signed_duration_since(heartbeat).num_seconds() < OWNER_STALE_AFTER_SECONDS {
+            return Err(storage_error(
+                "STORAGE_RUNTIME_OWNED",
+                &format!(
+                    "동일 AppData DB를 다른 runtime owner가 사용 중입니다: {}",
+                    truncate_owner_id(&existing_owner)
+                ),
+            ));
+        }
+    }
+    transaction
+        .execute(
+            "INSERT INTO runtime_ownership (
+                id, owner_id, process_id, acquired_at, heartbeat_at
+             ) VALUES (1, ?1, ?2, ?3, ?3)
+             ON CONFLICT(id) DO UPDATE SET
+                owner_id = excluded.owner_id,
+                process_id = excluded.process_id,
+                acquired_at = excluded.acquired_at,
+                heartbeat_at = excluded.heartbeat_at",
+            params![
+                owner_id.to_string(),
+                i64::from(std::process::id()),
+                now.to_rfc3339(),
+            ],
+        )
+        .map_err(|error| sqlite_storage_error("STORAGE_RUNTIME_OWNER_WRITE_FAILED", error))?;
+    let receipt_table_exists: bool = transaction
         .query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM sqlite_master
@@ -397,32 +459,123 @@ fn reconcile_stale_prepared_receipts(conn: &mut Connection) -> Result<(), Mentat
             [],
             |row| row.get(0),
         )
-        .map_err(|error| storage_error("TOOL_EGRESS_RECOVERY_READ_FAILED", &error.to_string()))?;
-    if !receipt_table_exists {
-        return Ok(());
+        .map_err(|error| sqlite_storage_error("TOOL_EGRESS_RECOVERY_READ_FAILED", error))?;
+    if receipt_table_exists {
+        transaction
+            .execute(
+                "UPDATE tool_egress_receipts
+                    SET status = 'OutcomeUnknown', updated_at = ?1
+                  WHERE status = 'Prepared'",
+                [now.to_rfc3339()],
+            )
+            .map_err(|error| sqlite_storage_error("TOOL_EGRESS_RECOVERY_FAILED", error))?;
     }
-    let transaction = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| storage_error("TOOL_EGRESS_RECOVERY_BEGIN_FAILED", &error.to_string()))?;
-    transaction
-        .execute(
-            "UPDATE tool_egress_receipts
-                SET status = 'OutcomeUnknown', updated_at = ?1
-              WHERE status = 'Prepared'",
-            [chrono::Utc::now().to_rfc3339()],
+    let chat_table_exists: bool = transaction
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'chat_messages'
+             )",
+            [],
+            |row| row.get(0),
         )
-        .map_err(|error| storage_error("TOOL_EGRESS_RECOVERY_FAILED", &error.to_string()))?;
+        .map_err(|error| sqlite_storage_error("TURN_RECOVERY_READ_FAILED", error))?;
+    if chat_table_exists {
+        transaction
+            .execute(
+                "UPDATE chat_messages
+                    SET markdown = '이전 실행이 종료되어 요청을 완료하지 못했습니다.',
+                        status = 'Failed',
+                        error_code = 'INTERRUPTED_BY_RESTART',
+                        updated_at = ?1
+                  WHERE role = 'Assistant' AND status IN ('Pending', 'Streaming')",
+                [now.to_rfc3339()],
+            )
+            .map_err(|error| sqlite_storage_error("TURN_RECOVERY_MESSAGE_FAILED", error))?;
+        transaction
+            .execute(
+                "UPDATE conversation_turns
+                    SET completed_at = ?1
+                  WHERE completed_at IS NULL
+                    AND EXISTS (
+                        SELECT 1 FROM chat_messages
+                         WHERE chat_messages.turn_id = conversation_turns.id
+                           AND chat_messages.role = 'Assistant'
+                           AND chat_messages.status = 'Failed'
+                           AND chat_messages.error_code = 'INTERRUPTED_BY_RESTART'
+                    )",
+                [now.to_rfc3339()],
+            )
+            .map_err(|error| sqlite_storage_error("TURN_RECOVERY_TURN_FAILED", error))?;
+    }
     transaction
         .commit()
-        .map_err(|error| storage_error("TOOL_EGRESS_RECOVERY_COMMIT_FAILED", &error.to_string()))?;
-    Ok(())
+        .map_err(|error| sqlite_storage_error("STORAGE_RUNTIME_OWNER_COMMIT_FAILED", error))?;
+    Ok(RuntimeOwnershipGuard::start(
+        owner_id,
+        db_path.to_path_buf(),
+    ))
+}
+
+impl RuntimeOwnershipGuard {
+    fn start(owner_id: Uuid, db_path: PathBuf) -> Self {
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let heartbeat_path = db_path.clone();
+        let worker = std::thread::spawn(move || loop {
+            match stop_rx.recv_timeout(OWNER_HEARTBEAT_INTERVAL) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let Ok(connection) = Connection::open(&heartbeat_path) else {
+                        continue;
+                    };
+                    let _ = connection.busy_timeout(Duration::from_secs(1));
+                    let changed = connection.execute(
+                        "UPDATE runtime_ownership SET heartbeat_at = ?1
+                          WHERE id = 1 AND owner_id = ?2",
+                        params![chrono::Utc::now().to_rfc3339(), owner_id.to_string()],
+                    );
+                    if matches!(changed, Ok(0)) {
+                        break;
+                    }
+                }
+            }
+        });
+        Self {
+            owner_id,
+            db_path,
+            stop_tx: Some(stop_tx),
+            worker: Some(worker),
+        }
+    }
+}
+
+impl Drop for RuntimeOwnershipGuard {
+    fn drop(&mut self) {
+        if let Some(stop_tx) = self.stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        if let Ok(connection) = Connection::open(&self.db_path) {
+            let _ = connection.busy_timeout(Duration::from_secs(1));
+            let _ = connection.execute(
+                "DELETE FROM runtime_ownership WHERE id = 1 AND owner_id = ?1",
+                [self.owner_id.to_string()],
+            );
+        }
+    }
+}
+
+fn truncate_owner_id(value: &str) -> String {
+    value.chars().take(8).collect()
 }
 
 fn should_quarantine(error: &MentatError) -> bool {
     matches!(
         error,
         MentatError::StorageError { code, .. }
-            if !matches!(code.as_str(), "STORAGE_SCHEMA_FUTURE" | "STORAGE_BACKUP_FAILED")
+            if matches!(code.as_str(), "STORAGE_CORRUPTION_DETECTED" | "STORAGE_INTEGRITY_CORRUPT")
     )
 }
 
@@ -468,15 +621,15 @@ fn quarantine_database_files(db_path: &Path) -> Result<PathBuf, MentatError> {
 
 fn configure_connection(conn: &Connection) -> Result<(), MentatError> {
     conn.pragma_update(None, "foreign_keys", true)
-        .map_err(|error| storage_error("STORAGE_CONFIG_FAILED", &error.to_string()))?;
+        .map_err(|error| sqlite_storage_error("STORAGE_CONFIG_FAILED", error))?;
     conn.busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|error| storage_error("STORAGE_CONFIG_FAILED", &error.to_string()))?;
+        .map_err(|error| sqlite_storage_error("STORAGE_CONFIG_FAILED", error))?;
     Ok(())
 }
 
 fn schema_version_of(conn: &Connection) -> Result<u32, MentatError> {
     conn.pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(|error| storage_error("STORAGE_SCHEMA_READ_FAILED", &error.to_string()))
+        .map_err(|error| sqlite_storage_error("STORAGE_SCHEMA_READ_FAILED", error))
 }
 
 fn create_online_backup(conn: &Connection, db_path: &Path) -> Result<PathBuf, MentatError> {
@@ -834,6 +987,67 @@ fn run_migrations(conn: &mut Connection, starting_version: u32) -> Result<(), Me
         transaction
             .commit()
             .map_err(|error| storage_error("STORAGE_MIGRATION_V5_FAILED", &error.to_string()))?;
+        version = 5;
+    }
+
+    if version == 5 {
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| sqlite_storage_error("STORAGE_MIGRATION_BEGIN_FAILED", error))?;
+        transaction
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS runtime_ownership (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    owner_id TEXT NOT NULL,
+                    process_id INTEGER NOT NULL,
+                    acquired_at TEXT NOT NULL,
+                    heartbeat_at TEXT NOT NULL
+                );",
+            )
+            .map_err(|error| sqlite_storage_error("STORAGE_MIGRATION_V6_FAILED", error))?;
+        let receipt_table_exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                     WHERE type = 'table' AND name = 'tool_egress_receipts'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| sqlite_storage_error("STORAGE_MIGRATION_V6_FAILED", error))?;
+        if receipt_table_exists {
+            let owner_column_exists: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM pragma_table_info('tool_egress_receipts')
+                         WHERE name = 'runtime_owner_id'
+                     )",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| sqlite_storage_error("STORAGE_MIGRATION_V6_FAILED", error))?;
+            if !owner_column_exists {
+                transaction
+                    .execute_batch(
+                        "ALTER TABLE tool_egress_receipts
+                         ADD COLUMN runtime_owner_id TEXT;",
+                    )
+                    .map_err(|error| sqlite_storage_error("STORAGE_MIGRATION_V6_FAILED", error))?;
+            }
+        }
+        transaction
+            .execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (6, ?1)
+                 ON CONFLICT(version) DO NOTHING",
+                [chrono::Utc::now().to_rfc3339()],
+            )
+            .map_err(|error| sqlite_storage_error("STORAGE_MIGRATION_V6_FAILED", error))?;
+        transaction
+            .pragma_update(None, "user_version", 6)
+            .map_err(|error| sqlite_storage_error("STORAGE_MIGRATION_V6_FAILED", error))?;
+        transaction
+            .commit()
+            .map_err(|error| sqlite_storage_error("STORAGE_MIGRATION_V6_FAILED", error))?;
     }
     Ok(())
 }
@@ -841,15 +1055,15 @@ fn run_migrations(conn: &mut Connection, starting_version: u32) -> Result<(), Me
 fn verify_database(conn: &Connection) -> Result<(), MentatError> {
     let integrity: String = conn
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-        .map_err(|error| storage_error("STORAGE_INTEGRITY_FAILED", &error.to_string()))?;
+        .map_err(|error| sqlite_storage_error("STORAGE_INTEGRITY_FAILED", error))?;
     if integrity != "ok" {
-        return Err(storage_error("STORAGE_INTEGRITY_FAILED", &integrity));
+        return Err(storage_error("STORAGE_INTEGRITY_CORRUPT", &integrity));
     }
     let foreign_key_error_count: u64 = conn
         .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
             row.get(0)
         })
-        .map_err(|error| storage_error("STORAGE_FOREIGN_KEY_FAILED", &error.to_string()))?;
+        .map_err(|error| sqlite_storage_error("STORAGE_FOREIGN_KEY_FAILED", error))?;
     if foreign_key_error_count != 0 {
         return Err(storage_error(
             "STORAGE_FOREIGN_KEY_FAILED",
@@ -889,6 +1103,21 @@ pub(crate) fn storage_error(code: &str, message: &str) -> MentatError {
     }
 }
 
+fn sqlite_storage_error(code: &str, error: rusqlite::Error) -> MentatError {
+    let corruption = matches!(
+        error.sqlite_error_code(),
+        Some(rusqlite::ffi::ErrorCode::DatabaseCorrupt | rusqlite::ffi::ErrorCode::NotADatabase)
+    );
+    storage_error(
+        if corruption {
+            "STORAGE_CORRUPTION_DETECTED"
+        } else {
+            code
+        },
+        &error.to_string(),
+    )
+}
+
 /// Windows-safe comparison key for the same repository root across runs.
 pub fn normalize_root_key(path: &Path) -> String {
     let raw = path
@@ -903,4 +1132,31 @@ pub fn normalize_root_key(path: &Path) -> String {
         .replace('/', "\\")
         .trim_end_matches('\\')
         .to_lowercase()
+}
+
+#[cfg(test)]
+mod recovery_classification_tests {
+    use super::*;
+
+    #[test]
+    fn transient_and_permission_errors_never_trigger_quarantine() {
+        for code in [
+            "STORAGE_RUNTIME_OWNER_BEGIN_FAILED",
+            "STORAGE_RUNTIME_OWNER_READ_FAILED",
+            "TOOL_EGRESS_RECOVERY_FAILED",
+            "STORAGE_PERMISSION_DENIED",
+            "STORAGE_DATABASE_BUSY",
+            "STORAGE_DATABASE_LOCKED",
+        ] {
+            assert!(!should_quarantine(&storage_error(code, "fixture")));
+        }
+        assert!(should_quarantine(&storage_error(
+            "STORAGE_CORRUPTION_DETECTED",
+            "fixture"
+        )));
+        assert!(should_quarantine(&storage_error(
+            "STORAGE_INTEGRITY_CORRUPT",
+            "fixture"
+        )));
+    }
 }

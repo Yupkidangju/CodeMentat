@@ -48,6 +48,7 @@ Code Mentat는 로컬 소프트웨어 저장소(Repository)를 **완전한 읽�
    - 저장소가 `STALE`이면 신규 분석을 차단하고 재인덱싱 전 live file과 이전 hash 혼합을 허용하지 않음
    - 파일 watcher의 event-loss/unknown 신호와 ignore 규칙 변경은 즉시 STALE로 실패 폐쇄
    - OpenAI 호환/Gemini tool result는 provider가 직렬화한 정확한 body와 durable receipt가 일치해야만 송신되며 redirect에는 재전송하지 않습니다.
+   - AppData DB는 한 runtime owner만 사용할 수 있으며 두 번째 실행은 live DB를 격리하거나 복제하지 않고 저장소 open을 거부합니다.
 7. **Grounding 및 Audit UI**
    - Advisor 답변은 자유 Markdown을 유지하고, 별도 Grounding drawer에서 tool call, receipt, SourceRef 경로·줄·redacted excerpt를 확인합니다.
    - Audit mode는 Ready 저장소와 tool-capable 모델에서만 선택되며 validated AnswerBundle만 구조화 UI와 SQLite에 저장·복원합니다.

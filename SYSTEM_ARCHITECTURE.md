@@ -268,6 +268,8 @@ trait ToolEgressStore {
 
 `begin_turn`, prompt Apply, delete, Prepared receipt는 각각 독립 transaction이다. repository-backed turn의 terminal update는 최종 GroundingTrace/tool/source와 같은 `finish_turn_with_grounding` transaction에서만 확정한다. 같은 provider body의 receipt terminal은 ID별 호출이 아니라 batch CAS transaction을 사용한다. streaming delta write는 250ms 또는 4KiB 중 먼저 도달한 조건으로 batch하고 terminal 시 즉시 flush한다.
 
+AppData DB를 연 storage owner는 schema v6 runtime lease를 프로세스 수명 동안 유지한다. live heartbeat가 있으면 추가 handle/process open을 차단한다. stale takeover transaction만 Prepared receipt와 orphan Pending/Streaming turn을 복구하며, transient SQLite busy/locked/permission/recovery 오류는 quarantine으로 라우팅하지 않는다.
+
 ### 2.2 Prompt 합성
 
 ```rust
@@ -577,7 +579,7 @@ Assistant Markdown은 모델의 정상 최종 텍스트다. SourceRef 검증 실
 
 각 migration version은 하나의 `BEGIN IMMEDIATE` transaction으로 실행한다. 전체 chain 전 SQLite online backup/checkpoint로 `<db>.pre-cr-ux-001-<UTC>.sqlite`를 만들며, 실패 시 `<db>.quarantine-<UTC>/`에 DB/WAL/SHM을 함께 보존하고 새 DB는 factory prompt로 시작한다. 자동 destructive reset은 금지한다.
 
-마이그레이션 버전 순서는 `v1 legacy registration → v2 conversation/prompt/preferences → v3 grounding/tool records → v4 consent/receipt`로 고정한다. 각 버전은 `BEGIN IMMEDIATE` 안에서 schema와 version을 함께 갱신한다. 미래 unknown version은 downgrade하지 않고 쓰기를 거부한다.
+마이그레이션 버전 순서는 `v1 legacy registration → v2 conversation/prompt/preferences → v3 grounding/tool records → v4 consent/receipt → v5 window/secret preferences → v6 runtime ownership/receipt owner`로 고정한다. 각 버전은 `BEGIN IMMEDIATE` 안에서 schema와 version을 함께 갱신한다. 미래 unknown version은 downgrade하지 않고 쓰기를 거부한다.
 
 `INSERT OR REPLACE`는 FK cascade 부작용 때문에 신규/변경 테이블에서 사용하지 않고 `INSERT ... ON CONFLICT DO UPDATE`를 사용한다. UUID/date/enum decode 실패와 unknown snapshot status는 새 UUID/현재 시각/Ready로 바꾸지 않고 명시적 storage error로 반환한다.
 
@@ -638,6 +640,8 @@ STALE/Incomplete snapshot에서는 metadata-only `repo_status` 외 신규 Reposi
 | `AUDIT_RESPONSE_INVALID` | Audit JSON/schema/evidence 검증 실패 | raw 저장/Markdown fallback 금지, 재시도 |
 | `MARKDOWN_LIMIT_REACHED` | Markdown byte/depth/block 상한 초과 | bounded truncation 표시/원문 복사 |
 | `STORAGE_EPHEMERAL_MODE` | DB unavailable/corrupt fallback | 저장 안 됨 표시, 복구 도구 |
+| `STORAGE_RUNTIME_OWNED` | 같은 AppData DB의 live owner 존재 | 기존 process 종료 후 재시도; DB 격리 금지 |
+| `INTERRUPTED_BY_RESTART` | 이전 runtime의 orphan Pending/Streaming | Failed history로 표시하고 새 turn 시작 |
 | `CONVERSATION_DELETE_FAILED` | cascade/privacy cleanup 실패 | 삭제 완료 표시 금지, 재시도 |
 
 ## 11. 결정적 테스트 표면

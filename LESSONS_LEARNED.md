@@ -12,6 +12,7 @@
 - capability는 모델 이름으로 추정하지 않고 실제 read-only tool probe로 확인해야 한다. probe 실패는 전체 모델 활성화 실패가 아니라 정직한 chat-only 강등으로 처리한다.
 - event stream의 `Completed`는 화면 의미일 뿐 durable commit 증거가 아니다. final AgentLoop outcome과 GroundingTrace가 도착한 뒤 단일 storage transaction이 성공해야만 UI/DB를 Completed로 확정해야 한다.
 - 한 HTTP body에 여러 receipt가 있으면 상태 전이는 receipt별 CAS가 아니라 body 단위 batch CAS여야 한다. 첫 update 후 두 번째 실패를 주입하는 killpoint가 이 불변조건을 가장 직접적으로 검증한다.
+- startup recovery는 단순히 `open()`이 호출됐다는 사실만으로 stale을 가정하면 안 된다. heartbeat lease로 live owner를 배제한 뒤에만 Prepared와 orphan Streaming을 복구해야 하며, busy/permission은 corruption과 별도 분류해야 한다.
 
 ---
 

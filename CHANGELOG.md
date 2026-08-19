@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `312.5×660` 기본·`240×360` 최소 세로형 대화 UI, 저장소 연결, prompt editor/version restore, Markdown/code copy, 닫기·설정·핀·새 대화 고정 제어를 추가했다.
 
 ### Changed
+- crash 후 runtime 작업이 없는 Pending/Streaming assistant message는 startup lease transaction에서 `INTERRUPTED_BY_RESTART` Failed로 닫는다.
 - 기본 실행 앱을 760px 3-Tier 감사 카드에서 사용자 resize를 보존하는 세로형 자유 대화 UI로 전환했다.
 - Persona 후처리 대신 System/Persona prompt-time 합성을 사용하며 기존 AnswerBundle 경로는 Audit 전용 validator 대상으로 격리했다.
 - 모델 검증 결과를 chat/native/emulated/repository-advisor capability로 표현할 수 있게 확장하고 현재 검증되지 않은 repository tool capability는 chat-only로 실패 폐쇄한다.
@@ -27,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 창 크기·핀·Enter/Ctrl+Enter 전송 방식·마지막 모델 선택·Prompt/Persona 표시를 재실행 후 복원한다. 모델은 복원돼도 새 catalog/생성 검증 전 자동 활성화하지 않는다.
 
 ### Security
+- SQLite v6 runtime owner lease(PID/UUID/heartbeat)를 추가해 동일 AppData DB의 live 동시 handle/process를 거부하고, stale/absent owner takeover에서만 Prepared receipt와 orphan turn을 복구한다.
+- DB quarantine 판정을 SQLite `DatabaseCorrupt`/`NotADatabase`/integrity 실패로 제한해 busy/locked/read-only/permission/recovery 오류에서 원 DB/WAL/SHM을 이동하거나 새 DB를 만들지 않는다.
 - repository-backed completion은 final GroundingTrace/tool/source와 Advisor/Audit terminal을 하나의 `BEGIN IMMEDIATE` transaction으로 저장하며 commit 전 killpoint는 전체 rollback한다.
 - 동일 exact provider body의 여러 receipt terminal을 batch atomic CAS로 전환하고, 두 번째 update 전 실패 시 부분 `Sent`를 남기지 않는다. 재실행 시 남은 `Prepared`는 한 transaction에서 `OutcomeUnknown`으로 복구한다.
 - 외부 provider repository tool result는 gateway redaction, 명시적 세션 동의, exact provider-body 검증, durable `Prepared→Sent/Failed/OutcomeUnknown` receipt를 통과해야만 전송한다.

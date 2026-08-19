@@ -3,8 +3,8 @@
 - **문서 버전:** 2.0.0-plan
 - **참조 표준:** `AI_AUDIT_DOC_STANDARD.md`
 - **기존 baseline 감사:** `docs/audit/audit_report_17.md` — `PASS WITH KNOWN RISKS`
-- **최신 확장 범위 감사:** `docs/audit/audit_report_21.md` — `HOLD`
-- **신규 변경 상태:** `REPORT 21 DURABILITY REMEDIATION CLEAN / RE-AUDIT REQUESTED`
+- **최신 확장 범위 감사:** `docs/audit/audit_report_22.md` — `HOLD`
+- **신규 변경 상태:** `REPORT 22 RUNTIME OWNERSHIP REMEDIATION / CLEAN GATE PENDING`
 - **전체 판정:** `기존 HOLD 유지 — 새 clean commit 독립 재감사 전 PASS 아님`
 - **재감사 요청:** `docs/audit/re_audit_request_21.md` — 대상 `4918c3e`
 - **최신 재감사 요청:** `docs/audit/re_audit_request_22.md` — 대상 `b0ef425`
@@ -142,8 +142,9 @@ Baseline audit: PASS WITH KNOWN RISKS (audit_report_17)
 Expanded working-tree audit: HOLD (audit_report_18)
 Clean-commit full re-audit: HOLD (audit_report_19)
 Atomic durability re-audit: HOLD (audit_report_21)
+Runtime ownership re-audit: HOLD (audit_report_22)
 CR-UX-001 CR-0: APPROVED
 CR-UX-001 CR-1~7: PRODUCTION PARTIAL — AgentLoop/egress/Grounding·Audit remediation 구현, 29/43 Verified
 Implementation approval: RECEIVED
-Final decision: RE-AUDIT REQUESTED for b0ef425 — 새 감사가 대체하기 전까지 HOLD
+Final decision: REPORT 22 REMEDIATION GATES PENDING — 새 감사가 대체하기 전까지 HOLD
 ```

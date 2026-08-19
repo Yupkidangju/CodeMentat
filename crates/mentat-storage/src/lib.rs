@@ -20,6 +20,7 @@ mod tests {
         ResponseContract, SnapshotStatus, SourceRef, SystemPreset, TurnStart, TurnTerminalUpdate,
         UiPreferences,
     };
+    use mentat_core::MentatError;
     use mentat_inference::{BackendProfile, ProviderKind};
     use rusqlite::Connection;
     use std::path::PathBuf;
@@ -226,7 +227,7 @@ mod tests {
 
         let storage = SqliteStorage::open(&db_path).expect("legacy DB should migrate");
 
-        assert_eq!(storage.schema_version().unwrap(), 5);
+        assert_eq!(storage.schema_version().unwrap(), 6);
         assert_eq!(storage.list_recent_repos().unwrap()[0].id, legacy_repo_id);
         assert!(storage
             .migration_backup_path()
@@ -271,7 +272,7 @@ mod tests {
 
         let storage = SqliteStorage::open(&db_path).unwrap();
 
-        assert_eq!(storage.schema_version().unwrap(), 5);
+        assert_eq!(storage.schema_version().unwrap(), 6);
         assert!(storage.recovery_quarantine_path().is_none());
         assert_eq!(storage.list_recent_repos().unwrap()[0].id, repository_id);
     }
@@ -305,7 +306,7 @@ mod tests {
         let storage = SqliteStorage::open(&db_path).unwrap();
         let preferences = storage.load_ui_preferences().unwrap();
 
-        assert_eq!(storage.schema_version().unwrap(), 5);
+        assert_eq!(storage.schema_version().unwrap(), 6);
         assert_eq!(preferences.width_points, 312.5);
         assert_eq!(preferences.height_points, 660.0);
         assert_eq!(preferences.layout_revision, 2);
@@ -837,7 +838,12 @@ mod tests {
         drop(storage);
         let storage = SqliteStorage::open(&db_path).unwrap();
         let after_kill = storage.load_conversation(conversation.id).unwrap().unwrap();
-        assert_eq!(after_kill.messages[1].status, MessageStatus::Streaming);
+        assert_eq!(
+            after_kill.messages[1].status,
+            MessageStatus::Failed {
+                error_code: "INTERRUPTED_BY_RESTART".to_string()
+            }
+        );
         assert!(storage
             .load_grounding_trace(trace_id)
             .unwrap()
@@ -845,20 +851,9 @@ mod tests {
             .source_refs
             .is_empty());
 
-        storage
+        assert!(storage
             .finish_turn_with_grounding(&final_trace, &update)
-            .unwrap();
-        let completed = storage.load_conversation(conversation.id).unwrap().unwrap();
-        assert_eq!(completed.messages[1].status, MessageStatus::Completed);
-        assert_eq!(
-            storage
-                .load_grounding_trace(trace_id)
-                .unwrap()
-                .unwrap()
-                .source_refs
-                .len(),
-            1
-        );
+            .is_err());
     }
 
     #[test]
@@ -872,9 +867,122 @@ mod tests {
             .recovery_quarantine_path()
             .expect("corrupt DB should be quarantined");
 
-        assert_eq!(storage.schema_version().unwrap(), 5);
+        assert_eq!(storage.schema_version().unwrap(), 6);
         assert!(quarantine.is_dir());
         assert!(quarantine.join("mentat.db").exists());
         assert!(db_path.exists());
+    }
+
+    #[test]
+    fn busy_timeout_preserves_original_database_without_quarantine() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("mentat.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+        let profile = BackendProfile {
+            model: "preserved-model".to_string(),
+            ..Default::default()
+        };
+        storage.save_backend_profile(&profile).unwrap();
+        drop(storage);
+
+        let lock_connection = Connection::open(&db_path).unwrap();
+        lock_connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let second_open = SqliteStorage::open(&db_path);
+        assert!(matches!(
+            second_open,
+            Err(MentatError::StorageError { code, .. })
+                if code == "STORAGE_RUNTIME_OWNER_BEGIN_FAILED"
+        ));
+        assert!(dir
+            .path()
+            .read_dir()
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| !entry.file_name().to_string_lossy().contains(".quarantine-")));
+        lock_connection.execute_batch("ROLLBACK").unwrap();
+        drop(lock_connection);
+
+        let reopened = SqliteStorage::open(&db_path).unwrap();
+        assert_eq!(
+            reopened.load_backend_profile().unwrap().unwrap().model,
+            "preserved-model"
+        );
+    }
+
+    #[test]
+    fn recovery_transaction_error_preserves_database_without_quarantine() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("mentat.db");
+        drop(SqliteStorage::open(&db_path).unwrap());
+        let connection = Connection::open(&db_path).unwrap();
+        connection
+            .execute_batch("DROP TABLE runtime_ownership")
+            .unwrap();
+        drop(connection);
+
+        let reopened = SqliteStorage::open(&db_path);
+        assert!(matches!(
+            reopened,
+            Err(MentatError::StorageError { code, .. })
+                if code == "STORAGE_RUNTIME_OWNER_READ_FAILED"
+        ));
+        assert!(db_path.exists());
+        assert!(dir
+            .path()
+            .read_dir()
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| !entry.file_name().to_string_lossy().contains(".quarantine-")));
+    }
+
+    #[test]
+    fn runtime_owner_process_helper() {
+        let Ok(db_path) = std::env::var("CODEMENTAT_OWNER_HELPER_DB") else {
+            return;
+        };
+        let ready = PathBuf::from(
+            std::env::var("CODEMENTAT_OWNER_HELPER_READY").expect("ready marker path"),
+        );
+        let release = PathBuf::from(
+            std::env::var("CODEMENTAT_OWNER_HELPER_RELEASE").expect("release marker path"),
+        );
+        let _storage = SqliteStorage::open(db_path).expect("helper acquires runtime owner");
+        std::fs::write(&ready, b"ready").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !release.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(release.exists(), "parent did not release helper");
+    }
+
+    #[test]
+    fn second_process_is_rejected_while_runtime_owner_is_live() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("mentat.db");
+        drop(SqliteStorage::open(&db_path).unwrap());
+        let ready = dir.path().join("owner-ready");
+        let release = dir.path().join("owner-release");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("tests::runtime_owner_process_helper")
+            .arg("--nocapture")
+            .env("CODEMENTAT_OWNER_HELPER_DB", &db_path)
+            .env("CODEMENTAT_OWNER_HELPER_READY", &ready)
+            .env("CODEMENTAT_OWNER_HELPER_RELEASE", &release)
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !ready.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(ready.exists(), "child owner did not become ready");
+
+        let second_open = SqliteStorage::open(&db_path);
+        assert!(matches!(
+            second_open,
+            Err(MentatError::StorageError { code, .. }) if code == "STORAGE_RUNTIME_OWNED"
+        ));
+        std::fs::write(&release, b"release").unwrap();
+        assert!(child.wait().unwrap().success());
     }
 }

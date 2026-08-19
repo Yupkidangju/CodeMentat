@@ -1082,8 +1082,8 @@ Historical handoff: Phase 1 GO (v0.1 implementation only; CR-UX-001 authority �
 ### 23.7 현재 handoff
 
 ```text
-CR-UX-001 Plan: FROZEN FOR USER REVIEW
+CR-UX-001 Plan: APPROVED AND IMPLEMENTATION ACTIVE
 CR-0 Documentation: REVIEW READY
 Implementation: AUTHORIZED — 2026-08-19 CR-UX-001 GO
-Current handoff: CR-UX-001 AWAITING GO
+Current handoff: CR-UX-001 RE-AUDIT REMEDIATION ACTIVE
 ```

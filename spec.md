@@ -152,6 +152,8 @@ Draft
 
 Code Mentat의 목표 제품은 저장소 유무와 무관하게 대화할 수 있고, 저장소 고유 사실이 필요할 때만 bounded read-only tools로 실제 조사하는 멘토다. Advisor Mode 최종 본문은 자유 Markdown이며 증거는 `GroundingTrace`로 분리한다. 2026-08-19 사용자 `CR-UX-001 GO` 승인에 따라 CR-1부터 순차 구현한다.
 
+AppData SQLite는 schema v6 runtime owner lease를 사용한다. live heartbeat가 있는 동안 같은 DB의 추가 handle/process는 거부하며, stale/absent owner를 인수한 startup transaction만 orphan Prepared와 Pending/Streaming을 복구한다. DB quarantine은 SQLite corruption 또는 integrity 실패에만 허용한다.
+
 ### 2.1 신규 기능 요구사항 추적
 
 | ID | 요구사항 | 소유 단계 | 계획 소유 파일 | 계획 검증 | 상태 |

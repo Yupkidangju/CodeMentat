@@ -20,7 +20,7 @@ MentatChatApp
   → AgentLoop(chat-only 또는 6개 read-only tool catalog)
   → gateway redaction + exact-body consent/receipt
   → OpenAI/Gemini native tool round + contract-specific terminal
-  → terminal CAS + Grounding/Audit AppData SQLite v5
+  → terminal CAS + Grounding/Audit + runtime ownership AppData SQLite v6
   → 세로 timeline/CommonMark + Grounding drawer/Audit projection
 ```
 
@@ -39,7 +39,7 @@ MentatChatApp
 | AgentLoop | 8 rounds, 24 calls, 300초, 동일 fingerprint 3회 차단, production Chat UI 단일 진입점 |
 | Audit terminal | raw JSON UI 비노출, `answer_bundle.v1` parse와 Gateway SourceRef exact match |
 | canonical egress | `CM_TOOL_EGRESS_V1`, provider/full endpoint/model/snapshot/ref/payload/exact-body digest |
-| durable storage | SQLite v1→v5 `BEGIN IMMEDIATE`, online backup, DB/WAL/SHM quarantine, Prepared status CAS |
+| durable storage | SQLite v1→v6 `BEGIN IMMEDIATE`, online backup, corruption-only quarantine, runtime owner lease/heartbeat |
 | atomic terminal | final GroundingTrace/tool/source + Advisor/Audit terminal 단일 transaction, commit 전 killpoint rollback |
 | receipt terminal | 동일 exact body receipt ID 집합 batch CAS, startup stale Prepared→OutcomeUnknown |
 | privacy delete | conversation cascade로 turn/message/trace/source/receipt/Audit result 삭제 |
@@ -52,7 +52,7 @@ MentatChatApp
 
 ### 2026-08-19 검증
 
-- `cargo test --workspace --locked`: 165 passed, 2 ignored(atomicity 회귀 4개 포함; 100k/2GiB와 native credential은 별도 실행)
+- `cargo test --workspace --locked`: 171 passed, 2 ignored(runtime ownership/true stale/busy/process/recovery 오류 회귀 포함)
 - `cargo test -p mentat-platform native_secret_store_round_trip_and_delete --locked -- --ignored`: Windows Credential Manager put/get/delete PASS
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: PASS
 - `cargo build -p mentat-app --locked`: PASS

@@ -221,9 +221,10 @@ impl SqliteStorage {
                 id, seal_version, trace_id, consent_scope_id, conversation_id,
                 turn_id, tool_call_id, repository_id, snapshot_id, tool_name,
                 canonical_refs, provider_binding, semantic_payload_digest,
-                exact_provider_body_digest, canonical_digest, status, prepared_at, updated_at
+                exact_provider_body_digest, canonical_digest, status, prepared_at, updated_at,
+                runtime_owner_id
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                       ?13, ?14, ?15, 'Prepared', ?16, ?17)",
+                       ?13, ?14, ?15, 'Prepared', ?16, ?17, ?18)",
             params![
                 receipt.id.to_string(),
                 receipt.seal_version,
@@ -248,6 +249,7 @@ impl SqliteStorage {
                 receipt.canonical_digest,
                 receipt.prepared_at.to_rfc3339(),
                 receipt.updated_at.to_rfc3339(),
+                self.runtime_owner_id().to_string(),
             ],
         )
         .map_err(|error| storage_error("TOOL_EGRESS_RECEIPT_INSERT_FAILED", &error.to_string()))?;
@@ -963,10 +965,22 @@ mod tests {
     }
 
     #[test]
-    fn restart_reconciles_stale_prepared_body_batch_to_outcome_unknown() {
+    fn true_stale_owner_reopen_reconciles_prepared_body_batch_to_outcome_unknown() {
         let (storage, first, second) = two_prepared_receipts_for_same_body();
         let db_path = storage.db_path().to_path_buf();
+        let stale_owner_id = storage.runtime_owner_id();
         drop(storage);
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        let stale_at = chrono::Utc::now() - chrono::Duration::seconds(120);
+        connection
+            .execute(
+                "INSERT INTO runtime_ownership (
+                    id, owner_id, process_id, acquired_at, heartbeat_at
+                 ) VALUES (1, ?1, 999999, ?2, ?2)",
+                params![stale_owner_id.to_string(), stale_at.to_rfc3339()],
+            )
+            .unwrap();
+        drop(connection);
 
         let reopened = SqliteStorage::open(db_path).unwrap();
         for id in [first, second] {
@@ -1001,6 +1015,27 @@ mod tests {
                 ToolEgressStatus::Sent,
             )
             .is_err());
+        for id in [first, second] {
+            assert_eq!(
+                storage
+                    .load_tool_egress_receipt(id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                ToolEgressStatus::Prepared
+            );
+        }
+    }
+
+    #[test]
+    fn second_live_handle_is_rejected_without_touching_live_prepared_receipts() {
+        let (storage, first, second) = two_prepared_receipts_for_same_body();
+        let second_open = SqliteStorage::open(storage.db_path());
+
+        assert!(matches!(
+            second_open,
+            Err(MentatError::StorageError { code, .. }) if code == "STORAGE_RUNTIME_OWNED"
+        ));
         for id in [first, second] {
             assert_eq!(
                 storage

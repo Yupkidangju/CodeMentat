@@ -303,6 +303,13 @@ git diff --check
 3. 동일 exact body receipt IDs를 batch CAS하고 두 번째 ID 상태 불일치 시 전부 rollback한다.
 4. crash fixture는 재실행 상태가 `Completed + full trace` 또는 기존 non-terminal 중 하나인지 확인하며 `Completed + empty trace`를 금지한다.
 
+### Re-audit #20 runtime ownership remediation
+
+1. schema v6 runtime owner lease와 heartbeat로 동일 AppData DB의 live 동시 open을 거부한다.
+2. lease takeover transaction에서만 stale Prepared와 orphan Streaming을 복구한다.
+3. corruption quarantine allowlist를 SQLite corruption/integrity 실패로 제한한다.
+4. 동일 process 두 handle, child process, live Prepared, busy timeout, stale owner reopen을 결정적 fixture로 검증한다.
+
 ## 8. 실행 상태와 잔여 게이트
 
 2026-08-19 사용자 승인을 수신해 구현이 진행 중이다.
