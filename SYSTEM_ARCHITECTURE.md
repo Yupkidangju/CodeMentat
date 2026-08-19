@@ -268,7 +268,7 @@ trait ToolEgressStore {
 
 `begin_turn`, prompt Apply, delete, Prepared receipt는 각각 독립 transaction이다. repository-backed turn의 terminal update는 최종 GroundingTrace/tool/source와 같은 `finish_turn_with_grounding` transaction에서만 확정한다. 같은 provider body의 receipt terminal은 ID별 호출이 아니라 batch CAS transaction을 사용한다. streaming delta write는 250ms 또는 4KiB 중 먼저 도달한 조건으로 batch하고 terminal 시 즉시 flush한다.
 
-AppData DB를 연 storage owner는 schema v6 runtime lease를 프로세스 수명 동안 유지한다. live heartbeat가 있으면 추가 handle/process open을 차단한다. stale takeover transaction만 Prepared receipt와 orphan Pending/Streaming turn을 복구하며, transient SQLite busy/locked/permission/recovery 오류는 quarantine으로 라우팅하지 않는다.
+AppData DB sibling lock file의 OS exclusive handle을 DB open/migration보다 먼저 획득하고 storage clone 전체 수명 동안 공유한다. kernel lock을 얻은 startup만 schema v6 owner metadata를 교체하고 Prepared receipt와 orphan Pending/Streaming turn을 복구한다. lock contention은 DB를 열지 않고 session-only UI로 fail-closed하며, transient SQLite busy/locked/permission/recovery 오류는 quarantine으로 라우팅하지 않는다.
 
 ### 2.2 Prompt 합성
 
@@ -603,7 +603,7 @@ STALE/Incomplete snapshot에서는 metadata-only `repo_status` 외 신규 Reposi
 | `mentat-repository` | 기존 read-only primitives를 gateway에 제공 | write/process capability |
 | `mentat-storage` | conversation/prompt/version/trace/preferences migration | repository-root storage |
 | `mentat-app` | responsive chat/settings/grounding/Audit projection | provider JSON 및 분석 판정 직접 생성 |
-| `mentat-platform` | AppData, clipboard/dialog, OS native `SecretStore` adapter | conversation domain 판단, 자체 cipher/file fallback |
+| `mentat-platform` | AppData, clipboard/dialog, OS native `SecretStore`, process-lifetime file lock adapter | conversation domain 판단, 자체 cipher/file fallback |
 
 새 crate는 추가하지 않는다. CR-3 구현 중 순환 의존성이 실제로 증명될 경우에만 별도 ADR과 사용자 승인을 요구한다.
 
@@ -641,6 +641,7 @@ STALE/Incomplete snapshot에서는 metadata-only `repo_status` 외 신규 Reposi
 | `MARKDOWN_LIMIT_REACHED` | Markdown byte/depth/block 상한 초과 | bounded truncation 표시/원문 복사 |
 | `STORAGE_EPHEMERAL_MODE` | DB unavailable/corrupt fallback | 저장 안 됨 표시, 복구 도구 |
 | `STORAGE_RUNTIME_OWNED` | 같은 AppData DB의 live owner 존재 | 기존 process 종료 후 재시도; DB 격리 금지 |
+| `STORAGE_RUNTIME_LOCK_FAILED` | OS lock file open/권한 실패 | session-only, 경로/권한 복구; quarantine 금지 |
 | `INTERRUPTED_BY_RESTART` | 이전 runtime의 orphan Pending/Streaming | Failed history로 표시하고 새 turn 시작 |
 | `CONVERSATION_DELETE_FAILED` | cascade/privacy cleanup 실패 | 삭제 완료 표시 금지, 재시도 |
 

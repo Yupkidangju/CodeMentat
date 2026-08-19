@@ -285,12 +285,12 @@
 - **결정:** UI는 근거와 함께 확정해야 하는 `AgentEvent::Completed`만 active turn에 보류한다. `AgentFinished`가 최종 trace와 함께 도착하면 `finish_turn_with_grounding` 단일 `BEGIN IMMEDIATE` transaction이 trace/tool/source와 turn/message/Audit terminal을 함께 확정한다. repository trace가 없는 chat-only turn은 기존 `finish_turn`을 사용한다. Cancelled/Failed는 완료 근거를 주장하지 않으므로 즉시 terminal로 닫는다.
 - **receipt batch:** 같은 exact provider body에서 발급된 receipt IDs는 `compare_and_set_tool_egress_status_batch` 한 transaction으로 전이한다. ID 중복, 빈 batch, expected 상태 불일치 또는 갱신 수 불일치는 전체 rollback이다.
 - **killpoint:** 테스트 전용 failpoint는 commit 직전 오류를 반환해 transaction rollback을 검증한다. 두 번째 receipt update 실패 fixture도 첫 receipt의 부분 terminal을 허용하지 않는다.
-- **recovery:** 시작 시 stale owner임이 증명된 `Prepared` receipt만 body 단위 `OutcomeUnknown` reconciliation 대상이다. live owner heartbeat가 있으면 두 번째 open을 거부한다.
+- **recovery:** OS process-lifetime exclusive lock을 획득한 startup만 이전 `Prepared`를 body 단위 `OutcomeUnknown` reconciliation 대상으로 취급한다. live process가 있으면 DB open 전에 두 번째 실행을 거부한다.
 
-### [DEC-SEC-013] AppData SQLite는 heartbeat runtime lease로 단일 owner를 강제한다
+### [DEC-SEC-013] AppData SQLite는 OS process-lifetime lock으로 단일 owner를 강제한다
 
 - **상태:** `APPROVED — Re-audit #20 remediation`
-- **결정:** schema v6의 singleton runtime ownership row가 owner UUID, PID, acquired/heartbeat 시각을 보관한다. heartbeat는 2초, live 판정은 30초다. live owner가 있으면 같은 process의 두 번째 handle과 다른 process를 모두 `STORAGE_RUNTIME_OWNED`로 거부한다.
-- **stale takeover:** owner row가 없거나 30초보다 오래됐을 때만 새 owner가 `BEGIN IMMEDIATE`에서 lease를 획득한다. 같은 transaction에서 orphan Prepared를 `OutcomeUnknown`, runtime 없는 Pending/Streaming assistant와 turn을 `INTERRUPTED_BY_RESTART` Failed로 닫는다.
+- **결정:** `mentat-platform::ProcessLifetimeFileLock`이 DB sibling lock file을 DB open/migration/quarantine보다 먼저 non-blocking exclusive mode로 연다. Windows는 share mode 0 handle, Linux/macOS는 `flock(LOCK_EX|LOCK_NB)`를 사용한다. process crash/force-kill 시 kernel이 즉시 해제한다. schema v6 runtime ownership row는 owner UUID/PID/start 시각을 기록하는 복구 metadata이며 takeover 권한이 아니다.
+- **복구:** OS lock 획득 자체가 이전 writer 부재의 fencing 증거다. lock을 얻은 startup transaction은 orphan Prepared를 `OutcomeUnknown`, runtime 없는 Pending/Streaming assistant와 turn을 `INTERRUPTED_BY_RESTART` Failed로 닫는다. wall clock/stale threshold와 heartbeat worker를 ownership 판정에 사용하지 않는다.
 - **quarantine:** DB/WAL/SHM 격리는 SQLite `DatabaseCorrupt`, `NotADatabase` 또는 integrity check 실패에만 허용한다. busy/locked/read-only/permission/I/O/lease/recovery transaction 오류는 원본 경로와 파일을 보존하고 open을 fail-closed한다.
-- **bootstrap:** `initial_ui_preferences()`의 임시 storage는 scope 종료 시 lease를 해제한 뒤 실제 app storage가 새 lease를 획득한다. `SqliteStorage::clone`은 같은 owner guard를 공유한다.
+- **bootstrap:** `initial_ui_preferences()`의 임시 storage는 scope 종료 시 OS lock을 해제한 뒤 실제 app storage가 lock을 획득한다. live lock contention은 재시도하지 않고 session-only UI와 `STORAGE_RUNTIME_OWNED` 안내로 fail-closed하며 cloud repository egress를 비활성화한다. `SqliteStorage::clone`은 같은 lock handle을 공유한다.

@@ -1,16 +1,13 @@
 use mentat_core::error::MentatError;
 use mentat_core::models::{RepositoryProfile, RepositorySnapshot, RepositoryType, SnapshotStatus};
 use mentat_inference::{BackendProfile, ProviderKind};
+use mentat_platform::{ProcessLifetimeFileLock, ProcessLockError};
 use rusqlite::{params, Connection, DatabaseName, OptionalExtension, TransactionBehavior};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Mutex, MutexGuard};
-use std::thread::JoinHandle;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard};
 use uuid::Uuid;
 
 const CURRENT_SCHEMA_VERSION: u32 = 6;
-const OWNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
-const OWNER_STALE_AFTER_SECONDS: i64 = 30;
 
 #[derive(Clone)]
 pub struct SqliteStorage {
@@ -19,13 +16,12 @@ pub struct SqliteStorage {
     migration_backup_path: Option<PathBuf>,
     recovery_quarantine_path: Option<PathBuf>,
     runtime_owner: Arc<RuntimeOwnershipGuard>,
+    _process_lock: Arc<ProcessLifetimeFileLock>,
 }
 
 struct RuntimeOwnershipGuard {
     owner_id: Uuid,
     db_path: PathBuf,
-    stop_tx: Option<mpsc::Sender<()>>,
-    worker: Option<JoinHandle<()>>,
 }
 
 impl SqliteStorage {
@@ -35,6 +31,18 @@ impl SqliteStorage {
             std::fs::create_dir_all(parent)
                 .map_err(|e| MentatError::IoError(format!("DB 디렉터리 생성 실패: {}", e)))?;
         }
+        let lock_path = PathBuf::from(format!("{}.runtime.lock", path.to_string_lossy()));
+        let process_lock = Arc::new(ProcessLifetimeFileLock::acquire(&lock_path).map_err(
+            |error| match error {
+                ProcessLockError::Contended => storage_error(
+                    "STORAGE_RUNTIME_OWNED",
+                    "동일 AppData DB를 다른 process가 사용 중입니다.",
+                ),
+                ProcessLockError::Io(message) => {
+                    storage_error("STORAGE_RUNTIME_LOCK_FAILED", &message)
+                }
+            },
+        )?);
 
         let existed_nonempty = std::fs::metadata(&path)
             .map(|metadata| metadata.len() > 0)
@@ -64,6 +72,7 @@ impl SqliteStorage {
             migration_backup_path,
             recovery_quarantine_path,
             runtime_owner,
+            _process_lock: process_lock,
         })
     }
 
@@ -413,26 +422,6 @@ fn acquire_runtime_ownership(
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| sqlite_storage_error("STORAGE_RUNTIME_OWNER_BEGIN_FAILED", error))?;
-    let existing = transaction
-        .query_row(
-            "SELECT owner_id, heartbeat_at FROM runtime_ownership WHERE id = 1",
-            [],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
-        .optional()
-        .map_err(|error| sqlite_storage_error("STORAGE_RUNTIME_OWNER_READ_FAILED", error))?;
-    if let Some((existing_owner, heartbeat)) = existing {
-        let heartbeat = parse_datetime(&heartbeat, "runtime_ownership.heartbeat_at")?;
-        if now.signed_duration_since(heartbeat).num_seconds() < OWNER_STALE_AFTER_SECONDS {
-            return Err(storage_error(
-                "STORAGE_RUNTIME_OWNED",
-                &format!(
-                    "동일 AppData DB를 다른 runtime owner가 사용 중입니다: {}",
-                    truncate_owner_id(&existing_owner)
-                ),
-            ));
-        }
-    }
     transaction
         .execute(
             "INSERT INTO runtime_ownership (
@@ -511,64 +500,22 @@ fn acquire_runtime_ownership(
     transaction
         .commit()
         .map_err(|error| sqlite_storage_error("STORAGE_RUNTIME_OWNER_COMMIT_FAILED", error))?;
-    Ok(RuntimeOwnershipGuard::start(
+    Ok(RuntimeOwnershipGuard {
         owner_id,
-        db_path.to_path_buf(),
-    ))
-}
-
-impl RuntimeOwnershipGuard {
-    fn start(owner_id: Uuid, db_path: PathBuf) -> Self {
-        let (stop_tx, stop_rx) = mpsc::channel();
-        let heartbeat_path = db_path.clone();
-        let worker = std::thread::spawn(move || loop {
-            match stop_rx.recv_timeout(OWNER_HEARTBEAT_INTERVAL) {
-                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    let Ok(connection) = Connection::open(&heartbeat_path) else {
-                        continue;
-                    };
-                    let _ = connection.busy_timeout(Duration::from_secs(1));
-                    let changed = connection.execute(
-                        "UPDATE runtime_ownership SET heartbeat_at = ?1
-                          WHERE id = 1 AND owner_id = ?2",
-                        params![chrono::Utc::now().to_rfc3339(), owner_id.to_string()],
-                    );
-                    if matches!(changed, Ok(0)) {
-                        break;
-                    }
-                }
-            }
-        });
-        Self {
-            owner_id,
-            db_path,
-            stop_tx: Some(stop_tx),
-            worker: Some(worker),
-        }
-    }
+        db_path: db_path.to_path_buf(),
+    })
 }
 
 impl Drop for RuntimeOwnershipGuard {
     fn drop(&mut self) {
-        if let Some(stop_tx) = self.stop_tx.take() {
-            let _ = stop_tx.send(());
-        }
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
         if let Ok(connection) = Connection::open(&self.db_path) {
-            let _ = connection.busy_timeout(Duration::from_secs(1));
+            let _ = connection.busy_timeout(std::time::Duration::from_secs(1));
             let _ = connection.execute(
                 "DELETE FROM runtime_ownership WHERE id = 1 AND owner_id = ?1",
                 [self.owner_id.to_string()],
             );
         }
     }
-}
-
-fn truncate_owner_id(value: &str) -> String {
-    value.chars().take(8).collect()
 }
 
 fn should_quarantine(error: &MentatError) -> bool {

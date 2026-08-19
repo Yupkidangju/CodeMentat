@@ -1,6 +1,6 @@
 # Code Mentat 빌드 및 패키징 가이드 (BUILD_GUIDE.md)
 
-동일 사용자 AppData의 `mentat.db`는 runtime owner lease로 단일 process만 사용한다. 두 번째 실행은 `STORAGE_RUNTIME_OWNED`로 DB 영속 기능을 fail-closed하며, busy/locked/permission 오류는 손상 복구나 quarantine을 시작하지 않는다.
+동일 사용자 AppData의 `mentat.db`는 DB open 전 OS process-lifetime exclusive lock으로 단일 process만 사용한다. 두 번째 실행은 `STORAGE_RUNTIME_OWNED`로 session-only가 되며 자동 재시도하지 않는다. crash/force-kill 뒤 첫 재실행은 sleep 없이 lock을 얻어 recovery한다. busy/locked/permission 오류는 손상 복구나 quarantine을 시작하지 않는다.
 
 - **문서 버전:** 1.0.0
 - **지원 플랫폼:** Windows (x86_64), Linux (x86_64), macOS (arm64, x86_64)

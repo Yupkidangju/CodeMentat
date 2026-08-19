@@ -102,5 +102,6 @@ CR-0 exit: APPROVED
 Production remediation: IMP-CRUX-F001 / SEC-CRUX-F001 / IMP-CRUX-F002 implemented
 Durability remediation: DBG-CRUX-F001 / SEC-CRUX-F002 implemented, killpoint 재실행 검증 대기
 Runtime ownership remediation: SEC-CRUX-F003 / DBG-CRUX-F003 / DOC-CRUX-F002 구현, clean gate 대기
+Process lock remediation: force-kill immediate reopen 및 stale-threshold two-writer 0건 검증, clean gate 대기
 Re-audit request: PENDING CLEAN COMMIT GATES
 ```

@@ -235,6 +235,6 @@ Dynamic tool egress implementation: PRODUCTION CONNECTED — RE-AUDIT PENDING
 
 동일 provider body의 receipt terminal은 전체 ID 집합을 하나의 `BEGIN IMMEDIATE` batch CAS로 갱신한다. 하나라도 `Prepared`가 아니거나 테스트 killpoint가 commit 전에 발생하면 전체 rollback한다. repository-backed completed/Audit terminal도 최종 GroundingTrace/tool/source와 하나의 transaction으로 저장하며, UI는 transaction 성공 전 Completed로 확정하지 않는다.
 
-startup reconciliation은 schema v6 runtime owner lease를 획득한 process만 수행한다. 30초 이내 heartbeat가 있는 owner가 존재하면 DB open 자체를 거부하며 live Prepared를 변경하지 않는다. stale/absent owner takeover 때만 Prepared를 OutcomeUnknown, orphan Pending/Streaming을 `INTERRUPTED_BY_RESTART` Failed로 바꾼다. busy/locked/read-only/permission/I/O/recovery 오류는 corruption이 아니며 quarantine/move/fresh DB 생성을 금지한다.
+startup reconciliation은 DB open/migration보다 먼저 sibling lock file의 OS process-lifetime exclusive handle을 획득한 process만 수행한다. lock은 crash/force-kill 시 kernel이 즉시 해제하며 wall-clock heartbeat takeover는 사용하지 않는다. lock 획득 뒤 Prepared를 OutcomeUnknown, orphan Pending/Streaming을 `INTERRUPTED_BY_RESTART` Failed로 바꾼다. lock contention과 busy/locked/read-only/permission/I/O/recovery 오류는 corruption이 아니며 quarantine/move/fresh DB 생성을 금지한다.
 Implementation approval: GRANTED — 2026-08-19 CR-UX-001 GO
 ```

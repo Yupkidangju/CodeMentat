@@ -15,10 +15,11 @@ mod tests {
     use mentat_core::models::{
         AnswerBundle, ChatMessage, ChatRole, ConversationPersistence, ConversationTurn,
         ExperiencePreset, GroundingFreshness, GroundingTrace, MessageStatus, NewConversation,
-        PromptContentSource, PromptDraft, PromptLayerDraft, RepositoryProfile, RepositorySnapshot,
-        RepositoryToolCallRecord, RepositoryToolCallStatus, RepositoryToolName, RepositoryType,
-        ResponseContract, SnapshotStatus, SourceRef, SystemPreset, TurnStart, TurnTerminalUpdate,
-        UiPreferences,
+        PromptContentSource, PromptDraft, PromptLayerDraft, ProviderBinding, RepositoryConsentKind,
+        RepositoryConsentScope, RepositoryProfile, RepositorySnapshot, RepositoryToolCallRecord,
+        RepositoryToolCallStatus, RepositoryToolName, RepositoryType, ResponseContract,
+        SnapshotStatus, SourceRef, SystemPreset, ToolEgressReceipt, ToolEgressStatus, TurnStart,
+        TurnTerminalUpdate, UiPreferences,
     };
     use mentat_core::MentatError;
     use mentat_inference::{BackendProfile, ProviderKind};
@@ -199,6 +200,121 @@ mod tests {
             persona_resource_version: "cr-ux-001.1".to_string(),
             persona_checksum: "persona-checksum".to_string(),
         }
+    }
+
+    fn prepare_force_kill_state(storage: &SqliteStorage) -> (Uuid, Uuid) {
+        let profile = storage
+            .seed_factory_prompt_profile(&factory_seed())
+            .unwrap();
+        let active = storage
+            .load_active_prompt_profile(profile.id)
+            .unwrap()
+            .unwrap();
+        let repository_id = Uuid::new_v4();
+        let snapshot_id = Uuid::new_v4();
+        let conversation = storage
+            .create_conversation(&NewConversation {
+                repository_id: Some(repository_id),
+                active_snapshot_id: Some(snapshot_id),
+                prompt_profile_id: profile.id,
+                persistence: ConversationPersistence::Durable,
+            })
+            .unwrap();
+        let turn_id = Uuid::new_v4();
+        let assistant = ChatMessage::new(
+            conversation.id,
+            turn_id,
+            ChatRole::Assistant,
+            1,
+            "",
+            MessageStatus::Pending,
+        );
+        storage
+            .begin_turn(&TurnStart {
+                turn: ConversationTurn {
+                    id: turn_id,
+                    conversation_id: conversation.id,
+                    sequence: 1,
+                    prompt_profile_id: profile.id,
+                    prompt_profile_revision_id: active.revision.id,
+                    kernel_version: "kernel.v1".to_string(),
+                    kernel_digest: "kernel".to_string(),
+                    snapshot_id: Some(snapshot_id),
+                    response_contract: ResponseContract::AdvisorMarkdown,
+                    audit_result_id: None,
+                    started_at: chrono::Utc::now(),
+                    completed_at: None,
+                },
+                user_message: ChatMessage::new(
+                    conversation.id,
+                    turn_id,
+                    ChatRole::User,
+                    0,
+                    "질문",
+                    MessageStatus::Completed,
+                ),
+                assistant_placeholder: assistant.clone(),
+            })
+            .unwrap();
+        storage
+            .append_assistant_delta(assistant.id, "streaming")
+            .unwrap();
+        let trace_id = Uuid::new_v4();
+        storage
+            .prepare_grounding_trace(&GroundingTrace {
+                id: trace_id,
+                conversation_id: conversation.id,
+                turn_id,
+                snapshot_id: Some(snapshot_id),
+                tool_calls: Vec::new(),
+                source_refs: Vec::new(),
+                egress_receipt_ids: Vec::new(),
+                freshness: GroundingFreshness::FreshAtSend,
+            })
+            .unwrap();
+        let binding = ProviderBinding::new(
+            Uuid::new_v4(),
+            "OpenAICompatible",
+            "https://api.example.com/v1/chat/completions",
+            "dynamic",
+        )
+        .unwrap();
+        let scope = RepositoryConsentScope {
+            id: Uuid::new_v4(),
+            conversation_id: conversation.id,
+            repository_id,
+            snapshot_id,
+            provider_binding: binding.clone(),
+            kind: RepositoryConsentKind::RepositorySession,
+            granted_at: chrono::Utc::now(),
+            revoked_at: None,
+        };
+        storage.save_repository_consent_scope(&scope).unwrap();
+        let receipt_id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        storage
+            .prepare_tool_egress_receipt(&ToolEgressReceipt {
+                id: receipt_id,
+                seal_version: "CM_TOOL_EGRESS_V1".to_string(),
+                trace_id,
+                consent_scope_id: scope.id,
+                conversation_id: conversation.id,
+                turn_id,
+                tool_call_id: Uuid::new_v4(),
+                repository_id,
+                snapshot_id,
+                tool_name: RepositoryToolName::RepoStatus,
+                canonical_refs: Vec::new(),
+                provider_binding: binding,
+                semantic_payload_digest: "semantic".to_string(),
+                exact_provider_body_digest: "body".to_string(),
+                canonical_digest: "canonical".to_string(),
+                status: ToolEgressStatus::Prepared,
+                prepared_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+        (conversation.id, receipt_id)
     }
 
     #[test]
@@ -924,7 +1040,7 @@ mod tests {
         assert!(matches!(
             reopened,
             Err(MentatError::StorageError { code, .. })
-                if code == "STORAGE_RUNTIME_OWNER_READ_FAILED"
+                if code == "STORAGE_RUNTIME_OWNER_WRITE_FAILED"
         ));
         assert!(db_path.exists());
         assert!(dir
@@ -956,6 +1072,45 @@ mod tests {
     }
 
     #[test]
+    fn runtime_owner_force_kill_helper() {
+        let Ok(db_path) = std::env::var("CODEMENTAT_FORCE_KILL_DB") else {
+            return;
+        };
+        let marker =
+            PathBuf::from(std::env::var("CODEMENTAT_FORCE_KILL_MARKER").expect("marker path"));
+        let storage = SqliteStorage::open(db_path).expect("force-kill helper owns DB");
+        let (conversation_id, receipt_id) = prepare_force_kill_state(&storage);
+        std::fs::write(&marker, format!("{conversation_id}\n{receipt_id}")).unwrap();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+
+    #[test]
+    fn runtime_stale_contender_helper() {
+        let Ok(db_path) = std::env::var("CODEMENTAT_STALE_CONTENDER_DB") else {
+            return;
+        };
+        let marker =
+            PathBuf::from(std::env::var("CODEMENTAT_STALE_CONTENDER_MARKER").expect("marker path"));
+        let outcome = match SqliteStorage::open(db_path) {
+            Err(MentatError::StorageError { code, .. }) if code == "STORAGE_RUNTIME_OWNED" => {
+                "rejected"
+            }
+            Ok(storage) => {
+                let profile = BackendProfile {
+                    model: "contender-write".to_string(),
+                    ..Default::default()
+                };
+                storage.save_backend_profile(&profile).unwrap();
+                "wrote"
+            }
+            Err(error) => panic!("unexpected contender error: {error}"),
+        };
+        std::fs::write(marker, outcome).unwrap();
+    }
+
+    #[test]
     fn second_process_is_rejected_while_runtime_owner_is_live() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("mentat.db");
@@ -984,5 +1139,88 @@ mod tests {
         ));
         std::fs::write(&release, b"release").unwrap();
         assert!(child.wait().unwrap().success());
+    }
+
+    #[test]
+    fn force_killed_owner_recovers_prepared_and_orphan_on_first_reopen_without_sleep() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("mentat.db");
+        drop(SqliteStorage::open(&db_path).unwrap());
+        let marker = dir.path().join("force-kill-state");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("tests::runtime_owner_force_kill_helper")
+            .arg("--nocapture")
+            .env("CODEMENTAT_FORCE_KILL_DB", &db_path)
+            .env("CODEMENTAT_FORCE_KILL_MARKER", &marker)
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !marker.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(marker.exists(), "force-kill helper did not become ready");
+        let ids = std::fs::read_to_string(&marker).unwrap();
+        let mut ids = ids.lines();
+        let conversation_id = Uuid::parse_str(ids.next().unwrap()).unwrap();
+        let receipt_id = Uuid::parse_str(ids.next().unwrap()).unwrap();
+        child.kill().unwrap();
+        let _ = child.wait().unwrap();
+
+        let reopened = SqliteStorage::open(&db_path).expect("kernel lock must release on kill");
+        let conversation = reopened
+            .load_conversation(conversation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            conversation.messages[1].status,
+            MessageStatus::Failed {
+                error_code: "INTERRUPTED_BY_RESTART".to_string()
+            }
+        );
+        assert_eq!(
+            reopened
+                .load_tool_egress_receipt(receipt_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            ToolEgressStatus::OutcomeUnknown
+        );
+    }
+
+    #[test]
+    fn stale_timestamp_cannot_create_two_successful_runtime_writers() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("mentat.db");
+        let owner = SqliteStorage::open(&db_path).unwrap();
+        owner
+            .lock_conn()
+            .unwrap()
+            .execute(
+                "UPDATE runtime_ownership SET heartbeat_at = ?1 WHERE id = 1",
+                [(chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339()],
+            )
+            .unwrap();
+        let marker = dir.path().join("stale-contender-result");
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("tests::runtime_stale_contender_helper")
+            .arg("--nocapture")
+            .env("CODEMENTAT_STALE_CONTENDER_DB", &db_path)
+            .env("CODEMENTAT_STALE_CONTENDER_MARKER", &marker)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "rejected");
+
+        let profile = BackendProfile {
+            model: "owner-write".to_string(),
+            ..Default::default()
+        };
+        owner.save_backend_profile(&profile).unwrap();
+        assert_eq!(
+            owner.load_backend_profile().unwrap().unwrap().model,
+            "owner-write"
+        );
     }
 }

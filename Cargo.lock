@@ -2498,6 +2498,7 @@ dependencies = [
  "chrono",
  "mentat-core",
  "mentat-inference",
+ "mentat-platform",
  "rusqlite",
  "serde",
  "serde_json",

@@ -1,8 +1,78 @@
 use keyring::{Entry, Error as KeyringError};
 use mentat_core::{MentatError, SecretStore};
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 pub struct PlatformManager;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcessLockError {
+    Contended,
+    Io(String),
+}
+
+#[derive(Debug)]
+pub struct ProcessLifetimeFileLock {
+    _file: File,
+    path: PathBuf,
+}
+
+impl ProcessLifetimeFileLock {
+    pub fn acquire(path: impl AsRef<Path>) -> Result<Self, ProcessLockError> {
+        let path = path.as_ref().to_path_buf();
+        let file = open_lock_file(&path)?;
+        Ok(Self { _file: file, path })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+#[cfg(windows)]
+fn open_lock_file(path: &Path) -> Result<File, ProcessLockError> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(0)
+        .open(path)
+        .map_err(|error| match error.raw_os_error() {
+            Some(32 | 33) => ProcessLockError::Contended,
+            _ => ProcessLockError::Io(error.to_string()),
+        })
+}
+
+#[cfg(unix)]
+fn open_lock_file(path: &Path) -> Result<File, ProcessLockError> {
+    use std::os::fd::AsRawFd;
+
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+    unsafe extern "C" {
+        fn flock(fd: i32, operation: i32) -> i32;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|error| ProcessLockError::Io(error.to_string()))?;
+    if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
+        Ok(file)
+    } else {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            Err(ProcessLockError::Contended)
+        } else {
+            Err(ProcessLockError::Io(error.to_string()))
+        }
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NativeSecretStore;
@@ -231,6 +301,20 @@ mod tests {
         assert_eq!(first_ref, format!("provider:{first}"));
         assert_ne!(first_ref, second_ref);
         assert!(!format!("{first_ref:?}").contains("api_key"));
+    }
+
+    #[test]
+    fn process_lifetime_file_lock_releases_on_drop() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mentat.db.runtime.lock");
+        let first = ProcessLifetimeFileLock::acquire(&path).unwrap();
+        assert_eq!(first.path(), path);
+        assert_eq!(
+            ProcessLifetimeFileLock::acquire(&path).unwrap_err(),
+            ProcessLockError::Contended
+        );
+        drop(first);
+        assert!(ProcessLifetimeFileLock::acquire(&path).is_ok());
     }
 
     #[test]

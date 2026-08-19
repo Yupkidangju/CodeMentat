@@ -39,7 +39,7 @@ MentatChatApp
 | AgentLoop | 8 rounds, 24 calls, 300초, 동일 fingerprint 3회 차단, production Chat UI 단일 진입점 |
 | Audit terminal | raw JSON UI 비노출, `answer_bundle.v1` parse와 Gateway SourceRef exact match |
 | canonical egress | `CM_TOOL_EGRESS_V1`, provider/full endpoint/model/snapshot/ref/payload/exact-body digest |
-| durable storage | SQLite v1→v6 `BEGIN IMMEDIATE`, online backup, corruption-only quarantine, runtime owner lease/heartbeat |
+| durable storage | DB open 전 OS process lock, SQLite v1→v6 owner metadata, corruption-only quarantine, atomic startup recovery |
 | atomic terminal | final GroundingTrace/tool/source + Advisor/Audit terminal 단일 transaction, commit 전 killpoint rollback |
 | receipt terminal | 동일 exact body receipt ID 집합 batch CAS, startup stale Prepared→OutcomeUnknown |
 | privacy delete | conversation cascade로 turn/message/trace/source/receipt/Audit result 삭제 |
@@ -52,7 +52,7 @@ MentatChatApp
 
 ### 2026-08-19 검증
 
-- `cargo test --workspace --locked`: 171 passed, 2 ignored(runtime ownership/true stale/busy/process/recovery 오류 회귀 포함)
+- `cargo test --workspace --locked`: 176 passed, 2 ignored(OS lock, force-kill immediate reopen, stale-threshold contender 회귀 포함)
 - `cargo test -p mentat-platform native_secret_store_round_trip_and_delete --locked -- --ignored`: Windows Credential Manager put/get/delete PASS
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: PASS
 - `cargo build -p mentat-app --locked`: PASS
@@ -134,7 +134,7 @@ sequenceDiagram
 | Crate | 역할 | 주요 구현 내용 | 검증 테스트 |
 |---|---|---|---|
 | `mentat-core` | 도메인 모델 & 포트 | `Claim`, `EvidenceRef`, `RepositoryProfile`, `RepositorySnapshot`, `MentatError` 정의 | - |
-| `mentat-platform` | OS 플랫폼 & 격리 가드 | 폴더 선택기, 클립보드 복사, `validate_storage_isolation` (AppData 상호 침범 방지) | `test_storage_isolation_detection` |
+| `mentat-platform` | OS 플랫폼 & 격리 가드 | 폴더/클립보드, AppData 격리, native credential, crash-release process file lock | storage isolation/native credential/process lock tests |
 | `mentat-repository` | 읽기 전용 저장소 엔진 | Incomplete snapshot, memory gate, ignore-aware watcher, Any/Other/Rescan과 ignore-control fail-closed | `test_dbg_f002_rescan_unknown_and_ignore_control_events_fail_closed`, `test_dbg_f002_git_info_exclude_change_marks_snapshot_stale` |
 | `mentat-storage` | AppData SQLite 영속화 | `SqliteStorage`, 최근 저장소, 프로필, 스냅샷, canonical root 조회 | `test_sqlite_storage_save_and_list_recent_repos`, `test_imp_f005_find_repo_by_canonical_root` |
 | `mentat-analysis` | 정적 분석 및 유출 통제 | 모든 cloud claim과 ConflictItem evidence invariant, verified answer projection, canonical seal, live hash lineage | `test_imp_f004_cloud_conflict_items_require_unique_valid_evidence`, `test_imp_f004_claim_invariants_reject_empty_duplicate_and_invalid_confidence` |

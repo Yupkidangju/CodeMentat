@@ -305,10 +305,17 @@ git diff --check
 
 ### Re-audit #20 runtime ownership remediation
 
-1. schema v6 runtime owner lease와 heartbeat로 동일 AppData DB의 live 동시 open을 거부한다.
-2. lease takeover transaction에서만 stale Prepared와 orphan Streaming을 복구한다.
+1. DB open/migration 전 OS process-lifetime exclusive lock으로 동일 AppData DB의 live 동시 open을 거부한다.
+2. kernel lock 획득 뒤 startup transaction에서만 Prepared와 orphan Streaming을 복구한다.
 3. corruption quarantine allowlist를 SQLite corruption/integrity 실패로 제한한다.
 4. 동일 process 두 handle, child process, live Prepared, busy timeout, stale owner reopen을 결정적 fixture로 검증한다.
+
+### Re-audit #21 process lock remediation
+
+1. heartbeat/stale threshold takeover를 제거하고 schema owner row를 recovery metadata로만 유지한다.
+2. 실제 child force-kill 뒤 sleep 없는 첫 reopen에서 Prepared/Streaming recovery를 검증한다.
+3. heartbeat timestamp를 stale로 조작해도 child contender durable write가 0건인지 검증한다.
+4. lock contention은 session-only UI로 fail-closed하며 자동 retry하지 않는 정책을 문서화한다.
 
 ## 8. 실행 상태와 잔여 게이트
 
