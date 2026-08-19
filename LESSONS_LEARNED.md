@@ -22,3 +22,20 @@
 
 1. **Native llama.cpp FFI 링크:** `mentat-inference-llama`에 봉인된 계약 테스트를 바탕으로 실제 `libllama` FFI 연동 및 로컬 GGUF 모델 추론 활성화.
 2. **언어별 Tree-Sitter AST 정밀 파서:** Phase 2의 범용 텍스트/행 기반 분석을 넘어선 심볼 단위 참조 그래프 고도화.
+
+---
+
+## 3. CR-UX-001 전환 교훈
+
+1. **감사 내부 모델이 기본 사용자 경험을 점령하면 안 된다.**
+   - AnswerBundle, Claim, confidence, hash는 검증과 Audit Mode에는 유용하지만 일반 대화 본문을 강제로 대체하면 사용자는 자연스러운 설명과 후속 문맥을 잃는다.
+   - 이후 설계는 자유 Markdown과 `GroundingTrace`를 분리하고 evidence 구조는 요청 시 펼친다.
+2. **Persona는 후처리 장식이 아니라 생성 전 prompt 계약이다.**
+   - 고정 intro/outro는 실제 설명 높이·호칭·대화 태도를 바꾸지 못한다.
+   - 사실과 권한은 immutable Kernel/capability로 지키고 style은 editable Persona Prompt로 전달한다.
+3. **자율 조사는 권한 확대가 아니라 bounded read-only capability 추가다.**
+   - blanket tool 금지는 shell/write 금지와 read-only inspection을 구분하지 못했다.
+   - tool enum, canonical path, budget, consent, receipt를 한 gateway에 모아야 한다.
+4. **컴팩트함은 사용자 resize를 무시하는 근거가 아니다.**
+   - 강제 Tier resize는 장문 대화와 접근성을 훼손했다.
+   - 좁은 기본 크기와 사용자가 선택한 크기 보존을 동시에 만족해야 한다.

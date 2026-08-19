@@ -1,14 +1,25 @@
+mod conversation;
 pub mod db;
+mod grounding_store;
+mod ports;
+mod prompt_store;
+mod secret_preferences;
 
 pub use db::SqliteStorage;
+pub use prompt_store::FactoryPromptSeed;
+pub use secret_preferences::ProviderSecretPreference;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use mentat_core::models::{
-        RepositoryProfile, RepositorySnapshot, RepositoryType, SnapshotStatus,
+        ChatMessage, ChatRole, ConversationPersistence, ConversationTurn, ExperiencePreset,
+        MessageStatus, NewConversation, PromptContentSource, PromptDraft, PromptLayerDraft,
+        RepositoryProfile, RepositorySnapshot, RepositoryType, ResponseContract, SnapshotStatus,
+        SystemPreset, TurnStart, TurnTerminalUpdate, UiPreferences,
     };
     use mentat_inference::{BackendProfile, ProviderKind};
+    use rusqlite::Connection;
     use std::path::PathBuf;
     use tempfile::tempdir;
     use uuid::Uuid;
@@ -80,6 +91,34 @@ mod tests {
     }
 
     #[test]
+    fn provider_secret_preference_round_trips_reference_without_secret_bytes() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("mentat.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+        let profile_id = Uuid::new_v4();
+        let credential_ref = format!("provider:{profile_id}");
+
+        storage
+            .save_provider_secret_preference(&ProviderSecretPreference {
+                profile_id,
+                credential_ref: credential_ref.clone(),
+                remember_api_key: true,
+            })
+            .unwrap();
+        drop(storage);
+
+        let reopened = SqliteStorage::open(&db_path).unwrap();
+        let loaded = reopened
+            .load_provider_secret_preference(profile_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.credential_ref, credential_ref);
+        assert!(loaded.remember_api_key);
+        let bytes = std::fs::read(&db_path).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("never-store-this-api-secret"));
+    }
+
+    #[test]
     fn test_sqlite_storage_save_and_load_snapshot_meta() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("mentat.db");
@@ -142,5 +181,442 @@ mod tests {
             .unwrap()
             .expect("stable lookup");
         assert_eq!(again.id, id);
+    }
+
+    fn factory_seed() -> FactoryPromptSeed {
+        FactoryPromptSeed {
+            profile_id: Uuid::new_v4(),
+            profile_name: "기본 멘토".to_string(),
+            experience_preset: ExperiencePreset::Intermediate,
+            base_system_preset: SystemPreset::Intermediate,
+            system_resource_key: "system.intermediate.v1".to_string(),
+            system_resource_version: "cr-ux-001.1".to_string(),
+            system_checksum: "system-checksum".to_string(),
+            persona_resource_key: "persona.default_analyst.v1".to_string(),
+            persona_resource_version: "cr-ux-001.1".to_string(),
+            persona_checksum: "persona-checksum".to_string(),
+        }
+    }
+
+    #[test]
+    fn legacy_database_migrates_to_v2_and_keeps_rows_with_backup() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("mentat.db");
+        let legacy_repo_id = Uuid::new_v4();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE recent_repositories (
+                    id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    root_path TEXT NOT NULL UNIQUE,
+                    repo_type TEXT NOT NULL,
+                    last_opened_at TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO recent_repositories VALUES (?1, 'Legacy', 'C:/legacy', 'Git', '2026-01-01T00:00:00Z')",
+                [legacy_repo_id.to_string()],
+            )
+            .unwrap();
+        }
+
+        let storage = SqliteStorage::open(&db_path).expect("legacy DB should migrate");
+
+        assert_eq!(storage.schema_version().unwrap(), 5);
+        assert_eq!(storage.list_recent_repos().unwrap()[0].id, legacy_repo_id);
+        assert!(storage
+            .migration_backup_path()
+            .expect("legacy migration should create backup")
+            .exists());
+    }
+
+    #[test]
+    fn registered_v1_without_migration_ledger_upgrades_without_quarantine() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("mentat.db");
+        let repository_id = Uuid::new_v4();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE recent_repositories (
+                    id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    root_path TEXT NOT NULL UNIQUE,
+                    repo_type TEXT NOT NULL,
+                    last_opened_at TEXT NOT NULL
+                 );
+                 CREATE TABLE saved_profiles (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, provider TEXT NOT NULL,
+                    base_url TEXT NOT NULL, model TEXT NOT NULL,
+                    timeout_secs INTEGER NOT NULL, updated_at TEXT NOT NULL
+                 );
+                 CREATE TABLE snapshot_history (
+                    id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, created_at TEXT NOT NULL,
+                    tree_digest TEXT NOT NULL, status TEXT NOT NULL,
+                    file_count INTEGER NOT NULL, total_bytes INTEGER NOT NULL
+                 );
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO recent_repositories VALUES (?1, 'V1', 'C:/v1', 'Git', '2026-01-01T00:00:00Z')",
+                [repository_id.to_string()],
+            )
+            .unwrap();
+        }
+
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        assert_eq!(storage.schema_version().unwrap(), 5);
+        assert!(storage.recovery_quarantine_path().is_none());
+        assert_eq!(storage.list_recent_repos().unwrap()[0].id, repository_id);
+    }
+
+    fn create_v4_ui_preferences(db_path: &std::path::Path, width: f32, height: f32) {
+        let conn = Connection::open(db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ui_preferences (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                width_points REAL NOT NULL,
+                height_points REAL NOT NULL,
+                submit_mode TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
+             PRAGMA user_version = 4;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ui_preferences VALUES (1, ?1, ?2, 'EnterSend', '2026-01-01T00:00:00Z')",
+            rusqlite::params![width, height],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn v5_migration_expands_only_the_legacy_default_window() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("mentat.db");
+        create_v4_ui_preferences(&db_path, 250.0, 600.0);
+
+        let storage = SqliteStorage::open(&db_path).unwrap();
+        let preferences = storage.load_ui_preferences().unwrap();
+
+        assert_eq!(storage.schema_version().unwrap(), 5);
+        assert_eq!(preferences.width_points, 312.5);
+        assert_eq!(preferences.height_points, 660.0);
+        assert_eq!(preferences.layout_revision, 2);
+        assert!(preferences.always_on_top);
+    }
+
+    #[test]
+    fn v5_migration_preserves_a_user_resized_window() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("mentat.db");
+        create_v4_ui_preferences(&db_path, 600.0, 800.0);
+
+        let storage = SqliteStorage::open(&db_path).unwrap();
+        let preferences = storage.load_ui_preferences().unwrap();
+
+        assert_eq!(preferences.width_points, 600.0);
+        assert_eq!(preferences.height_points, 800.0);
+        assert_eq!(preferences.layout_revision, 2);
+        assert!(preferences.always_on_top);
+    }
+
+    #[test]
+    fn ui_preferences_round_trip_pin_submit_mode_and_layout_revision() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("mentat.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+        storage
+            .save_ui_preferences(&UiPreferences {
+                width_points: 777.0,
+                height_points: 555.0,
+                submit_mode: mentat_core::ComposerSubmitMode::CtrlEnterSend,
+                always_on_top: false,
+                layout_revision: 2,
+                updated_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(storage);
+
+        let reopened = SqliteStorage::open(&db_path).unwrap();
+        let preferences = reopened.load_ui_preferences().unwrap();
+        assert_eq!(preferences.width_points, 777.0);
+        assert_eq!(preferences.height_points, 555.0);
+        assert_eq!(
+            preferences.submit_mode,
+            mentat_core::ComposerSubmitMode::CtrlEnterSend
+        );
+        assert!(!preferences.always_on_top);
+        assert_eq!(preferences.layout_revision, 2);
+    }
+
+    #[test]
+    fn future_schema_is_rejected_without_downgrade() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("mentat.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.pragma_update(None, "user_version", 99).unwrap();
+        }
+
+        let error = SqliteStorage::open(&db_path)
+            .err()
+            .expect("future schema must be rejected");
+        assert!(error.to_string().contains("STORAGE_SCHEMA_FUTURE"));
+    }
+
+    #[test]
+    fn factory_profile_persists_only_resource_references() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("mentat.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+        let seed = factory_seed();
+
+        let profile = storage.seed_factory_prompt_profile(&seed).unwrap();
+        let stored = storage
+            .load_active_prompt_profile(profile.id)
+            .unwrap()
+            .expect("seeded profile should load");
+
+        assert!(matches!(
+            stored.system_source,
+            PromptContentSource::FactoryRef { ref resource_key, .. }
+                if resource_key == "system.intermediate.v1"
+        ));
+        let database_bytes = std::fs::read(&db_path).unwrap();
+        assert!(!String::from_utf8_lossy(&database_bytes).contains("Answer clearly and directly"));
+    }
+
+    #[test]
+    fn repository_free_conversation_and_ui_preferences_survive_reopen() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("mentat.db");
+        let conversation_id;
+        {
+            let storage = SqliteStorage::open(&db_path).unwrap();
+            let profile = storage
+                .seed_factory_prompt_profile(&factory_seed())
+                .unwrap();
+            let conversation = storage
+                .create_conversation(&NewConversation {
+                    repository_id: None,
+                    active_snapshot_id: None,
+                    prompt_profile_id: profile.id,
+                    persistence: ConversationPersistence::Durable,
+                })
+                .unwrap();
+            conversation_id = conversation.id;
+            storage
+                .save_ui_preferences(&UiPreferences {
+                    width_points: 600.0,
+                    height_points: 800.0,
+                    ..UiPreferences::default()
+                })
+                .unwrap();
+        }
+
+        let reopened = SqliteStorage::open(&db_path).unwrap();
+        let conversation = reopened
+            .load_conversation(conversation_id)
+            .unwrap()
+            .expect("conversation should survive reopen");
+        let preferences = reopened.load_ui_preferences().unwrap();
+
+        assert_eq!(conversation.repository_id, None);
+        assert_eq!(conversation.active_snapshot_id, None);
+        assert_eq!(preferences.width_points, 600.0);
+        assert_eq!(preferences.height_points, 800.0);
+    }
+
+    #[test]
+    fn malformed_legacy_uuid_fails_closed_instead_of_becoming_random_id() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("mentat.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute(
+                "INSERT INTO recent_repositories (id, display_name, root_path, repo_type, last_opened_at)
+                 VALUES ('not-a-uuid', 'Broken', 'C:/broken', 'Git', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let error = storage
+            .list_recent_repos()
+            .expect_err("malformed row must fail closed");
+        assert!(error.to_string().contains("STORAGE_DECODE_UUID"));
+    }
+
+    #[test]
+    fn prompt_apply_is_atomic_and_rejects_stale_expected_revision() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("mentat.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+        let profile = storage
+            .seed_factory_prompt_profile(&factory_seed())
+            .unwrap();
+        let active = storage
+            .load_active_prompt_profile(profile.id)
+            .unwrap()
+            .unwrap();
+
+        let applied = storage
+            .apply_prompt_draft(
+                active.revision.id,
+                &PromptDraft {
+                    profile_id: profile.id,
+                    name: "사용자 멘토".to_string(),
+                    experience_preset: ExperiencePreset::Custom,
+                    base_system_preset: SystemPreset::Intermediate,
+                    system: PromptLayerDraft::UserText(
+                        "내 저장소를 간결하게 설명하세요.".to_string(),
+                    ),
+                    persona: PromptLayerDraft::Preserve,
+                },
+            )
+            .unwrap();
+        let stored = storage
+            .load_active_prompt_profile(profile.id)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(stored.revision.id, applied.id);
+        assert!(matches!(
+            stored.system_source,
+            PromptContentSource::UserText { ref content, .. }
+                if content == "내 저장소를 간결하게 설명하세요."
+        ));
+        assert!(matches!(
+            stored.persona_source,
+            PromptContentSource::FactoryRef { .. }
+        ));
+
+        let stale_error = storage
+            .apply_prompt_draft(
+                active.revision.id,
+                &PromptDraft {
+                    profile_id: profile.id,
+                    name: "충돌".to_string(),
+                    experience_preset: ExperiencePreset::Custom,
+                    base_system_preset: SystemPreset::Intermediate,
+                    system: PromptLayerDraft::UserText("덮어쓰기".to_string()),
+                    persona: PromptLayerDraft::Preserve,
+                },
+            )
+            .expect_err("stale apply must fail");
+        assert!(stale_error.to_string().contains("PROMPT_REVISION_CONFLICT"));
+    }
+
+    #[test]
+    fn turn_messages_preserve_markdown_and_terminal_state_after_reopen() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("mentat.db");
+        let conversation_id;
+        let expected_markdown = "## 결과\n\n```rust\nfn main() {}\n```\n한글 설명";
+        {
+            let storage = SqliteStorage::open(&db_path).unwrap();
+            let profile = storage
+                .seed_factory_prompt_profile(&factory_seed())
+                .unwrap();
+            let active = storage
+                .load_active_prompt_profile(profile.id)
+                .unwrap()
+                .unwrap();
+            let conversation = storage
+                .create_conversation(&NewConversation {
+                    repository_id: None,
+                    active_snapshot_id: None,
+                    prompt_profile_id: profile.id,
+                    persistence: ConversationPersistence::Durable,
+                })
+                .unwrap();
+            conversation_id = conversation.id;
+            let turn_id = Uuid::new_v4();
+            let user = ChatMessage::new(
+                conversation.id,
+                turn_id,
+                ChatRole::User,
+                0,
+                "코드를 설명해 주세요.",
+                MessageStatus::Completed,
+            );
+            let assistant = ChatMessage::new(
+                conversation.id,
+                turn_id,
+                ChatRole::Assistant,
+                1,
+                "",
+                MessageStatus::Pending,
+            );
+            storage
+                .begin_turn(&TurnStart {
+                    turn: ConversationTurn {
+                        id: turn_id,
+                        conversation_id: conversation.id,
+                        sequence: 1,
+                        prompt_profile_id: profile.id,
+                        prompt_profile_revision_id: active.revision.id,
+                        kernel_version: "kernel.v1".to_string(),
+                        kernel_digest: "kernel-digest".to_string(),
+                        snapshot_id: None,
+                        response_contract: ResponseContract::AdvisorMarkdown,
+                        audit_result_id: None,
+                        started_at: chrono::Utc::now(),
+                        completed_at: None,
+                    },
+                    user_message: user,
+                    assistant_placeholder: assistant.clone(),
+                })
+                .unwrap();
+            storage
+                .append_assistant_delta(assistant.id, "## 결과\n\n```rust\n")
+                .unwrap();
+            storage
+                .append_assistant_delta(assistant.id, "fn main() {}\n```\n한글 설명")
+                .unwrap();
+            storage
+                .finish_turn(&TurnTerminalUpdate::AdvisorCompleted {
+                    turn_id,
+                    assistant_message_id: assistant.id,
+                    markdown: expected_markdown.to_string(),
+                    grounding_trace_id: None,
+                    freshness: None,
+                    completed_at: chrono::Utc::now(),
+                })
+                .unwrap();
+        }
+
+        let reopened = SqliteStorage::open(&db_path).unwrap();
+        let conversation = reopened
+            .load_conversation(conversation_id)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(conversation.messages.len(), 2);
+        assert_eq!(conversation.messages[1].markdown, expected_markdown);
+        assert_eq!(conversation.messages[1].status, MessageStatus::Completed);
+    }
+
+    #[test]
+    fn corrupt_database_is_quarantined_before_fresh_v2_database_opens() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("mentat.db");
+        std::fs::write(&db_path, b"not a sqlite database").unwrap();
+
+        let storage = SqliteStorage::open(&db_path).expect("corrupt DB should recover explicitly");
+        let quarantine = storage
+            .recovery_quarantine_path()
+            .expect("corrupt DB should be quarantined");
+
+        assert_eq!(storage.schema_version().unwrap(), 5);
+        assert!(quarantine.is_dir());
+        assert!(quarantine.join("mentat.db").exists());
+        assert!(db_path.exists());
     }
 }

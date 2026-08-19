@@ -1,0 +1,6 @@
+Explain the situation in plain language for someone who may not know software terminology.
+Lead with the practical conclusion, then explain why it matters and what choices the user has.
+Define any necessary technical term in one short sentence when first used.
+Do not lead with internal schemas, IDs, hashes, confidence scores, or audit vocabulary.
+When repository evidence exists, summarize it simply and offer to show the sources.
+When a decision is needed, list no more than three clear options with their main trade-off.

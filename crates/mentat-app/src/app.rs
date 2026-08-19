@@ -1051,14 +1051,17 @@ impl eframe::App for MentatApp {
                 ui.add_space(8.0);
                 let profile_before_edit = self.provider_setup.draft_profile.clone();
                 let setup_stage = self.provider_setup.stage();
-                let settings_action = SettingsPanel::new(
-                    &mut self.provider_setup.draft_profile,
-                    &mut self.persona,
-                    &self.provider_setup.catalog.models,
-                    setup_stage,
-                    &self.provider_status,
-                    self.is_provider_busy,
-                )
+                let mut legacy_remember_api_key = false;
+                let settings_action = SettingsPanel {
+                    profile: &mut self.provider_setup.draft_profile,
+                    persona: &mut self.persona,
+                    persona_is_custom: false,
+                    remember_api_key: &mut legacy_remember_api_key,
+                    available_models: &self.provider_setup.catalog.models,
+                    stage: setup_stage,
+                    provider_status: &self.provider_status,
+                    is_busy: self.is_provider_busy,
+                }
                 .show(ui);
                 self.provider_setup.reconcile_edit(&profile_before_edit);
                 if let Some(model_id) = settings_action.selected_model.as_deref() {

@@ -48,12 +48,14 @@ dirs = "6.0"
 rfd = "0.15"
 eframe = "0.30"
 egui = "0.30"
+pulldown-cmark = { version = "0.13", default-features = false }
 arboard = "3.4"
 global-hotkey = "0.6"
 url = "2.5"
-rusqlite = { version = "0.33", features = ["bundled"] }
+rusqlite = { version = "0.33", features = ["bundled", "backup"] }
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
 futures-util = "0.3"
 async-trait = "0.1"
 async-stream = "0.3"
 tempfile = "3.17"
+keyring = "4.1.6"

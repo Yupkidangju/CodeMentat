@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased] - CR-UX-001 Implementation
+
+### Added
+- 저장소 없이도 동작하는 다중 턴 `Conversation`/`ChatMessage` 자유 Markdown 기본 경로와 AppData 재실행 복원을 추가했다.
+- 1 Kernel, 4 System preset, 3 Persona factory prompt와 length-prefixed `CM_PROMPT_V1`, checksum 검증, immutable content version/atomic profile revision CAS를 추가했다.
+- SQLite v1→v4 순차 migration, online backup, corrupt DB/WAL/SHM quarantine, future schema·malformed row fail-closed 처리를 추가했다.
+- 정확히 6개인 read-only repository tool gateway, 400행/64KiB/256KiB 한도, live-hash/STALE 경계, local AgentLoop와 GroundingTrace를 추가했다.
+- `CM_TOOL_EGRESS_V1` provider/snapshot/path/range/hash/body canonical seal과 durable Prepared receipt/CAS storage를 추가했다.
+- `250×600` 기본·`240×360` 최소 세로형 대화 UI, 저장소 연결, prompt editor/version restore, Markdown/code copy, 닫기·설정·핀·새 대화 고정 제어를 추가했다.
+
+### Changed
+- 기본 실행 앱을 760px 3-Tier 감사 카드에서 사용자 resize를 보존하는 세로형 자유 대화 UI로 전환했다.
+- Persona 후처리 대신 System/Persona prompt-time 합성을 사용하며 기존 AnswerBundle 경로는 Audit 전용 validator 대상으로 격리했다.
+- 모델 검증 결과를 chat/native/emulated/repository-advisor capability로 표현할 수 있게 확장하고 현재 검증되지 않은 repository tool capability는 chat-only로 실패 폐쇄한다.
+- 기본 창을 `250×600`에서 `312.5×660`으로 확대하고, SQLite layout revision 2가 역사적 기본 크기만 1회 migration하며 사용자 custom size는 보존한다.
+- 창 크기·핀·Enter/Ctrl+Enter 전송 방식·마지막 모델 선택·Prompt/Persona 표시를 재실행 후 복원한다. 모델은 복원돼도 새 catalog/생성 검증 전 자동 활성화하지 않는다.
+
+### Security
+- 외부 provider repository tool result는 adapter의 exact provider-body gate가 durable receipt와 연결되기 전까지 `TOOL_EGRESS_CONSENT_REQUIRED`로 차단한다. 일반 chat은 활성화된 chat-capable 모델에서 동작한다.
+- API key 기억 기능은 `keyring 4.1.6`을 통해 Windows Credential Manager/macOS Keychain/Linux Secret Service를 사용한다. SQLite에는 profile-scoped reference만 저장하며 native store 실패 시 file fallback을 만들지 않는다.
+
 ## [0.1.0-dev] - 2026-08-19 (Re-audit #11 Remediation)
 
 패키지 SemVer는 `0.1.0`이며 이 항목은 그 개발 스냅샷이다.

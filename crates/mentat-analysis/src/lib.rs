@@ -1,10 +1,13 @@
+pub mod agent_loop;
 pub mod answer_bundle;
 pub mod consent;
 pub mod detector;
 pub mod egress;
 pub mod evidence;
+pub mod repository_tools;
 pub mod search;
 pub mod semantic_kernel;
+pub mod tool_egress;
 
 pub use answer_bundle::AnswerBundleNormalizer;
 pub use consent::ConsentAssemblyState;

@@ -32,6 +32,12 @@ pub enum MentatError {
     #[error("추론 백엔드 오류 [{code}]: {message}")]
     BackendError { code: String, message: String },
 
+    #[error("저장소 데이터 오류 [{code}]: {message}")]
+    StorageError { code: String, message: String },
+
+    #[error("프롬프트 오류 [{code}]: {message}")]
+    PromptError { code: String, message: String },
+
     #[error("작업이 취소되었습니다.")]
     Cancelled,
 }

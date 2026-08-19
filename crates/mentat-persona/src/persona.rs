@@ -10,6 +10,20 @@ pub enum PersonaKind {
 }
 
 impl PersonaKind {
+    pub const ALL: [Self; 3] = [
+        Self::DefaultAnalyst,
+        Self::MesugakiAnnouncer,
+        Self::ConciseAuditor,
+    ];
+
+    pub fn resource_key(self) -> &'static str {
+        match self {
+            Self::DefaultAnalyst => "persona.default_analyst.v1",
+            Self::MesugakiAnnouncer => "persona.mesugaki.v1",
+            Self::ConciseAuditor => "persona.concise_auditor.v1",
+        }
+    }
+
     pub fn display_name(&self) -> &'static str {
         match self {
             PersonaKind::DefaultAnalyst => "기본 분석가 (Default Analyst)",

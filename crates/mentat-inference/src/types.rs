@@ -1,4 +1,6 @@
 use mentat_core::error::MentatError;
+pub use mentat_core::{RepositoryToolCall, RepositoryToolResult};
+use mentat_core::{ResponseContract, SnapshotStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -214,6 +216,175 @@ pub enum InferenceEvent {
     Failed {
         error_code: String,
         message: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCapabilities {
+    pub chat_capable: bool,
+    pub native_tool_capable: bool,
+    pub emulated_tool_capable: bool,
+    pub repository_advisor_capable: bool,
+}
+
+impl AgentCapabilities {
+    pub const CHAT_ONLY: Self = Self {
+        chat_capable: true,
+        native_tool_capable: false,
+        emulated_tool_capable: false,
+        repository_advisor_capable: false,
+    };
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentLimits {
+    pub max_rounds: u8,
+    pub max_tool_calls: u16,
+    pub max_tool_result_bytes: u32,
+    pub timeout_secs: u64,
+}
+
+impl Default for AgentLimits {
+    fn default() -> Self {
+        Self {
+            max_rounds: 8,
+            max_tool_calls: 24,
+            max_tool_result_bytes: 262_144,
+            timeout_secs: 300,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentRole {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AgentMessageContent {
+    Text(String),
+    ToolCalls(Vec<RepositoryToolCall>),
+    ToolResult(RepositoryToolResult),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentMessage {
+    pub role: AgentRole,
+    pub content: AgentMessageContent,
+}
+
+impl AgentMessage {
+    pub fn user(text: impl Into<String>) -> Self {
+        Self {
+            role: AgentRole::User,
+            content: AgentMessageContent::Text(text.into()),
+        }
+    }
+
+    pub fn assistant(text: impl Into<String>) -> Self {
+        Self {
+            role: AgentRole::Assistant,
+            content: AgentMessageContent::Text(text.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub schema_version: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryContext {
+    pub repository_id: Uuid,
+    pub snapshot_id: Uuid,
+    pub snapshot_status: SnapshotStatus,
+    pub tools_available: bool,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRequest {
+    pub request_id: Uuid,
+    pub conversation_id: Uuid,
+    pub turn_id: Uuid,
+    pub profile: BackendProfile,
+    pub effective_system_prompt: String,
+    pub messages: Vec<AgentMessage>,
+    pub tools: Vec<ToolDefinition>,
+    pub repository_context: Option<RepositoryContext>,
+    pub response_contract: ResponseContract,
+    pub limits: AgentLimits,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum InferenceRoundEvent {
+    Started {
+        request_id: Uuid,
+    },
+    ThinkingDelta(String),
+    TextDelta(String),
+    ToolCallsRequested {
+        round: u8,
+        calls: Vec<RepositoryToolCall>,
+    },
+    UsageUpdate {
+        prompt_tokens: usize,
+        completion_tokens: usize,
+    },
+    RawCompleted {
+        full_text: String,
+    },
+    Failed {
+        error_code: String,
+        safe_message: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CompletedPayload {
+    AdvisorMarkdown(String),
+    ValidatedAuditBundle(mentat_core::AnswerBundle),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CancelledPayload {
+    AdvisorPartialMarkdown(String),
+    AuditNoContent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AgentEvent {
+    Started {
+        request_id: Uuid,
+    },
+    ThinkingDelta(String),
+    TextDelta(String),
+    ToolProgress {
+        round: u8,
+        completed_calls: u16,
+        total_calls: u16,
+    },
+    UsageUpdate {
+        prompt_tokens: usize,
+        completion_tokens: usize,
+    },
+    Completed {
+        payload: CompletedPayload,
+        trace_id: Option<Uuid>,
+    },
+    Cancelled {
+        payload: CancelledPayload,
+    },
+    Failed {
+        error_code: String,
+        safe_message: String,
     },
 }
 

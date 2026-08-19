@@ -7,8 +7,9 @@
 
 ## 1. 개발 환경 요구사항
 
-- **Rust 도구 체인:** Rust stable (1.80 이상)
+- **Rust 도구 체인:** Rust stable (1.88 이상, `keyring 4.1.6` MSRV)
 - **C 컴파일러 (옵션):** SQLite 번들 컴파일용 (MSVC, GCC 또는 Clang)
+- **API key 저장소:** Windows Credential Manager와 macOS Keychain은 OS 기본 기능을 사용한다. Linux에서 API key 기억 기능을 사용하려면 로그인 session에 Secret Service 호환 서비스(GNOME Keyring/KWallet 등)가 동작해야 하며, 없으면 앱은 file fallback 없이 session-only로 동작한다.
 
 ---
 

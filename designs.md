@@ -1,12 +1,146 @@
 # Code Mentat UI/UX Design Specification (designs.md)
 ## 코드 멘타트 디자인 명세서
 
-- **문서 버전:** 1.2.0
+- **문서 버전:** 2.0.0-implementation (`CR-UX-001`)
 - **표준 규격:** AI Implementation Documentation Standard Section 5
 - **기준 작성일:** 2026-08-18 (최종 갱신: 2026-08-19)
-- **동결:** 아래 뷰포트·토큰·단축키는 현재 제품 구현을 기준으로 한다 (IMP-F003).
+- **현재 상태:** `CR-0~2 PASS / CR-3~4 IN PROGRESS / CR-5 PARTIAL VERIFIED`
+- **역사적 구현:** 기존 3-Tier/Pill sections와 `MentatApp`은 v0.1 회귀·Audit migration inventory로 보존한다. 기본 실행 경로는 `MentatChatApp`이며 layout authority는 `DEC-UI-004`다.
 
 ---
+
+## 0. CR-UX-001 구현 UI 계약
+
+### 0.1 핵심 경험
+
+기본 화면은 사용자가 Mentat와 계속 대화하는 세로형 sidebar다. repository 상태, tool 조사, evidence, Audit 구조는 대화를 보조하며 기본 본문을 대체하지 않는다.
+
+```text
+┌──────────────────────────────┐ 312.5×660 default
+│ MENTAT      [+][◆][⚙][×]│
+│ AI 상태 · R/O 저장소    │
+├────────────────────────┤
+│ User                    │
+│ 오늘 너무 피곤하군요.   │
+│                        │
+│ Mentat                  │
+│ 그럴 만해요. 지금은...  │
+│                        │
+│ User                    │
+│ API 키는 어디 저장돼요? │
+│ Mentat · 조사 중 2/8    │
+│ 실제 코드를 확인할게요. │
+│ [근거 3개 보기]         │
+│                        │
+├────────────────────────┤
+│ 여러 줄 입력...         │
+│                  3/6행 │
+│ [취소]           [전송] │
+└────────────────────────┘
+```
+
+### 0.2 화면 흐름
+
+```mermaid
+stateDiagram-v2
+    [*] --> AdvisorChat: 312.5x660, last size restore
+    AdvisorChat --> Settings: overflow/settings
+    Settings --> AdvisorChat: close/cancel
+    AdvisorChat --> GroundingDrawer: evidence button
+    GroundingDrawer --> AdvisorChat: close
+    AdvisorChat --> AuditMode: explicit conversation toggle
+    AuditMode --> AdvisorChat: toggle off or restart
+    AdvisorChat --> Streaming: send
+    Streaming --> ToolProgress: provider requests repo tool
+    ToolProgress --> Consent: external repo result requires consent
+    Consent --> ToolProgress: scope granted
+    Consent --> AdvisorChat: deny/cancel
+    ToolProgress --> Streaming: tool result accepted
+    Streaming --> AdvisorChat: complete/cancel/fail
+```
+
+어떤 전이도 `ViewportCommand::InnerSize`를 보내지 않는다.
+
+Audit toggle은 다음 제출에만 적용된다. 제출 시 turn에 `AdvisorMarkdown` 또는 `AuditAnswerBundle`을 고정하고 기존 message는 재투영하지 않는다. 앱 재시작 시 현재 toggle은 Advisor로 돌아가지만 과거 Audit turn은 저장된 validated result로 표시한다. cloud Audit은 Ready repository와 repository-advisor capability가 있을 때만 활성화한다.
+
+### 0.3 반응형 구간
+
+| 폭 | 구조 |
+|---|---|
+| 240~479 | header 2행 + 단일 timeline + bottom composer, settings/evidence는 full-width drawer |
+| 480~759 | timeline + 선택적 evidence side panel |
+| 760+ | file tree/timeline/evidence 3-panel 허용 |
+
+최초 312.5×660, 최소 240×360이다. 사용자가 바꾼 크기·핀·전송 키는 AppData `ui_preferences`에서 복원하며 상태 전환은 크기를 덮어쓰지 않는다.
+
+### 0.4 주요 영역과 데이터
+
+| 영역 | 읽는 데이터 | CTA와 후속 상태 |
+|---|---|---|
+| Header | repository name/status, snapshot, model capability, mode | overflow→settings/new/delete/Audit; repo button→picker |
+| Timeline | ordered ChatMessage | evidence→message GroundingTrace drawer; copy→clipboard |
+| Composer | draft, streaming state | Enter/send→Pending; Shift+Enter→newline; stop→Cancelled |
+| Prompt settings | Kernel, PromptProfile draft/version | Apply→new revision/next turn; Cancel→active reload; reset→factory draft |
+| Model settings | provider draft/catalog/capabilities | discover→select→chat probe→tool probe→activate |
+| Privacy | conversation save, consent, deletion | revoke→tool egress block; delete→transaction/cascade |
+| Grounding | validated SourceRef | source click→exact path/range inspector |
+| Audit | AnswerBundle/Claim/Conflict | explicit transient mode only; Advisor message 불변 |
+
+### 0.5 상태 표현
+
+- Repository: `없음`, `인덱싱`, `Ready`, `STALE`, `Incomplete`를 text로 표시한다.
+- Model: `미활성`, `Chat`, `Native Tool`, `Emulated Tool`, `Advisor` capability를 분리한다.
+- Message: `전송 대기`, `응답 중`, `조사 중 round/8`, `완료`, `취소됨`, `실패`를 색상 외 text로 표시한다.
+- STALE에서는 과거 message/evidence 열람만 허용하고 repository tool CTA는 `재인덱싱 필요`로 비활성화한다.
+
+### 0.6 Prompt 설정 동작
+
+```text
+Kernel Contract [읽기 전용 펼치기]
+System preset [초보|중급|전문|시니어|사용자 정의]
+System Prompt [multiline editor]
+Persona [기본 분석가|메스카키|간결한 감사자]
+Persona Prompt [multiline editor]
+[System 기본값] [Persona 기본값] [둘 다 기본값]
+[이전 버전] [취소] [적용]
+```
+
+reset/version 선택은 draft만 바꾼다. `적용` 성공 전 active prompt와 다음 request는 바뀌지 않는다. 최초 기본은 `중급 + 기본 분석가`다.
+
+prompt draft가 dirty인 상태에서 settings/new conversation/app close를 요청하면 `계속 편집` 또는 `변경사항 폐기`를 선택하며 자동 Apply하지 않는다.
+
+### 0.7 Markdown 및 리소스 정책
+
+- CommonMark text, heading, list, emphasis, inline/fenced code를 렌더링한다.
+- code block은 별도 가로 scroll과 copy CTA를 갖는다.
+- Markdown image/file/http/svg/data-url 자동 loading은 비활성화한다.
+- link는 text로 보이며 명시적 사용자 click만 platform opener에 전달한다.
+
+### 0.8 접근성·키보드
+
+- Tab/Shift+Tab으로 header→timeline CTA→composer→send/stop 이동.
+- Enter 전송, Shift+Enter 줄바꿈; IME composition 중 Enter는 전송하지 않는다.
+- 입력 설정은 `EnterSend`(기본)와 `CtrlEnterSend`(Enter 줄바꿈, Ctrl+Enter 전송) 두 값이며 둘 다 IME composing Enter를 무시한다.
+- Escape는 현재 drawer/settings를 닫거나 진행 요청을 취소하되 창 크기를 변경하지 않는다.
+- 모든 icon-only control은 screen reader label과 tooltip을 갖는다.
+
+### 0.9 목표 검증
+
+- 240/250/479/480/759/760px headless geometry
+- 312.5×660 first run과 600×800 restart restore
+- settings/evidence/Audit/chat state transitions에서 InnerSize 0건
+- 긴 CJK/ASCII repository/model/message와 code block clip 0건
+- Advisor mode에 Claim/confidence/UUID/hash 강제 표시 0건
+- keyboard-only send/cancel/settings/evidence/close smoke
+
+---
+
+## Appendix A — NON-NORMATIVE v0.1 역사적 3-Tier 구현
+
+> 아래 전체 appendix는 현재 코드의 migration inventory일 뿐 구현 지시가 아니다. CR-UX-001 GO 이후 새 코드·테스트·UI는 여기의 Tier 크기, quick chip 기본 노출, Esc 축소, 설정 자동 확장, `InnerSize` 규칙을 참조하면 안 된다. 목표 구현 권위는 0장과 `DEC-UI-004`다.
+
+<details>
+<summary>SUPERSEDED v0.1 상세 설계 펼치기</summary>
 
 ## 1. 핵심 경험 및 제품 철학
 
@@ -20,20 +154,20 @@ Code Mentat의 UI는 **"개발자의 집중을 방해하지 않는 초경량 지
 ```mermaid
 stateDiagram-v2
     [*] --> Tier1_SmartPill: 앱 실행 (초기 대기 상태)
-    
+
     Tier1_SmartPill --> Tier2_SmartCard: 질문 입력 및 Enter / 빠른 분석 칩 클릭
     Tier1_SmartPill --> Settings_Panel: 설정 버튼 클릭
     Tier1_SmartPill --> [*]: 종료 × 또는 Ctrl+Q
-    
+
     Tier2_SmartCard --> Egress_Consent_Sheet: 클라우드 모델 첫 질의 시
     Egress_Consent_Sheet --> Egress_Rebuilding: 제외 체크박스 변경
     Egress_Rebuilding --> Egress_Consent_Sheet: 현재 generation packet 도착
     note right of Egress_Rebuilding: 승인 버튼 비활성, old packet 즉시 폐기
     Egress_Consent_Sheet --> Tier2_SmartCard: 승인 또는 취소
-    
+
     Tier2_SmartCard --> Tier3_DetailedInspector: [▾ 소스 증거 인스펙터 열기] 클릭
     Tier3_DetailedInspector --> Tier2_SmartCard: [▴ 소스 증거 인스펙터 접기] 또는 Esc
-    
+
     Tier2_SmartCard --> Tier1_SmartPill: [✖ 접기] 또는 Esc
     Settings_Panel --> Tier1_SmartPill: [✖ 닫기] 또는 Esc
 ```
@@ -153,3 +287,5 @@ stateDiagram-v2
 4. 내장 로컬은 항상 공급자 선택지에 표시하지만 실행 엔진이나 설치 모델이 없으면 이유를 표시하고 활성화 버튼을 비활성한다.
 5. Active 프로필은 설정 편집 중인 Draft와 분리하며, 활성화 전에는 기존 Active 프로필이 계속 사용된다.
 6. 공급자 설정 패널은 `760x480px`이며 모델 검색·검증·활성화 상태와 오류 메시지가 잘리지 않아야 한다.
+
+</details>

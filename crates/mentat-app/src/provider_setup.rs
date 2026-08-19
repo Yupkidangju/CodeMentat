@@ -1,4 +1,4 @@
-use mentat_inference::{BackendProfile, ModelCatalog, ModelVerification};
+use mentat_inference::{AgentCapabilities, BackendProfile, ModelCatalog, ModelVerification};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderSetupStage {
@@ -12,18 +12,20 @@ pub struct ProviderSetupState {
     pub draft_profile: BackendProfile,
     pub catalog: ModelCatalog,
     verified_profile: Option<BackendProfile>,
+    verified_capabilities: Option<AgentCapabilities>,
     active_profile: Option<BackendProfile>,
+    active_capabilities: Option<AgentCapabilities>,
 }
 
 impl ProviderSetupState {
-    pub fn new(mut draft_profile: BackendProfile) -> Self {
-        // 저장된 모델 ID는 현재 자격 증명으로 다시 검색하기 전까지 신뢰하지 않는다.
-        draft_profile.model.clear();
+    pub fn new(draft_profile: BackendProfile) -> Self {
         Self {
             draft_profile,
             catalog: ModelCatalog::from_untrusted(Vec::new()),
             verified_profile: None,
+            verified_capabilities: None,
             active_profile: None,
+            active_capabilities: None,
         }
     }
 
@@ -53,15 +55,23 @@ impl ProviderSetupState {
             return Err("활성화할 수 있는 모델이 없습니다.".to_string());
         }
         self.catalog = catalog;
-        self.draft_profile.model.clear();
+        if !self
+            .catalog
+            .models
+            .iter()
+            .any(|model| model.id == self.draft_profile.model)
+        {
+            self.draft_profile.model.clear();
+        }
         self.verified_profile = None;
+        self.verified_capabilities = None;
         Ok(())
     }
 
     pub fn begin_discovery(&mut self) -> BackendProfile {
         self.catalog = ModelCatalog::from_untrusted(Vec::new());
-        self.draft_profile.model.clear();
         self.verified_profile = None;
+        self.verified_capabilities = None;
         self.draft_profile.clone()
     }
 
@@ -84,6 +94,7 @@ impl ProviderSetupState {
         }
         self.draft_profile.model = model_id.to_string();
         self.verified_profile = None;
+        self.verified_capabilities = None;
         Ok(())
     }
 
@@ -107,6 +118,23 @@ impl ProviderSetupState {
             return Err(verification.message);
         }
         self.verified_profile = Some(requested_profile.clone());
+        self.verified_capabilities = Some(AgentCapabilities::CHAT_ONLY);
+        Ok(())
+    }
+
+    pub fn accept_capability_verification(
+        &mut self,
+        requested_profile: &BackendProfile,
+        verification: ModelVerification,
+        capabilities: AgentCapabilities,
+    ) -> Result<(), String> {
+        self.accept_verification(requested_profile, verification)?;
+        if !capabilities.chat_capable {
+            self.verified_profile = None;
+            self.verified_capabilities = None;
+            return Err("선택 모델의 chat capability가 확인되지 않았습니다.".to_string());
+        }
+        self.verified_capabilities = Some(capabilities);
         Ok(())
     }
 
@@ -115,11 +143,16 @@ impl ProviderSetupState {
             return Err("현재 설정과 일치하는 모델 검증이 필요합니다.".to_string());
         }
         self.active_profile = Some(self.draft_profile.clone());
+        self.active_capabilities = self.verified_capabilities;
         Ok(())
     }
 
     pub fn active_profile(&self) -> Option<&BackendProfile> {
         self.active_profile.as_ref()
+    }
+
+    pub fn active_capabilities(&self) -> Option<AgentCapabilities> {
+        self.active_capabilities
     }
 
     pub fn reconcile_edit(&mut self, previous: &BackendProfile) {
@@ -132,8 +165,10 @@ impl ProviderSetupState {
             self.catalog = ModelCatalog::from_untrusted(Vec::new());
             self.draft_profile.model.clear();
             self.verified_profile = None;
+            self.verified_capabilities = None;
         } else if previous.model != self.draft_profile.model {
             self.verified_profile = None;
+            self.verified_capabilities = None;
         }
     }
 }
@@ -187,6 +222,10 @@ mod tests {
         setup.activate().expect("activation");
         assert_eq!(setup.stage(), ProviderSetupStage::Active);
         assert_eq!(setup.active_profile().unwrap().model, "dynamic");
+        assert_eq!(
+            setup.active_capabilities(),
+            Some(AgentCapabilities::CHAT_ONLY)
+        );
     }
 
     #[test]
@@ -237,5 +276,30 @@ mod tests {
             )
             .is_err());
         assert!(setup.catalog.models.is_empty());
+    }
+
+    #[test]
+    fn restored_model_is_visible_but_requires_fresh_catalog_and_verification() {
+        let mut saved = draft();
+        saved.model = "previous-model".to_string();
+        let mut setup = ProviderSetupState::new(saved);
+
+        assert_eq!(setup.draft_profile.model, "previous-model");
+        assert_eq!(setup.stage(), ProviderSetupStage::Draft);
+        assert!(setup.activate().is_err());
+
+        let requested = setup.begin_discovery();
+        setup
+            .accept_catalog(
+                &requested,
+                ModelCatalog::from_untrusted(vec![AvailableModel::new(
+                    "previous-model",
+                    "Previous Model",
+                )]),
+            )
+            .unwrap();
+        assert_eq!(setup.draft_profile.model, "previous-model");
+        assert_eq!(setup.stage(), ProviderSetupStage::ModelsDiscovered);
+        assert!(setup.verification_request().is_ok());
     }
 }

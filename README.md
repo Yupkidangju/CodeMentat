@@ -6,14 +6,24 @@
 
 Code Mentat는 로컬 소프트웨어 저장소(Repository)를 **완전한 읽기 전용(Read-Only)** 경계에서 조사하고, 프로젝트의 실제 구현, 설계 의도, 문서 간 정합성을 증거 기반으로 분석하여 조언을 제공하는 독립형 데스크톱 위젯 애플리케이션입니다.
 
+### CR-UX-001 구현 상태 / Implementation Status / 実装状況 / 實作狀態 / 实现状态
+
+- **한국어:** 세로형 자유 대화 UI, Conversation/Prompt 저장, 읽기 전용 tool gateway와 canonical receipt 기반이 구현되었습니다. 일반 chat은 활성 모델에서 동작하며 외부 저장소 tool result 전송은 exact-body gate 연결 전까지 안전하게 차단됩니다.
+- **English:** The vertical chat UI, conversation/prompt persistence, read-only tool gateway, and canonical receipt foundation are implemented. General chat works with an activated model; external repository tool-result transmission remains fail-closed until the exact-body gate is connected.
+- **日本語:** 縦型チャット UI、会話・プロンプト保存、読み取り専用ツールゲートウェイ、canonical receipt 基盤を実装しました。通常チャットは有効化済みモデルで動作し、外部へのリポジトリ tool result 送信は exact-body gate 接続まで遮断されます。
+- **繁體中文:** 已實作直向聊天 UI、對話／提示詞保存、唯讀工具閘道與 canonical receipt 基礎。一般聊天可使用已啟用模型；外部儲存庫工具結果在 exact-body gate 完成前維持封閉。
+- **简体中文:** 已实现纵向聊天 UI、对话／提示词保存、只读工具网关与 canonical receipt 基础。普通聊天可使用已启用模型；外部仓库工具结果在 exact-body gate 完成前保持关闭。
+
+상세 계획 / Details: [ROADMAP.md](ROADMAP.md), [CR-UX-001_TRACEABILITY.md](CR-UX-001_TRACEABILITY.md)
+
 ---
 
 ## 🌟 주요 특징 (Key Features)
 
-1. **컴팩트 스마트 알약 위젯 (3-Tier Progressive Disclosure)**
-   - **Tier 1 (Smart Pill, 760×56):** 흰색 고대비 스위스 스타일의 검색 바. 긴 저장소명은 ellipsis/tooltip으로 제한하고 고정·설정·종료를 우측에 보존합니다. `종료 ×`와 `Ctrl+Q`로 언제든 안전하게 종료 가능 (`Alt+Space` / `Ctrl+Alt+M`은 전역 표시·포커스 및 안전 접기)
-   - **Tier 2 (Smart Card):** 질문 시 스트리밍 답변과 핵심 주장 태그(`[OBSERVED]`, `[INFERRED]`, `[CONFLICT]`)를 요약 노출
-   - **Tier 3 (Detailed Inspector):** 클릭 시 펼쳐지는 실제 소스코드 행 번호 뷰어 및 관련 파일 트리
+1. **세로형 자유 대화 멘토 UI**
+   - 최초 `312.5×660`, 최소 `240×360`이며 사용자가 조절한 크기·핀·전송 키 설정을 AppData에 복원합니다.
+   - 닫기·설정·핀·새 대화는 상단 고정 영역에 유지되고 상태 전환이 창 크기를 강제로 바꾸지 않습니다.
+   - 다중 턴 timeline, 3행 composer, Shift+Enter 줄바꿈, 스트리밍 취소, CommonMark/code block 복사를 제공합니다.
 2. **엄격한 읽기 전용 불변조건 (Strict Read-Only Guarantee)**
    - 저장소 파일을 수정하거나 셸/빌드/Git 변경 명령을 실행하지 않습니다.
    - 상위 경로 탈출 및 악성 프롬프트 인젝션 텍스트는 순수 데이터로만 안전하게 격리됩니다.
@@ -23,16 +33,16 @@ Code Mentat는 로컬 소프트웨어 저장소(Repository)를 **완전한 읽�
    - **OpenAI & Local Compatible:** OpenAI 공식 API와 호환 서버 또는 내장 로컬 런타임
    - 모델 ID는 코드 프리셋이 아니라 현재 API 키/로컬 런타임이 반환한 목록에서 동적으로 선택합니다.
    - `API 확인 및 모델 불러오기 → 선택 모델 호환성 확인 → 활성화`를 통과한 동일 프로필만 프로그램 AI로 사용합니다.
+   - API key 저장을 선택하면 Windows Credential Manager/macOS Keychain/Linux Secret Service에 보관하고 SQLite에는 profile-scoped reference만 기록합니다.
    - 내장 로컬은 항상 선택 가능하지만 실행 엔진 또는 설치 모델이 없으면 이유를 표시하고 활성화를 차단합니다.
 4. **오프라인 로컬 분석 워크플로 (Offline Workflows)**
    - 외부 AI 없이도 `/onboard`, `/structure`, `/conflicts`, `/where` 명령으로 프로젝트 구조, 매니페스트, 권위 문서를 로컬에서 즉시 분석
-5. **페르소나 레이어 & 조용한 아나운서 (Persona & Quiet Announcer)**
-   - 기본 분석가, 메스카키 아나운서(Mesugaki), 간결한 감사자 페르소나 전환 지원
-   - 페르소나를 변경해도 **모든 주장과 증거 팩트는 100% 동일하게 보존**
-   - 중요도 0~3은 무간섭, 중요도 5(외부 전송)만 승인 시트로 노출
+5. **Prompt Profile과 응답 스타일**
+   - 읽기 전용 Kernel, 4개 System 숙련도 preset, 3개 Persona와 사용자 편집을 지원합니다.
+   - Edit/Reset/과거 version 선택은 draft만 바꾸며 Apply한 atomic revision이 다음 턴부터 적용됩니다.
 6. **Egress Consent & 프라이버시 쉴드**
    - 클라우드 API 전송 전 `.env`, 키 파일, 인증서 등 민감정보 파일 자동 배제 및 1회 승인 시트 제공
-   - 모델 narrative는 진단 데이터로만 보존하고, UI 주요 답변은 검증된 claim/evidence에서만 합성
+   - 일반 Advisor 답변은 모델의 자유 Markdown을 보존하고, 구조화 claim/evidence는 명시적 Audit validator에서만 사용합니다.
    - Cloud Inferred/Proposed/Conflict와 ConflictItem도 유효하고 중복 없는 evidence를 요구
    - 저장소가 `STALE`이면 신규 분석을 차단하고 재인덱싱 전 live file과 이전 hash 혼합을 허용하지 않음
    - 파일 watcher의 event-loss/unknown 신호와 ignore 규칙 변경은 즉시 STALE로 실패 폐쇄
@@ -43,19 +53,18 @@ Code Mentat는 로컬 소프트웨어 저장소(Repository)를 **완전한 읽�
 
 | 단축키 | 기능 |
 |---|---|
-| `Alt + Space` / `Ctrl + Alt + M` | OS 전역 표시·포커스 및 Tier 1 접기. self-unhide 불능을 막기 위해 창을 숨기지 않음 |
-| `/` 또는 `Ctrl + K` | 질문 입력창 포커스 |
-| `Esc` | 단계별 축소 (Inspector → Card → Pill), 스트리밍·인덱싱 취소 |
-| `Ctrl + P` | Always-on-Top 최상위 핀 고정 토글 |
+| `Alt + Space` / `Ctrl + Alt + M` | OS 전역 표시·포커스 요청 |
+| `Esc` | 스트리밍·인덱싱 취소 또는 설정 닫기 |
 | `Ctrl + Q` | 진행 작업을 취소하고 Code Mentat 종료 |
-| `Enter` | 질문 전송 및 Egress 승인 |
+| `Enter` | 메시지 전송 |
+| `Shift + Enter` | composer 줄바꿈 |
 
 ---
 
 ## 📦 빠른 시작 (Quick Start)
 
 ### 필수 요구사항
-- [Rust](https://www.rust-lang.org/) (1.80+ 권장)
+- [Rust](https://www.rust-lang.org/) (1.88+ 필요)
 
 ### 빌드 및 실행
 ```bash
@@ -83,11 +92,11 @@ Windows는 `./scripts/build.ps1`, Linux/macOS는 `sh ./scripts/build.sh`로 같�
 
 ### UI 문제 해결 / UI Troubleshooting / UI トラブルシューティング / UI 疑難排解 / UI 故障排除
 
-- **한국어:** 내장 한글 폴백 글꼴과 불투명 흰색 고대비 테마로 사각형 글리프와 흐린 글자를 방지합니다. 설정·질문·증거 패널은 자동 확장되며 상단의 `종료 ×`로 앱을 닫을 수 있습니다.
-- **English:** The embedded Korean fallback font and opaque high-contrast white theme prevent square glyphs and faint text. Settings, chat, and evidence panels resize automatically, and `Close ×` exits the app.
-- **日本語:** 内蔵の韓国語フォールバックフォントと不透明な高コントラスト白テーマで、文字化けと読みにくい文字を防ぎます。各パネルは自動拡張され、`終了 ×`でアプリを閉じられます。
-- **繁體中文:** 內嵌韓文字型與不透明的高對比白色主題可避免方框字元及文字過淡。設定、對話與證據面板會自動展開，並可用 `結束 ×` 關閉程式。
-- **简体中文:** 内置韩文字体和不透明高对比白色主题可避免方框字符与文字过淡。设置、对话和证据面板会自动展开，并可用 `退出 ×` 关闭程序。
+- **한국어:** 내장 한글 폴백과 흰색 고대비 테마로 네모 글리프와 흐린 글자를 방지합니다. 창은 자유롭게 조절되며 상태 변경 후에도 크기를 유지하고 `×`로 닫을 수 있습니다.
+- **English:** The embedded Korean fallback and high-contrast white theme prevent missing-glyph squares and faint text. The window is freely resizable, keeps its size across state changes, and closes with `×`.
+- **日本語:** 内蔵韓国語フォールバックと高コントラスト白テーマで文字化けを防ぎます。ウィンドウは自由にリサイズでき、状態変更後もサイズを保ち、`×`で閉じられます。
+- **繁體中文:** 內嵌韓文字型與高對比白色主題可避免方框字元。視窗可自由調整大小、狀態切換後保持尺寸，並可用 `×` 關閉。
+- **简体中文:** 内置韩文字体与高对比白色主题可避免方框字符。窗口可自由调整大小、状态切换后保持尺寸，并可用 `×` 关闭。
 
 ### Gemini 활성화 문제 해결 / Gemini Activation Troubleshooting / Gemini 有効化 / Gemini 啟用 / Gemini 激活
 

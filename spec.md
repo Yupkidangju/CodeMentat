@@ -1,12 +1,13 @@
 # Code Mentat Canonical Specification (spec.md)
 ## 코드 멘타트 활성 실행 명세서 및 마스터 요구사항 추적 매트릭스
 
-- **문서 버전:** 0.1.0-dev (Turn 13 / Re-audit #10 Remediation)
+- **문서 버전:** 0.2.0-plan (`CR-UX-001` / CR-0)
 - **패키지 버전 (Cargo workspace SemVer):** `0.1.0`
-- **버전 정책:** Cargo `0.1.0`이 패키지/바이너리 버전이다. `0.1.0-dev`는 동일 0.1.0 라인의 미릴리스 문서·개발 상태 표기이며 별도 제품 버전이 아니다.
-- **문서 권위:** `CODE_MENTAT_SPEC.md`는 마스터 요구사항 베이스라인(Baseline)이며, 본 `spec.md`는 baseline 요구사항의 정의, 수용 기준 및 ID를 1:1 원본 그대로 보존하고 현재 구현/검증 상태를 추적하는 활성 실행 명세서임 (DEC-ARCH-003).
+- **버전 정책:** Cargo `0.1.0`이 현재 패키지/바이너리 버전이다. 문서 `0.2.0-plan`은 `CR-UX-001` 목표 계약 버전이며 출시된 패키지 버전이 아니다. 역사적 `0.1.0-dev`는 v0.1 기준선의 미릴리스 문서 상태다.
+- **문서 권위:** `CODE_MENTAT_SPEC.md`의 v0.1 baseline은 역사적 원문으로 보존한다. 최신 제품 방향은 `Code Mentat 자유 대화형 저장소 멘토 전환 변경요청서.md`와 v0.2 extension이며, 본 문서는 baseline과 CR 요구사항의 구현 상태를 함께 추적한다.
+- **현재 상태:** `CR-0~2 PASS — CR-3~4 IMPLEMENTATION IN PROGRESS`
 - **표준 규격:** D3D Protocol v1.3 / AI Implementation Documentation Standard
-- **기준 작성일:** 2026-08-18 (최종 갱신: 2026-08-19)
+- **기준 작성일:** 2026-08-18 (최종 갱신: 2026-08-19, CR-UX-001 계획)
 
 ---
 
@@ -75,7 +76,7 @@
 | **CON-004** | 모델 출력은 증거가 아니며 저장소 증거와 분리 저장한다. | Implemented | `Claim`과 `EvidenceRef` 엔티티 분리 |
 | **CON-005** | 백엔드가 지원하더라도 도구 호출, 셸, 파일 쓰기 기능을 모델에 제공하지 않는다. | Implemented | 코어 API에 도구 호출 원천 부재 |
 | **CON-006** | 초기 빌드는 llama.cpp 또는 GGUF 모델이 없어도 모든 초기 기능이 동작해야 한다. | Implemented | 순수 Rust 계약 스위트로 분리 (`CON-001`) |
-| **CON-007** | API 키·토큰·민감 헤더를 평문 DB, 로그, 크래시 리포트에 저장하지 않는다. | Partial | SQLite에 키 미저장, Debug 적색. 세션 메모리 `Option<String>` 및 크래시 리포트 경계는 후속 |
+| **CON-007** | API 키·토큰·민감 헤더를 평문 DB, 로그, 크래시 리포트에 저장하지 않는다. | Implemented+Verified | API key는 OS native credential store, SQLite는 profile reference만 저장; Debug redaction/native round-trip/DB byte scan 통과 |
 | **CON-008** | 외부 API가 OpenAI 호환이라고 주장해도 기능은 능력 탐지와 실제 응답 검증 후에만 사용한다. | Implemented | 모델 목록 응답 검증, 선택 모델 최소 생성 프로브, 검증 프로필과 활성 프로필의 완전 일치 게이트를 적용한다. |
 
 ### 1.4 Derived Requirements
@@ -116,6 +117,8 @@ Draft
 
 ### 1.7 Verified Answer Projection 보강 요구사항
 
+> **CR-UX-001 상태:** `SUPERSEDED IN DEFAULT ADVISOR MODE`; 아래 규칙은 Audit Mode에만 유지한다.
+
 - cloud `direct_answer`는 신뢰 입력이며 UI 주요 본문에 직접 표시하지 않는다.
 - citation/confidence invariant를 통과하고 `Unknown`이 아닌 claim만 canonical answer 합성에 참여한다.
 - Cloud `Observed`/`Inferred`/`Proposed`/`Conflict` claim은 모두 최소 1개의 유효 evidence를 요구한다.
@@ -123,6 +126,8 @@ Draft
 - 검증 가능한 claim이 없으면 고정된 “검증된 근거 기반 답변 없음” 상태를 표시하고 모델 원문은 `raw_model_response`로만 보존한다.
 
 ### 1.8 고대비 스위스 UI 및 종료 수명주기 요구사항
+
+> **CR-UX-001 상태:** 고대비/글꼴/종료 lifecycle은 유지하고 3-Tier 크기·강제 resize는 `DEC-UI-004`로 대체한다.
 
 - 프레임리스 창은 Tier 1 우측 끝에 항상 보이는 `종료 ×` 버튼을 제공한다. 설정 패널의 `패널 닫기`와 프로그램 종료를 용어와 동작으로 구분한다.
 - `종료 ×` 또는 `Ctrl+Q`를 받으면 추론·인덱싱 취소 토큰을 먼저 취소하고 비동기 수신 채널과 동의 조립 상태를 폐기한 뒤 `ViewportCommand::Close`를 요청한다. 전역 단축키와 watcher는 소유 객체의 Drop 수명주기로 해제한다.
@@ -140,3 +145,97 @@ Draft
 - 명시적 target triple은 `rustup target list --installed` 결과에 있어야 한다. 미설치 타깃이나 필요한 linker/SDK가 없으면 host 산출물로 대체하지 않고 원인과 준비 명령을 표시하며 실패한다.
 - `--gates`는 build 전에 formatter, strict Clippy, workspace tests를 순서대로 실행한다. 모든 Cargo 호출은 `--locked`를 사용하고 빌드 대상 package는 `mentat-app`으로 고정한다.
 - `--dry-run`은 파일·도구 상태를 변경하지 않고 실행할 명령과 예상 산출물만 출력한다.
+
+---
+
+## 2. CR-UX-001 현재 제품 계약
+
+Code Mentat의 목표 제품은 저장소 유무와 무관하게 대화할 수 있고, 저장소 고유 사실이 필요할 때만 bounded read-only tools로 실제 조사하는 멘토다. Advisor Mode 최종 본문은 자유 Markdown이며 증거는 `GroundingTrace`로 분리한다. 2026-08-19 사용자 `CR-UX-001 GO` 승인에 따라 CR-1부터 순차 구현한다.
+
+### 2.1 신규 기능 요구사항 추적
+
+| ID | 요구사항 | 소유 단계 | 계획 소유 파일 | 계획 검증 | 상태 |
+|---|---|---|---|---|---|
+| FR-027 | 저장소 없이 자유 대화 | CR-2 | analysis orchestrator, fake inference, app chat | no-repo chat/tool 0 | Implemented+Verified |
+| FR-028 | 혼합 대화 | CR-2/7 | core conversation, orchestrator, storage | mixed-turn context | Partial — storage/history |
+| FR-029 | 다중 턴 연속성 | CR-2/7 | history/compaction | follow-up before/after compact | Not Implemented |
+| FR-030 | 자율 저장소 조사 | CR-3 | analysis AgentLoop/ToolGateway | no-path-hint discovery | Partial — local loop |
+| FR-031 | 읽기 전용 도구 집합 | CR-3 | core repository port, analysis registry | six-tool/no-write API | Implemented+Verified |
+| FR-032 | 공급자 독립 Agent Loop | CR-3/7 | inference contract, provider adapters | provider semantic suite | Partial |
+| FR-033 | 자유 Markdown 최종 답변 | CR-2 | AgentEvent/orchestrator/storage/UI | stream=complete=reload | Implemented+Verified |
+| FR-034 | 근거 요청 및 출처 표시 | CR-3/6 | SourceRef/Trace/drawer | path/range jump | Partial — drawer pending |
+| FR-035 | 편집 가능한 System Prompt | CR-1/5 | core prompt, persona composer, settings | next-turn apply | Implemented+Verified |
+| FR-036 | 분석·응답 수준 프리셋 | CR-1/5 | 4 prompt assets/settings | checksum/custom transition | Implemented+Verified |
+| FR-037 | 편집 가능한 Persona Prompt | CR-1/5 | persona assets/composer/settings | style/fact invariant | Implemented+Verified |
+| FR-038 | 공장 기본값 복원 | CR-1/5 | factory loader/draft state | byte equality before apply | Implemented+Verified |
+| FR-039 | 프롬프트 영속·복구 | CR-1/7 | storage prompt/version migration | reopen/latest 5/fallback | Partial — retention hardening |
+| FR-040 | 반응형 세로형 UI | CR-5 | app viewport/chat/preferences | 240~760 geometry/native resize | Partial Verified |
+| FR-041 | 유효 프롬프트 확인 | CR-1/5 | PromptComposition/settings preview | Kernel RO/secrets 0 | Implemented+Verified |
+| FR-042 | 대화형 코더 프롬프트 출력 | CR-2/6 | ordinary chat path | code block/special UI 0 | Implemented |
+| FR-043 | Audit Mode 분리 | CR-6 | Advisor/Audit projections | Advisor audit fields 0 | Partial |
+| FR-044 | 동적 조사 Egress 동의 | CR-4 | consent/tool receipt/trace | zero-before-consent/tamper | Partial — adapter gate pending |
+| FR-045 | 저장소 조언 능력 게이트 | CR-7 | verification/setup UI | 4-capability matrix | Partial — chat-only honest |
+| FR-046 | 안정적인 스트리밍 | CR-2 | stream reducer/message status | no terminal replacement | Implemented+Verified |
+| FR-047 | 대화 세션 관리 | CR-1/5 | conversation store/chat/privacy | new/delete/reopen/no repo write | Partial Verified |
+
+### 2.2 신규 비기능 요구사항 추적
+
+| ID | 요구사항 | 소유 단계 | 계획 검증 | 상태 |
+|---|---|---|---|---|
+| NFR-014 | 사용자 이해 가능성 | CR-1/2/7 | beginner response policy fixture | Not Implemented |
+| NFR-015 | 자유 출력 보존 | CR-2 | Unicode/Markdown byte preservation | Implemented+Verified |
+| NFR-016 | Agent Loop 한계와 취소 | CR-3 | 8 rounds/24 calls/300s/cancel | Partial Verified |
+| NFR-017 | 조사 자원 한도 | CR-3 | 400 lines/64KiB/256KiB omissions | Implemented+Verified |
+| NFR-018 | 프롬프트 복구 가능성 | CR-1/7 | corrupt DB quarantine/factory boot | Implemented+Verified |
+| NFR-019 | 공급자 기능 동등성 | CR-3/7 | identical semantic event traces | Not Implemented |
+| NFR-020 | 반응형 UI 가독성 | CR-5 | 250px no clip/scroll/copy | Partial Verified |
+| NFR-021 | 근거 추적성 | CR-3/6 | reverse trace and chat trace 0 | Partial — drawer pending |
+| NFR-022 | 대화 프라이버시 | CR-1/4/7 | AppData/delete/repo write 0 | Partial Verified |
+| NFR-023 | 관찰 가능성 | CR-2/3/4 | ID-only structured log capture | Not Implemented |
+| NFR-024 | 접근성 | CR-5/6 | keyboard-only and labels | Not Implemented |
+
+### 2.3 신규 제약조건 추적
+
+| ID | 제약 | 소유 단계 | 계획 강제/검증 | 상태 |
+|---|---|---|---|---|
+| CON-009 | Advisor 최종 답변 schema 강제 금지 | CR-2/6 | Advisor contract schema 0 | Implemented+Verified |
+| CON-010 | Claim 합성으로 정상 본문 교체 금지 | CR-2/6 | composer call 0 | Implemented+Verified |
+| CON-011 | 저장소 없음으로 일반 대화 차단 금지 | CR-2 | repository None success | Implemented+Verified |
+| CON-012 | Persona 후처리 전용 구현 금지 | CR-1/2 | default Renderer call 0 | Implemented+Verified |
+| CON-013 | write/exec repository tool 금지 | CR-3 | sealed enum/API surface | Implemented+Verified |
+| CON-014 | 상태 기반 창 크기 강제 금지 | CR-5 | InnerSize event 0 | Implemented+Verified |
+| CON-015 | 별도 Prompt Builder 금지 | CR-2/6 | type/screen/export 0 | Implemented+Verified |
+| CON-016 | 전체 repo/chat 무차별 전송 금지 | CR-3/7 | byte/history budgets | Not Implemented |
+| CON-017 | repository instruction 권한 상승 금지 | CR-1/3 | prompt/tool digest invariant | Implemented+Verified |
+| CON-018 | Audit 규칙 Advisor 누출 금지 | CR-6 | Advisor widget inventory | Not Implemented |
+| CON-019 | factory prompt DB source 금지 | CR-1 | versioned asset checksum | Implemented+Verified |
+
+상세 정의·수용 기준·양방향 매핑은 `CODE_MENTAT_SPEC.md` v0.2 extension과 `CR-UX-001_TRACEABILITY.md`를 따른다. factory Prompt 원문과 합성 규칙은 `PROMPT_CONTRACT.md`가 담당한다.
+
+## 3. Baseline 영향 및 supersede overlay
+
+| 기존 항목 | 현재 상태 | CR 대체/보존 |
+|---|---|---|
+| FR-009 | EXTENDED | repository-only single turn에서 optional-repo multi-turn chat으로 확장 |
+| FR-010~012 | RETAINED IN AUDIT MODE | Advisor 기본 출력에서는 분류 강제 안 함 |
+| FR-016 | EXTENDED | dynamic tool batch consent/receipt 추가 |
+| FR-017 | EXTENDED | AgentRequest/Event/capability 계약 추가 |
+| FR-019 | EXTENDED/RETAINED | 선택·사실 불변은 유지, post-render 구현만 superseded |
+| FR-021 | MOVED TO ADVANCED/AUDIT | slash workflow 기본 노출 제거 |
+| FR-023 | EXTENDED | conversation/prompt/trace/preferences AppData 추가 |
+| CON-005 | SUPERSEDED/REFINED IN ADVISOR MODE | read-only tools 허용; shell/write/process 금지 유지 (`CON-013`) |
+| DEC-SEC-009 | SUPERSEDED IN ADVISOR | Audit Mode 유지 (`DEC-CONV-001`) |
+| DEC-UI-001/003 | LAYOUT SUPERSEDED | 세로형 resize-preserving UI (`DEC-UI-004`) |
+| ADR-005/DEC-PER-001 | DEFAULT PATH SUPERSEDED | pre-inference prompt composition (`DEC-PROMPT-001`) |
+
+## 4. 구현 승인 상태
+
+CR completion의 100%는 신규 43개 요구사항과 직접 영향 legacy overlay에 한정한다. 1장의 비관련 baseline `Partial`은 CR exit를 자동 차단하지 않지만 전체 제품 100% 완료 주장은 차단하며 별도 상태로 계속 보고한다.
+
+```text
+CR requirements planned: 43/43
+CR requirements implemented: 0/43
+CR-0 documentation: REVIEW READY
+Source implementation: AUTHORIZED — CR-3~4 IN PROGRESS
+Approval received: 2026-08-19 CR-UX-001 GO
+```

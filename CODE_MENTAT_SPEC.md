@@ -3,18 +3,29 @@
 > Treat requirement IDs, accepted decisions, phase boundaries, tests, and exit criteria as binding.
 > Preserve unrelated user changes and record any necessary deviation before implementing it.
 > Execute only the currently authorized phase; stop at its exit gate.
-> Do not begin implementation unless the final handoff says `Phase 1 GO`.
+> Current authority override: do not begin CR-UX-001 implementation unless the current user handoff says `CR-UX-001 GO`. Historical `Phase 1 GO` text is not implementation authority for this change.
 
 # Code Mentat 개발 사양서
 
 - 문서 유형: 구현 준비 완료 마스터 사양서
-- 문서 버전: 0.1.0
+- 문서 버전: 0.2.0
 - 작성일: 2026-08-17
-- 상태: `APPROVED FOR PHASED IMPLEMENTATION`
-- 제품 유형: 로컬 우선, 읽기 전용, 멀티플랫폼 데스크톱 저장소 조언자
+- 상태: `CR-0~2 PASS — CR-3~4 IMPLEMENTATION IN PROGRESS`
+- 제품 유형: 로컬 우선, 읽기 전용, 멀티플랫폼 자유 대화형 저장소 멘토
 - 구현 언어: Rust
 - 초기 추론 방식: OpenAI 호환 HTTP API
 - 예정 추론 방식: 앱에 네이티브로 내장되는 llama.cpp 기반 로컬 추론 백엔드
+
+## 0. 현재 권위와 v0.1 baseline 보존
+
+이 문서의 1~22장은 v0.1 요구사항과 과거 Phase 1~5의 역사적 baseline을 보존한다. 삭제하거나 ID 의미를 재사용하지 않는다. 최신 제품 계약은 `Code Mentat 자유 대화형 저장소 멘토 전환 변경요청서.md`와 23장의 CR-UX-001 v0.2 extension이다. 충돌 시 다음 overlay를 적용한다.
+
+- 기본 Advisor 답변은 자유 Markdown이며 Claim/AnswerBundle은 Audit Mode로 이동한다.
+- 저장소 없는 일반 대화를 허용한다.
+- 읽기 전용 repository tool만 모델 주도 조사에 허용한다. shell/write/process 금지는 유지한다.
+- Persona는 기본 Advisor 경로에서 모델 호출 전 prompt로 합성한다.
+- 3-Tier 강제 resize는 세로형 사용자-resize 보존 UI로 대체한다.
+- 현재 단계는 문서 계획 검토이며 코드 구현은 승인되지 않았다.
 
 ## 1. 실행 요약
 
@@ -984,5 +995,95 @@ stateDiagram-v2
 | 5. Decision status | PASS | 주요 기술·권한·백엔드·저장 결정은 `CONFIRMED`, `ASSUMED`, `DEFERRED`로 분류되었고 차단 `OPEN` 결정이 없다. crate 버전/MSRV는 P1 검증 항목이며 제품 방향을 바꾸지 않는다. |
 | 6. Scope control | PASS | P1~P5 산출물은 FR/NFR 또는 필수 감사에 연결된다. 코드 쓰기·셸·실제 llama.cpp·MCP·원격 Git·클라우드 동기화는 3.2에서 제외되어 초기 로드맵에 유입되지 않았다. |
 
-Completion Gate: PASS
-Phase 1 GO
+Historical v0.1 Completion Gate: PASS
+Historical handoff: Phase 1 GO (v0.1 implementation only; CR-UX-001 authority 없음)
+
+---
+
+## 23. CR-UX-001 v0.2 요구사항 확장
+
+### 23.1 현재 제품 정의
+
+> 사용자는 저장소가 열려 있든 없든 Mentat와 자유롭게 대화한다. 일반 대화에는 자연스럽게 응답하고, 현재 저장소의 사실이 필요할 때 bounded read-only tools로 실제 파일·문서·설계·이력을 조사한 뒤 사용자의 수준과 Persona에 맞는 자유 Markdown 답변을 제공한다. 출처와 내부 감사 구조는 답변 본문과 분리한다.
+
+### 23.2 기능 요구사항 FR-027~047
+
+| ID | 요구사항 | 검증 가능한 수용 기준 |
+|---|---|---|
+| FR-027 | 저장소 없이 자유 대화 | 저장소가 열리지 않은 상태에서 잡담·일반 질문을 보내면 자연스러운 스트리밍 응답이 오고 repository tool 호출은 0건이다. |
+| FR-028 | 혼합 대화 | 같은 session에서 잡담→저장소 질문→후속 질문→잡담 전환이 가능하며 대화 문맥이 유지된다. |
+| FR-029 | 다중 턴 연속성 | “그게 위험한가요?”, “신규안이 뭐죠?” 같은 후속 질문이 이전 턴의 대상과 선택지를 올바르게 참조한다. |
+| FR-030 | 자율 저장소 조사 | 저장소 관련 질문에서 모델이 필요한 도구를 선택하고 실제 파일·문서를 조사한 뒤 답한다. 사용자가 질의 유형을 선택하지 않는다. |
+| FR-031 | 읽기 전용 도구 집합 | `repo_status`, `list_tree`, `search_paths`, `search_text`, `read_file_lines`, `file_metadata`를 제공하며 쓰기·실행 도구는 공개 API와 모델 tool 목록에 존재하지 않는다. |
+| FR-032 | 공급자 독립 Agent Loop | Gemini, OpenRouter, OpenAI/OpenAI-compatible가 동일한 `AgentRequest/AgentEvent` 의미 계약을 통과한다. native tool 미지원 모델은 검증된 hidden planner를 사용할 수 있다. |
+| FR-033 | 자유 Markdown 최종 답변 | Advisor Mode에서 모델 최종 텍스트를 그대로 스트리밍·보존하며 JSON/AnswerBundle/Claim 형식을 강제하거나 완료 시 다른 본문으로 교체하지 않는다. |
+| FR-034 | 근거 요청 및 출처 표시 | 저장소를 조사한 답변에는 `GroundingTrace`가 연결되고 사용자가 펼치면 실제 상대 경로·행·snapshot 상태를 볼 수 있다. |
+| FR-035 | 편집 가능한 System Prompt | 설정에서 활성 System Prompt 원문을 보고 수정·적용할 수 있으며 다음 턴부터 반영된다. |
+| FR-036 | 분석·응답 수준 프리셋 | `초보`, `중급`, `전문`, `시니어` 실제 평문 template을 제공하고 수정 시 `사용자 정의`로 표시한다. |
+| FR-037 | 편집 가능한 Persona Prompt | 설정에서 Persona Prompt 원문을 수정·적용하며 문체·호칭·유머가 모델 생성 과정에 반영된다. |
+| FR-038 | 공장 기본값 복원 | System/Persona 각각 또는 둘 다 내장 원문을 draft로 불러오며 사용자가 적용할 때만 저장한다. |
+| FR-039 | 프롬프트 영속·복구 | AppData에 version과 함께 저장하고 재실행 복원한다. active와 conversation 참조 version을 보존하며 최소 최근 5개 unreferenced history를 유지한다. |
+| FR-040 | 반응형 세로형 UI | 최초 312.5×660, 최소 240×360이며 사용자 resize를 존중하고 정상 종료 후 마지막 크기를 복원하며 상태 전환으로 창 크기를 변경하지 않는다. |
+| FR-041 | 유효 프롬프트 확인 | Kernel/System/Persona 합성 순서를 확인할 수 있다. Kernel은 read-only이며 API key·secret·절대 경로는 preview에 없다. |
+| FR-042 | 대화형 코더 프롬프트 출력 | “프롬프트만” 요청은 일반 assistant Markdown code block으로 출력하며 별도 builder 화면·schema·export를 만들지 않는다. |
+| FR-043 | Audit Mode 분리 | Claim/Observed/Inferred/Conflict/confidence는 명시적 Audit Mode에서만 기본 노출되며 Advisor Mode에 강제되지 않는다. |
+| FR-044 | 동적 조사 Egress 동의 | 외부 모델이 repository tool result를 받기 전 동의를 확인하고 전송 path/line/hash/provider/model을 receipt에 기록한다. |
+| FR-045 | 저장소 조언 능력 활성화 게이트 | 일반 chat과 repository tool loop를 별도 검증하며 실패 모델을 advisor capable로 표시하지 않는다. |
+| FR-046 | 안정적인 스트리밍 | 스트리밍 본문은 완료 시 다른 본문으로 교체되지 않으며 취소 답변은 비완료 상태로 표시된다. |
+| FR-047 | 대화 session 관리 | 새 대화, 현재 대화 삭제, repository 연결 상태 확인이 가능하고 대화 기록은 저장소 내부에 쓰지 않는다. |
+
+### 23.3 비기능 요구사항 NFR-014~024
+
+| ID | 요구사항 | 수용 기준 |
+|---|---|---|
+| NFR-014 | 사용자 이해 가능성 | 초보 preset은 ADR, aggregate, invariant, EvidenceRef를 설명 없이 핵심 결론으로 노출하지 않는다. |
+| NFR-015 | 자유 출력 보존 | 정상 완료 Markdown은 문자 손실·강제 재합성 없이 저장·렌더링된다. |
+| NFR-016 | Agent Loop 한계와 취소 | 최대 8 tool rounds, 24 tool calls, 5분이며 모든 단계가 하나의 cancellation token으로 종료된다. |
+| NFR-017 | 조사 자원 한도 | 파일 읽기 호출당 400행/64KiB, 한 turn tool result 총 256KiB이며 초과는 omission으로 기록한다. |
+| NFR-018 | 프롬프트 복구 가능성 | 잘못된 prompt/DB/migration 실패에서 사용자 원본을 파괴하지 않고 factory prompt ephemeral mode로 시작할 수 있다. |
+| NFR-019 | 공급자 기능 동등성 | wire format이 달라도 chat/tool request/tool result/final/cancel 의미 상태는 동일하다. |
+| NFR-020 | 반응형 UI 가독성 | 250px에서 메시지·설정이 clip되지 않고 세로 scroll되며 code block은 가로 scroll/copy를 제공한다. |
+| NFR-021 | 근거 추적성 | 저장소 fact는 해당 turn의 tool calls와 valid SourceRef로 역추적되고 일반 잡담은 trace를 강제하지 않는다. |
+| NFR-022 | 대화 프라이버시 | 대화·prompt·tool history는 AppData에 저장되며 원문 code/secret은 기본 로그에 없다. 앱 삭제 기능 성공 후 앱 보존본에서 복원되지 않는다. |
+| NFR-023 | 관찰 가능성 | request/turn/tool/snapshot ID, stage, duration, error code를 기록하되 conversation/code/prompt/secret 원문은 제거한다. |
+| NFR-024 | 접근성 | 대화·입력·설정·근거·취소를 keyboard로 수행하고 screen reader label과 비색상 상태를 제공한다. |
+
+### 23.4 제약조건 CON-009~019
+
+| ID | 제약 |
+|---|---|
+| CON-009 | Advisor Mode 최종 답변에 JSON, AnswerBundle, Claim schema를 강제하지 않는다. |
+| CON-010 | 정상 최종 답변을 `compose_verified_answer` 또는 동등한 Claim 목록으로 교체하지 않는다. |
+| CON-011 | repository/snapshot 부재를 이유로 일반 대화를 차단하지 않는다. |
+| CON-012 | Persona를 고정 머리말·꼬리말 후처리만으로 구현하지 않는다. |
+| CON-013 | 모델에게 repository write/delete/rename/patch/shell/process/build/test tool을 제공하지 않는다. |
+| CON-014 | 질문·답변·설정·근거 상태 전환으로 viewport 크기를 강제 변경하지 않는다. |
+| CON-015 | 코더 prompt 전용 제품 기능·schema·화면을 만들지 않는다. |
+| CON-016 | repository 전체 또는 conversation 전체를 매 turn 무차별 전송하지 않는다. |
+| CON-017 | repository 지시문은 untrusted data이며 Kernel/System/Persona를 변경하지 못한다. |
+| CON-018 | Audit Mode 구조화 출력 규칙을 Advisor Mode에 누출하지 않는다. |
+| CON-019 | factory System/Persona 원문은 versioned application resources에 포함한다. |
+
+### 23.5 Baseline 영향 overlay
+
+- FR-009는 repository-optional multi-turn conversation으로 확장한다.
+- FR-010~012와 AnswerBundle은 Audit Mode에 보존한다.
+- FR-016/017/019/021/023은 `spec.md`의 overlay 상태를 따른다.
+- CON-005의 blanket tool prohibition은 Advisor Mode에서 FR-031/CON-013으로 supersede/refine한다. read-only repository tools만 새로 허용하고 shell/write/process 금지는 유지한다.
+- 기존 canonical egress, secret scan, path boundary, snapshot/watcher, cancellation, provider isolation은 약화하지 않는다.
+
+### 23.6 Canonical 결정과 문서
+
+- `DEC-CONV-001`, `DEC-PROMPT-001`, `DEC-AGENT-001`, `DEC-UI-004`, `DEC-UI-005`, `DEC-INF-007`
+- `SYSTEM_ARCHITECTURE.md`, `SECURITY_PRIVACY.md`, `ROADMAP.md`, `CR-UX-001_TRACEABILITY.md`
+- `PROMPT_CONTRACT.md`는 factory Kernel/System/Persona의 canonical review text다.
+- 변경요청서의 개념적 `DEC-UI-002`는 기존 ID 충돌로 `DEC-UI-004`를 사용한다.
+
+### 23.7 현재 handoff
+
+```text
+CR-UX-001 Plan: FROZEN FOR USER REVIEW
+CR-0 Documentation: REVIEW READY
+Implementation: AUTHORIZED — 2026-08-19 CR-UX-001 GO
+Current handoff: CR-UX-001 AWAITING GO
+```

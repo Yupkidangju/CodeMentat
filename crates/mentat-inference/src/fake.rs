@@ -3,6 +3,8 @@ use crate::InferenceBackend;
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 use mentat_core::error::MentatError;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -10,6 +12,7 @@ pub struct FakeInferenceBackend {
     pub simulated_chunks: Vec<String>,
     pub delay_per_chunk: Duration,
     pub should_fail: bool,
+    pub scripted_rounds: Arc<Mutex<VecDeque<Vec<InferenceRoundEvent>>>>,
 }
 
 impl Default for FakeInferenceBackend {
@@ -23,6 +26,7 @@ impl Default for FakeInferenceBackend {
             ],
             delay_per_chunk: Duration::from_millis(10),
             should_fail: false,
+            scripted_rounds: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 }
@@ -121,6 +125,66 @@ impl InferenceBackend for FakeInferenceBackend {
 
         Ok(Box::pin(stream))
     }
+
+    async fn infer_round_stream(
+        &self,
+        request: AgentRequest,
+        cancel_token: CancellationToken,
+    ) -> Result<BoxStream<'static, InferenceRoundEvent>, MentatError> {
+        let scripted = self
+            .scripted_rounds
+            .lock()
+            .map_err(|_| MentatError::BackendError {
+                code: "FAKE_SCRIPT_LOCK_FAILED".to_string(),
+                message: "fake backend script 잠금 실패".to_string(),
+            })?
+            .pop_front();
+        let request_id = request.request_id;
+        let chunks = self.simulated_chunks.clone();
+        let delay = self.delay_per_chunk;
+        let should_fail = self.should_fail;
+        let stream = async_stream::stream! {
+            if let Some(events) = scripted {
+                for event in events {
+                    if cancel_token.is_cancelled() {
+                        yield InferenceRoundEvent::Failed {
+                            error_code: "CANCELLED".to_string(),
+                            safe_message: "요청이 취소되었습니다.".to_string(),
+                        };
+                        return;
+                    }
+                    yield event;
+                }
+                return;
+            }
+            yield InferenceRoundEvent::Started { request_id };
+            if should_fail {
+                yield InferenceRoundEvent::Failed {
+                    error_code: "SIMULATED_FAILURE".to_string(),
+                    safe_message: "테스트 실패가 발생했습니다.".to_string(),
+                };
+                return;
+            }
+            let mut full_text = String::new();
+            for chunk in chunks {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        yield InferenceRoundEvent::Failed {
+                            error_code: "CANCELLED".to_string(),
+                            safe_message: "요청이 취소되었습니다.".to_string(),
+                        };
+                        return;
+                    }
+                    _ = tokio::time::sleep(delay) => {
+                        full_text.push_str(&chunk);
+                        yield InferenceRoundEvent::TextDelta(chunk);
+                    }
+                }
+            }
+            yield InferenceRoundEvent::RawCompleted { full_text };
+        };
+        Ok(Box::pin(stream))
+    }
 }
 
 #[cfg(test)]
@@ -182,5 +246,47 @@ mod tests {
 
         let next_event = stream.next().await.unwrap();
         assert_eq!(next_event, InferenceEvent::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn agent_chat_without_repository_streams_free_markdown_and_calls_no_tools() {
+        use futures_util::StreamExt;
+
+        let backend = FakeInferenceBackend {
+            simulated_chunks: vec!["## 답변\n".to_string(), "자유 Markdown".to_string()],
+            ..Default::default()
+        };
+        let request = AgentRequest {
+            request_id: Uuid::new_v4(),
+            conversation_id: Uuid::new_v4(),
+            turn_id: Uuid::new_v4(),
+            profile: BackendProfile::default(),
+            effective_system_prompt: "CM_PROMPT_V1".to_string(),
+            messages: vec![AgentMessage::user("안녕하세요")],
+            tools: Vec::new(),
+            repository_context: None,
+            response_contract: mentat_core::ResponseContract::AdvisorMarkdown,
+            limits: AgentLimits::default(),
+        };
+
+        let mut stream = backend
+            .infer_round_stream(request, CancellationToken::new())
+            .await
+            .unwrap();
+        let mut deltas = String::new();
+        let mut completed = None;
+        while let Some(event) = stream.next().await {
+            match event {
+                InferenceRoundEvent::TextDelta(delta) => deltas.push_str(&delta),
+                InferenceRoundEvent::RawCompleted { full_text } => completed = Some(full_text),
+                InferenceRoundEvent::ToolCallsRequested { .. } => {
+                    panic!("chat-only request must not call tools")
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(deltas, "## 답변\n자유 Markdown");
+        assert_eq!(completed.as_deref(), Some(deltas.as_str()));
     }
 }

@@ -1,10 +1,10 @@
 # Code Mentat Architecture Decision Records (DESIGN_DECISIONS.md)
 ## 아키텍처 및 디자인 결정 기록
 
-- **문서 버전:** 0.1.0-dev (Turn 13 / Re-audit #10 Remediation)
-- **패키지 버전:** 0.1.0 (`0.1.0-dev`는 문서 상태)
+- **문서 버전:** 0.2.0-plan (`CR-UX-001` / CR-0)
+- **패키지 버전:** 0.1.0 (CR 문서 계획 버전 `0.2.0-plan`과 별개)
 - **표준 규격:** AI Implementation Documentation Standard Section 7 / D3D Protocol v1.3
-- **기준 작성일:** 2026-08-18
+- **기준 작성일:** 2026-08-18 (최종 갱신: 2026-08-19, CR-UX-001 CR-0)
 
 ---
 
@@ -27,11 +27,14 @@
 ### [DEC-ARCH-003] 마스터 사양서 권위 및 추적성 모델 (IMP-F001 권위 확립)
 - **배경:** `CODE_MENTAT_SPEC.md`와 `spec.md` 간의 권위 충돌 및 요구사항 ID 단절 문제 해소 필요.
 - **결정:**
-  - `CODE_MENTAT_SPEC.md`: 기능(FR-001~026), 비기능(NFR-001~013), 제약조건(CON-001~008)의 **마스터 요구사항 베이스라인(Master Baseline)**으로 유지.
-  - `spec.md`: 현재 검증된 구현 상태, 모듈 계약, 실데이터 및 요구사항 추적 매트릭스를 제공하는 **활성 실행 명세서(Canonical Implementation Spec)**로 유지.
+  - `CODE_MENTAT_SPEC.md`: v0.1의 FR-001~026/NFR-001~013/CON-001~008 원문 baseline과 v0.2의 FR-027~047/NFR-014~024/CON-009~019 extension을 함께 보존하는 마스터 요구사항 문서.
+  - `Code Mentat 자유 대화형 저장소 멘토 전환 변경요청서.md`: CR-UX-001 제품 방향과 범위의 최신 사용자 권위.
+  - `spec.md`: baseline/CR 구현 상태와 supersede overlay를 추적하는 활성 실행 명세.
+  - `CR-UX-001_TRACEABILITY.md`: 신규 43개 요구사항의 owner/file/test/phase evidence index.
+  - `ROADMAP.md`: CR-0~8 순서와 사용자 GO gate의 현재 실행 권위.
 - **대안 및 기각 사유:**
   - *기존 요구사항 ID 일괄 삭제:* 감사 추적성이 단절되므로 기각.
-- **결과:** 두 문서의 역할이 명확히 정의되고 양방향 요구사항 추적성 확보.
+- **결과:** 기존 ID를 삭제하지 않고 v0.2 방향과 구현 승인 경계를 양방향 추적한다. 사용자 `CR-UX-001 GO` 전에는 계획 문서가 코드 구현 권한을 부여하지 않는다.
 
 ---
 
@@ -51,6 +54,7 @@
 - **결과:** 같은 길이 question, validation map, snapshot/ref, profile endpoint/model 중 하나라도 바뀌면 승인 요청 생성 또는 소비가 실패 폐쇄된다.
 
 ### [DEC-SEC-009] 검증된 claim에서만 주요 답변 합성 (IMP-F004)
+- **상태:** `SUPERSEDED IN DEFAULT ADVISOR MODE BY DEC-CONV-001`; Audit Mode 검증 경로에는 유지.
 - **배경:** 모델의 `direct_answer`와 schema 위반 원문은 claim/evidence validator를 통과하지 않고도 UI의 가장 눈에 띄는 본문에 표시될 수 있다.
 - **결정:** cloud 응답의 주요 답변은 validation 이후 최소 1개의 유효 evidence를 가진 `Unknown`이 아닌 claim의 classification, statement, confidence와 evidence cardinality로만 결정적으로 합성한다. `Observed`, `Inferred`, `Proposed`, `Conflict` 모두 같은 evidence cardinality를 적용한다.
 - **Cloud conflict:** `ConflictItem`도 non-empty·존재·유효·중복 없음 evidence 조건을 모두 통과할 때만 `[CONFLICT]` UI로 전달한다. 실패 항목은 raw response에만 남기고 검증 결과에서 제거한다.
@@ -86,6 +90,7 @@
 ## 3. UI/UX 및 추론 엔진 결정
 
 ### [DEC-UI-001] 3단계 점진적 공개(3-Tier Progressive Disclosure) 위젯 채택
+- **상태:** `SUPERSEDED BY DEC-UI-004`; 현재 구현 설명으로만 보존.
 - **Tier 1 (Smart Pill, `760x56px`):** 상단 상주 슬림 검색 바와 명시적 종료 동작
 - **Tier 2 (Smart Card, `760x360px`):** 질문 시 스트리밍 답변과 Claim 태그 표출
 - **Tier 3 (Detailed Inspector, `900x620px`):** 소스코드 행 뷰어 및 파일 트리
@@ -94,6 +99,7 @@
 - 단일 `InferenceBackend` 인터페이스 하에 Google Gemini REST/SSE 및 OpenRouter / OpenAI SSE 어댑터 지원.
 
 ### [DEC-INF-005] 동적 모델 검색과 검증 후 활성화
+- **상태:** `EXTENDED BY DEC-INF-007`; 기존 chat generation probe는 capability matrix의 한 축으로 유지.
 - **배경:** 정적 모델 프리셋은 계정 권한, 모델 폐기, 로컬 설치 상태와 어긋나며 연결 성공만으로 선택 모델의 실제 추론 호환성을 보장할 수 없다.
 - **결정:** 운영 모델 ID 하드코딩을 제거하고 `InferenceBackend`에 모델 검색과 선택 모델 생성 프로브 계약을 둔다. UI는 Draft와 Active 프로필을 분리하고 `Draft → ModelsDiscovered → ModelVerified → Active` 순서만 허용한다.
 - **보안 경계:** 공급자 응답은 신뢰하지 않는 데이터로 검증한다. API 키는 메모리의 Draft/Active에만 존재하며 SQLite에는 저장하지 않는다. 프로필 편집은 기존 Active를 변경하지 않는다.
@@ -141,6 +147,7 @@
 - **결정:** Tier 크기는 `580x52` / `580x300` / `660x480`, conflict 색은 amber `#F59E0B`이다. `Ctrl+K`/`Ctrl+P`는 앱 단축키, `Alt+Space`/`Ctrl+Alt+M`은 OS 전역 표시·포커스/접기로 등록한다. hidden winit 창의 self-unhide dead-end를 피하기 위해 창 숨김은 금지한다.
 
 ### [DEC-UI-003] 불투명 고대비 스위스 UI와 명시적 종료 경계
+- **상태:** `SUPERSEDED FOR LAYOUT BY DEC-UI-004`; 색 대비·글꼴·명시적 종료 경계는 유지.
 - **배경:** 프레임리스 투명 창에는 운영체제 종료 버튼이 없었고, dark visual의 암묵적 foreground와 반투명 표면 때문에 일부 글자와 경계가 표시 환경에 따라 흐려졌다.
 - **결정:** `DEC-UI-002`의 색상과 크기를 대체한다. 창은 불투명 흰색으로 렌더링하고 8pt 그리드, 검정 타이포그래피, 1px 선, 최소 모서리 반경과 제한적인 Swiss red 강조를 사용한다. Tier 크기는 `760x56` / `760x360` / `900x620`, 설정은 `760x480`이다. Tier 1에는 항상 `종료 ×`를 두고 `Ctrl+Q`와 같은 종료 수명주기를 공유한다.
 - **Trailing 불변조건:** `고정`·`설정`·`종료 ×`는 우측 180pt 고정 영역에 먼저 배치한다. 저장소 버튼은 최대 120pt에서 ellipsis 처리하며 640/760px, 긴 ASCII/CJK 이름에서도 질문 입력 200pt와 종료 hit target을 보존한다.
@@ -160,8 +167,8 @@
 - **결정:** 동일 Windows profile의 허용 peak working set 상한을 128MiB로 고정한다. 계측 불가 또는 `PeakWorkingSetSize > 128MiB`이면 ignored performance gate를 실패시킨다.
 - **근거:** 현재 관측값의 약 2.7배 여유를 두되, FileRecord/preview 무제한 회귀는 자동 차단한다.
 
-### [DEC-REL-001] Cargo 0.1.0과 문서 0.1.0-dev (IMP-F002)
-- **결정:** 패키지 SemVer는 `0.1.0`이다. `0.1.0-dev`는 미릴리스 문서 상태이며 다른 제품을 가리키지 않는다.
+### [DEC-REL-001] Cargo 0.1.0과 계획 문서 버전 분리 (IMP-F002)
+- **결정:** 패키지 SemVer는 `0.1.0`이다. 현재 `0.2.0-plan`은 `CR-UX-001` 목표 계약의 문서 버전이며 출시된 패키지 버전이 아니다. 역사적 `0.1.0-dev` 표기는 v0.1 기준선의 미릴리스 문서 상태로만 해석한다.
 
 ### [DEC-BUILD-001] Rust xtask 기반 멀티 플랫폼 빌드 진입점
 - **배경:** 플랫폼별 독립 스크립트에 빌드 로직을 복제하면 target triple, 품질 게이트와 산출물 경로가 쉽게 어긋난다.
@@ -191,4 +198,73 @@
 - **결과:** 저장소 열기·전환 시 UI 스레드가 전체 트리를 순회하지 않는다.
 
 ### [DEC-PER-001] 사실 불변조건을 준수하는 표현 계층 페르소나 분리
+- **상태:** `SUPERSEDED IN DEFAULT ADVISOR MODE BY DEC-PROMPT-001`; Audit Mode 후처리 경로에는 유지.
 - 페르소나 전환 시에도 `Claim`, `EvidenceRef`, `Conflict` 등 사실 판단은 100% 보존.
+
+---
+
+## 4. CR-UX-001 자유 대화형 멘토 전환 결정
+
+### [DEC-CONV-001] 자유 Markdown 답변과 GroundingTrace를 분리한다
+
+- **상태:** `PROPOSED — CR-UX-001 GO PENDING`
+- **배경:** 현재 cloud 완료 경로는 스트리밍 본문을 검증 Claim 목록으로 교체해 자연스러운 대화와 후속 질문을 훼손한다.
+- **결정:** Advisor Mode의 `AssistantMessage.markdown`은 모델의 정상 최종 Markdown을 그대로 보존한다. 조사 과정과 유효 출처는 별도 `GroundingTrace`/`SourceRef`로 저장한다. 잘못된 출처는 제거·경고하지만 답변 전체를 Claim 목록으로 재합성하지 않는다.
+- **대안 및 기각:** 자유 텍스트를 다시 AnswerBundle로 정규화하는 방식은 기존 문제를 반복하므로 기각. 무검증 citation 직접 표시는 SourceRef 위조 위험으로 기각.
+- **결과:** `DEC-SEC-009`는 기본 Advisor Mode에서 superseded되고 Audit Mode에만 유지된다.
+
+### [DEC-PROMPT-001] Kernel/System/Persona 3계층 Prompt Composition
+
+- **상태:** `PROPOSED — CR-UX-001 GO PENDING`
+- **배경:** `PersonaRenderer`의 intro/outro 후처리는 모델의 실제 설명 방식과 대화 태도를 바꾸지 못한다.
+- **결정:** immutable Kernel, editable System, editable Persona를 결정적 순서로 모델 호출 전에 합성한다. 공장 prompt는 버전 관리 리소스와 SHA-256을 가지며 사용자 적용 이력은 AppData에 최근 5개를 보존한다.
+- **대안 및 기각:** Kernel까지 사용자 편집 허용은 권한 경계를 약화해 기각. DB의 prompt를 factory source of truth로 쓰는 방식은 손상 복구가 불가능해 기각.
+- **결과:** baseline `ADR-005`와 `DEC-PER-001`은 기본 Advisor 경로에서 superseded되며 Audit rendering에서만 유지된다.
+
+### [DEC-AGENT-001] mentat-analysis가 bounded read-only AgentLoop를 소유한다
+
+- **상태:** `PROPOSED — CR-UX-001 GO PENDING`
+- **배경:** provider adapter가 repository를 직접 읽으면 보안/의존 방향이 무너지고, core가 inference 타입을 참조하면 현재 `mentat-inference → mentat-core`와 순환한다.
+- **결정:** core는 neutral conversation/store ports, inference는 AgentRequest/Event/capability, analysis는 둘과 repository를 의존하는 ConversationOrchestrator/AgentLoop/RepositoryToolGateway를 소유한다. provider는 wire mapping만 담당한다.
+- **도구 경계:** 기존 `CON-005`의 blanket tool 금지는 Advisor Mode에서 FR-031/CON-013으로 정제한다. 6개 read-only repository tool만 허용하고 shell/write/delete/rename/patch/process 금지는 그대로 유지한다.
+- **Egress 경계:** CR-3는 authorization hook과 fake/local tool result까지만 외부 원문 없이 닫을 수 있으며, 실제 외부 tool result 전송은 CR-4 consent/receipt 통과 이후에만 활성화한다.
+- **대안 및 기각:** 새 crate 추가는 현 의존 그래프로 해결 가능해 기각. provider 내부 agent loop는 repository/consent coupling 때문에 기각.
+- **결과:** native/emulated provider가 동일 semantic loop를 공유하고 보안 정책은 한 choke point에서 강제된다.
+
+### [DEC-UI-004] 사용자 resize를 보존하는 세로형 대화 사이드바
+
+- **상태:** `PROPOSED — CR-UX-001 GO PENDING`
+- **ID 메모:** 변경요청서의 개념적 `DEC-UI-002`는 기존 결정 ID와 충돌하므로 canonical ID를 `DEC-UI-004`로 배정한다.
+- **배경:** 3-Tier 강제 `InnerSize`는 장문 대화와 사용자 resize를 훼손한다.
+- **결정:** 기본 312.5×660, 최소 240×360, 상단 상태/중앙 timeline/하단 2~6행 composer를 사용한다. 질문·설정·근거·Audit 상태는 viewport 크기를 바꾸지 않는다. 마지막 사용자 크기를 AppData에 저장한다.
+- **크기 영속:** eframe persistence 기본값에 암묵적으로 의존하지 않고 `mentat-storage`의 `ui_preferences` 단일 row를 사용한다. layout revision 2는 역사적 기본값 250×600만 새 기본값으로 한 번 올리고 사용자 custom size를 보존한다.
+- **대안 및 기각:** 기존 Pill을 좁히는 방식은 250px에 입력/timeline/settings를 수용하지 못해 기각. 설정용 별도 강제 확장은 resize 보존을 깨므로 기각.
+- **결과:** `DEC-UI-001/003`의 layout은 superseded된다. 고대비 light token, 내장 한글 font, close/Ctrl+Q는 유지한다.
+- **Mode 상태:** Advisor가 기본이며 Audit은 conversation별 transient toggle이다. 앱 재시작 시 Advisor로 돌아가고 Persona 선택은 mode를 변경하지 않는다.
+
+### [DEC-INF-007] Chat/Native Tool/Emulated Tool/Advisor 능력을 분리 검증한다
+
+- **상태:** `PROPOSED — CR-UX-001 GO PENDING`
+- **배경:** 현재 `ModelVerification.compatible` 하나로는 일반 대화 성공과 repository 조사 능력을 구분할 수 없다.
+- **결정:** 실제 probe로 `CHAT_CAPABLE`, `NATIVE_TOOL_CAPABLE`, `EMULATED_TOOL_CAPABLE`, `REPOSITORY_ADVISOR_CAPABLE`을 독립 산출한다. 모델 ID 하드코딩은 사용하지 않는다.
+- **활성화:** chat capability만 통과한 모델은 활성화할 수 있으나 repository advisor badge/tool 제공은 금지한다. Advisor capability는 실제 bounded tool round-trip 후에만 부여한다.
+- **대안 및 기각:** 공급자 이름이나 모델 이름 기반 추정은 권한/버전 drift 때문에 기각. native tool만 필수로 하면 호환 모델 범위를 불필요하게 축소해 기각.
+- **결과:** 기존 `DEC-INF-005/006` generation probe를 보존하면서 기능 제한을 정직하게 표시한다.
+
+### [DEC-UI-005] parser-only CommonMark와 앱 소유 egui renderer
+
+- **상태:** `PROPOSED — CR-UX-001 GO PENDING`
+- **배경:** 현재 `ui.label`은 Markdown을 렌더링하지 못하고, 완성형 renderer의 기본 code wrapping/링크/이미지 동작은 code block 가로 scroll과 no-fetch 정책을 앱이 강제하기 어렵다.
+- **결정:** `pulldown-cmark 0.13.x`(`Cargo.lock` 0.13.4)을 `default-features = false` parser-only로 사용하고 `mentat-app/widgets/markdown.rs`가 event→egui rendering을 소유한다. fenced code는 별도 horizontal ScrollArea+copy CTA, image/html event는 placeholder/plain text, link는 `http/https` text만 처리한다.
+- **한도:** Markdown 입력 1MiB, nesting depth 32, rendering block 10,000개를 넘으면 bounded truncation 상태를 표시한다.
+- **대안 및 기각:** raw label은 Markdown 요구 미충족. `egui_commonmark 0.19`는 egui 0.30과 맞지만 built-in code wrapping과 direct hyperlink behavior의 제어 seam이 부족해 기각. raw HTML renderer는 injection 표면 때문에 기각.
+- **결과:** Markdown 원문을 보존하면서 자동 네트워크/파일 resource load 없이 code scroll/copy와 link scheme 정책을 결정적으로 검증할 수 있다.
+- **공식 근거:** [pulldown-cmark 공식 저장소](https://github.com/pulldown-cmark/pulldown-cmark), [v0.13.0 Cargo 계약](https://github.com/pulldown-cmark/pulldown-cmark/blob/v0.13.0/pulldown-cmark/Cargo.toml)
+
+### [DEC-SEC-010] API key는 OS native credential store에 보관한다
+- **배경:** 재실행 자동 복원을 위해 자체 cipher 파일을 사용하면 복호화 key도 앱 또는 같은 사용자 영역에서 복구 가능해야 하므로 file theft와 binary reverse engineering에 대한 보호가 제한된다.
+- **결정:** `mentat-core::SecretStore` port와 `mentat-platform::NativeSecretStore` adapter를 사용한다. `keyring 4.1.6`의 platform backend는 Windows Credential Manager, macOS Keychain Services, Linux Secret Service를 선택한다.
+- **저장 경계:** API key 원문은 native store에만 두고 SQLite `provider_secret_preferences`에는 `provider:<profile_uuid>` reference와 remember flag만 둔다. Debug/log/receipt/migration backup에는 key를 포함하지 않는다.
+- **실패 경계:** native store unavailable/locked/missing/corrupt 시 자체 암호 파일이나 이전 profile key로 fallback하지 않고 재입력 또는 session-only로 강등한다. Provider/Base URL 변경 시 이전 binding을 제거한다.
+- **한계:** 동일 사용자 권한 malware와 실행 중 process memory compromise까지 방어한다고 주장하지 않는다.
+- **대안 및 기각:** 자체 cipher/XOR/machine-ID derivation은 key management와 무결성 문제로 기각. master-password+표준 KDF/AEAD는 가능하지만 매 실행 입력이 필요해 자동 복원 기본 UX와 맞지 않아 기각.
