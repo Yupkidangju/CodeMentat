@@ -3,9 +3,9 @@
 - **문서 버전:** 2.0.0-plan
 - **참조 표준:** `AI_AUDIT_DOC_STANDARD.md`
 - **기존 baseline 감사:** `docs/audit/audit_report_17.md` — `PASS WITH KNOWN RISKS`
-- **최신 확장 범위 감사:** `docs/audit/audit_report_23.md` — `HOLD`
-- **신규 변경 상태:** `REPORT 23 PROCESS LOCK REMEDIATION CLEAN / RE-AUDIT REQUESTED`
-- **전체 판정:** `기존 HOLD 유지 — 새 clean commit 독립 재감사 전 PASS 아님`
+- **최신 확장 범위 감사:** `docs/audit/audit_report_24.md` — `PASS WITH KNOWN RISKS`
+- **신규 변경 상태:** `PROCESS LOCK REMEDIATION VERIFIED / 29 VERIFIED · 9 PARTIAL · 5 NOT IMPLEMENTED`
+- **전체 판정:** `현재 구현 범위 PASS WITH KNOWN RISKS — 전체 제품 43/43 완료 아님`
 - **재감사 요청:** `docs/audit/re_audit_request_21.md` — 대상 `4918c3e`
 - **최신 재감사 요청:** `docs/audit/re_audit_request_22.md` — 대상 `b0ef425`
 - **runtime ownership 재감사 요청:** `docs/audit/re_audit_request_23.md` — 대상 `a03da5d`
@@ -146,8 +146,9 @@ Clean-commit full re-audit: HOLD (audit_report_19)
 Atomic durability re-audit: HOLD (audit_report_21)
 Runtime ownership re-audit: HOLD (audit_report_22)
 Process lifetime lock re-audit: HOLD (audit_report_23)
+Process lifetime lock final re-audit: PASS WITH KNOWN RISKS (audit_report_24)
 CR-UX-001 CR-0: APPROVED
 CR-UX-001 CR-1~7: PRODUCTION PARTIAL — AgentLoop/egress/Grounding·Audit remediation 구현, 29/43 Verified
 Implementation approval: RECEIVED
-Final decision: RE-AUDIT REQUESTED for 6c6e946 — 새 감사가 대체하기 전까지 HOLD
+Final decision: CURRENT IMPLEMENTED SCOPE PASS WITH KNOWN RISKS — SEC-F007 유지, 9 Partial·5 Not Implemented 후속
 ```

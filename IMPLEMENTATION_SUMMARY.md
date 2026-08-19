@@ -6,6 +6,7 @@
 - **표준 규격:** AI Implementation Documentation Standard Section 6
 - **기준 작성일:** 2026-08-18 (최종 수정: 2026-08-19)
 - **구현 구분:** 0장은 현재 CR-UX-001 구현 증거, 1~3장은 역사적 v0.1 runtime, 4장은 전환 gap ledger
+- **최신 독립 감사:** `docs/audit/audit_report_24.md` — 현재 구현 범위 `PASS WITH KNOWN RISKS`; 29 Verified / 9 Partial / 5 Not Implemented
 
 ---
 
