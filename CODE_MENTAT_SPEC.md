@@ -10,7 +10,7 @@
 - 문서 유형: 구현 준비 완료 마스터 사양서
 - 문서 버전: 0.2.0
 - 작성일: 2026-08-17
-- 상태: `CR-0~2 PASS — CR-3~4 IMPLEMENTATION IN PROGRESS`
+- 상태: `CR-UX-001 PRODUCTION PARTIAL — 29/43 Implemented+Verified, RE-AUDIT PENDING`
 - 제품 유형: 로컬 우선, 읽기 전용, 멀티플랫폼 자유 대화형 저장소 멘토
 - 구현 언어: Rust
 - 초기 추론 방식: OpenAI 호환 HTTP API
@@ -25,7 +25,7 @@
 - 읽기 전용 repository tool만 모델 주도 조사에 허용한다. shell/write/process 금지는 유지한다.
 - Persona는 기본 Advisor 경로에서 모델 호출 전 prompt로 합성한다.
 - 3-Tier 강제 resize는 세로형 사용자-resize 보존 UI로 대체한다.
-- 현재 단계는 문서 계획 검토이며 코드 구현은 승인되지 않았다.
+- 2026-08-19 `CR-UX-001 GO` 이후 production 구현이 진행됐으며 실제 상태는 23장 추적표와 `CR-UX-001_TRACEABILITY.md`를 따른다.
 
 ## 1. 실행 요약
 

@@ -229,6 +229,8 @@ v0.2는 persistent diagnostic log 파일과 자동 crash upload를 기본 생성
 
 ```text
 Security contract: FROZEN FOR REVIEW
-Dynamic tool egress implementation: NOT STARTED
+Dynamic tool egress implementation: PRODUCTION CONNECTED — RE-AUDIT PENDING
+
+현재 OpenAI 호환/Gemini native tool round는 provider가 만든 최종 JSON bytes를 `ProviderBodyEgressGate`에 넘긴다. 앱 gate는 runtime consent capability, canonical seal, SQLite `Prepared` receipt, exact-body 재검증을 모두 통과한 뒤에만 송신을 허용한다. 응답 수신은 `Sent`, network/cancel의 송신 여부 불명은 `OutcomeUnknown`으로 닫고 redirect 자동 추적은 두 adapter 모두 금지한다. RepositoryToolGateway는 tool content와 SourceRef excerpt를 provider 직렬화 전에 redaction한다.
 Implementation approval: GRANTED — 2026-08-19 CR-UX-001 GO
 ```

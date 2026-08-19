@@ -207,7 +207,7 @@
 
 ### [DEC-CONV-001] 자유 Markdown 답변과 GroundingTrace를 분리한다
 
-- **상태:** `PROPOSED — CR-UX-001 GO PENDING`
+- **상태:** `IMPLEMENTED — RE-AUDIT PENDING`
 - **배경:** 현재 cloud 완료 경로는 스트리밍 본문을 검증 Claim 목록으로 교체해 자연스러운 대화와 후속 질문을 훼손한다.
 - **결정:** Advisor Mode의 `AssistantMessage.markdown`은 모델의 정상 최종 Markdown을 그대로 보존한다. 조사 과정과 유효 출처는 별도 `GroundingTrace`/`SourceRef`로 저장한다. 잘못된 출처는 제거·경고하지만 답변 전체를 Claim 목록으로 재합성하지 않는다.
 - **대안 및 기각:** 자유 텍스트를 다시 AnswerBundle로 정규화하는 방식은 기존 문제를 반복하므로 기각. 무검증 citation 직접 표시는 SourceRef 위조 위험으로 기각.
@@ -215,7 +215,7 @@
 
 ### [DEC-PROMPT-001] Kernel/System/Persona 3계층 Prompt Composition
 
-- **상태:** `PROPOSED — CR-UX-001 GO PENDING`
+- **상태:** `IMPLEMENTED — RE-AUDIT PENDING`
 - **배경:** `PersonaRenderer`의 intro/outro 후처리는 모델의 실제 설명 방식과 대화 태도를 바꾸지 못한다.
 - **결정:** immutable Kernel, editable System, editable Persona를 결정적 순서로 모델 호출 전에 합성한다. 공장 prompt는 버전 관리 리소스와 SHA-256을 가지며 사용자 적용 이력은 AppData에 최근 5개를 보존한다.
 - **대안 및 기각:** Kernel까지 사용자 편집 허용은 권한 경계를 약화해 기각. DB의 prompt를 factory source of truth로 쓰는 방식은 손상 복구가 불가능해 기각.
@@ -223,7 +223,7 @@
 
 ### [DEC-AGENT-001] mentat-analysis가 bounded read-only AgentLoop를 소유한다
 
-- **상태:** `PROPOSED — CR-UX-001 GO PENDING`
+- **상태:** `IMPLEMENTED — RE-AUDIT PENDING`
 - **배경:** provider adapter가 repository를 직접 읽으면 보안/의존 방향이 무너지고, core가 inference 타입을 참조하면 현재 `mentat-inference → mentat-core`와 순환한다.
 - **결정:** core는 neutral conversation/store ports, inference는 AgentRequest/Event/capability, analysis는 둘과 repository를 의존하는 ConversationOrchestrator/AgentLoop/RepositoryToolGateway를 소유한다. provider는 wire mapping만 담당한다.
 - **도구 경계:** 기존 `CON-005`의 blanket tool 금지는 Advisor Mode에서 FR-031/CON-013으로 정제한다. 6개 read-only repository tool만 허용하고 shell/write/delete/rename/patch/process 금지는 그대로 유지한다.
@@ -233,7 +233,7 @@
 
 ### [DEC-UI-004] 사용자 resize를 보존하는 세로형 대화 사이드바
 
-- **상태:** `PROPOSED — CR-UX-001 GO PENDING`
+- **상태:** `IMPLEMENTED — RE-AUDIT PENDING`
 - **ID 메모:** 변경요청서의 개념적 `DEC-UI-002`는 기존 결정 ID와 충돌하므로 canonical ID를 `DEC-UI-004`로 배정한다.
 - **배경:** 3-Tier 강제 `InnerSize`는 장문 대화와 사용자 resize를 훼손한다.
 - **결정:** 기본 312.5×660, 최소 240×360, 상단 상태/중앙 timeline/하단 2~6행 composer를 사용한다. 질문·설정·근거·Audit 상태는 viewport 크기를 바꾸지 않는다. 마지막 사용자 크기를 AppData에 저장한다.
@@ -244,7 +244,7 @@
 
 ### [DEC-INF-007] Chat/Native Tool/Emulated Tool/Advisor 능력을 분리 검증한다
 
-- **상태:** `PROPOSED — CR-UX-001 GO PENDING`
+- **상태:** `PARTIAL — native probe 구현, emulated planner 잔여`
 - **배경:** 현재 `ModelVerification.compatible` 하나로는 일반 대화 성공과 repository 조사 능력을 구분할 수 없다.
 - **결정:** 실제 probe로 `CHAT_CAPABLE`, `NATIVE_TOOL_CAPABLE`, `EMULATED_TOOL_CAPABLE`, `REPOSITORY_ADVISOR_CAPABLE`을 독립 산출한다. 모델 ID 하드코딩은 사용하지 않는다.
 - **활성화:** chat capability만 통과한 모델은 활성화할 수 있으나 repository advisor badge/tool 제공은 금지한다. Advisor capability는 실제 bounded tool round-trip 후에만 부여한다.
@@ -253,7 +253,7 @@
 
 ### [DEC-UI-005] parser-only CommonMark와 앱 소유 egui renderer
 
-- **상태:** `PROPOSED — CR-UX-001 GO PENDING`
+- **상태:** `IMPLEMENTED — RE-AUDIT PENDING`
 - **배경:** 현재 `ui.label`은 Markdown을 렌더링하지 못하고, 완성형 renderer의 기본 code wrapping/링크/이미지 동작은 code block 가로 scroll과 no-fetch 정책을 앱이 강제하기 어렵다.
 - **결정:** `pulldown-cmark 0.13.x`(`Cargo.lock` 0.13.4)을 `default-features = false` parser-only로 사용하고 `mentat-app/widgets/markdown.rs`가 event→egui rendering을 소유한다. fenced code는 별도 horizontal ScrollArea+copy CTA, image/html event는 placeholder/plain text, link는 `http/https` text만 처리한다.
 - **한도:** Markdown 입력 1MiB, nesting depth 32, rendering block 10,000개를 넘으면 bounded truncation 상태를 표시한다.

@@ -8,11 +8,11 @@ Code Mentat는 로컬 소프트웨어 저장소(Repository)를 **완전한 읽�
 
 ### CR-UX-001 구현 상태 / Implementation Status / 実装状況 / 實作狀態 / 实现状态
 
-- **한국어:** 세로형 자유 대화 UI, Conversation/Prompt 저장, 읽기 전용 tool gateway와 canonical receipt 기반이 구현되었습니다. 일반 chat은 활성 모델에서 동작하며 외부 저장소 tool result 전송은 exact-body gate 연결 전까지 안전하게 차단됩니다.
-- **English:** The vertical chat UI, conversation/prompt persistence, read-only tool gateway, and canonical receipt foundation are implemented. General chat works with an activated model; external repository tool-result transmission remains fail-closed until the exact-body gate is connected.
-- **日本語:** 縦型チャット UI、会話・プロンプト保存、読み取り専用ツールゲートウェイ、canonical receipt 基盤を実装しました。通常チャットは有効化済みモデルで動作し、外部へのリポジトリ tool result 送信は exact-body gate 接続まで遮断されます。
-- **繁體中文:** 已實作直向聊天 UI、對話／提示詞保存、唯讀工具閘道與 canonical receipt 基礎。一般聊天可使用已啟用模型；外部儲存庫工具結果在 exact-body gate 完成前維持封閉。
-- **简体中文:** 已实现纵向聊天 UI、对话／提示词保存、只读工具网关与 canonical receipt 基础。普通聊天可使用已启用模型；外部仓库工具结果在 exact-body gate 完成前保持关闭。
+- **한국어:** 세로형 자유 대화 UI가 production AgentLoop와 연결되었습니다. 검증된 모델은 6개 읽기 전용 도구를 사용하며, redaction→사용자 동의→exact-body canonical receipt→Grounding/Audit UI 경계를 통과한 결과만 외부 공급자에 전송합니다.
+- **English:** The vertical chat UI now uses the production AgentLoop. Verified models can use six read-only tools, and repository excerpts reach external providers only through redaction, explicit consent, an exact-body canonical receipt, and Grounding/Audit UI boundaries.
+- **日本語:** 縦型チャット UI を production AgentLoop に接続しました。検証済みモデルは 6 個の読み取り専用ツールを利用でき、リポジトリ抜粋は redaction、明示的同意、exact-body canonical receipt、Grounding/Audit UI を通過した場合のみ外部プロバイダーへ送信されます。
+- **繁體中文:** 直向聊天 UI 已連接 production AgentLoop。經驗證的模型可使用六個唯讀工具；儲存庫摘錄僅能經過遮罩、明確同意、exact-body canonical receipt 與 Grounding/Audit UI 邊界後傳送給外部供應商。
+- **简体中文:** 纵向聊天 UI 已连接 production AgentLoop。经验证的模型可使用六个只读工具；仓库摘录仅能经过脱敏、明确同意、exact-body canonical receipt 与 Grounding/Audit UI 边界后发送给外部供应商。
 
 상세 계획 / Details: [ROADMAP.md](ROADMAP.md), [CR-UX-001_TRACEABILITY.md](CR-UX-001_TRACEABILITY.md)
 
@@ -34,6 +34,7 @@ Code Mentat는 로컬 소프트웨어 저장소(Repository)를 **완전한 읽�
    - 모델 ID는 코드 프리셋이 아니라 현재 API 키/로컬 런타임이 반환한 목록에서 동적으로 선택합니다.
    - `API 확인 및 모델 불러오기 → 선택 모델 호환성 확인 → 활성화`를 통과한 동일 프로필만 프로그램 AI로 사용합니다.
    - API key 저장을 선택하면 Windows Credential Manager/macOS Keychain/Linux Secret Service에 보관하고 SQLite에는 profile-scoped reference만 기록합니다.
+   - 호환성 확인은 모델 ID 추정 없이 실제 native `repo_status` tool probe를 실행하며, 실패한 모델은 chat-only로 정직하게 활성화합니다.
    - 내장 로컬은 항상 선택 가능하지만 실행 엔진 또는 설치 모델이 없으면 이유를 표시하고 활성화를 차단합니다.
 4. **오프라인 로컬 분석 워크플로 (Offline Workflows)**
    - 외부 AI 없이도 `/onboard`, `/structure`, `/conflicts`, `/where` 명령으로 프로젝트 구조, 매니페스트, 권위 문서를 로컬에서 즉시 분석
@@ -46,6 +47,10 @@ Code Mentat는 로컬 소프트웨어 저장소(Repository)를 **완전한 읽�
    - Cloud Inferred/Proposed/Conflict와 ConflictItem도 유효하고 중복 없는 evidence를 요구
    - 저장소가 `STALE`이면 신규 분석을 차단하고 재인덱싱 전 live file과 이전 hash 혼합을 허용하지 않음
    - 파일 watcher의 event-loss/unknown 신호와 ignore 규칙 변경은 즉시 STALE로 실패 폐쇄
+   - OpenAI 호환/Gemini tool result는 provider가 직렬화한 정확한 body와 durable receipt가 일치해야만 송신되며 redirect에는 재전송하지 않습니다.
+7. **Grounding 및 Audit UI**
+   - Advisor 답변은 자유 Markdown을 유지하고, 별도 Grounding drawer에서 tool call, receipt, SourceRef 경로·줄·redacted excerpt를 확인합니다.
+   - Audit mode는 Ready 저장소와 tool-capable 모델에서만 선택되며 validated AnswerBundle만 구조화 UI와 SQLite에 저장·복원합니다.
 
 ---
 

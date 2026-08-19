@@ -1,6 +1,6 @@
 # CR-UX-001 목표 시스템 아키텍처
 
-- **상태:** `APPROVED — CR-0~2 PASS / CR-3~4 IMPLEMENTATION IN PROGRESS`
+- **상태:** `APPROVED — PRODUCTION PARTIAL / RE-AUDIT PENDING`
 - **기준:** `Code Mentat 자유 대화형 저장소 멘토 전환 변경요청서.md`
 - **현재 구현:** 단발 `InferenceRequest` + AnswerBundle 중심
 - **목표 구현:** ConversationOrchestrator + PromptComposer + bounded AgentLoop + 자유 Markdown/GroundingTrace 분리
@@ -494,6 +494,8 @@ struct SourceRef {
 
 ## 4. AgentLoop 상태 머신
 
+provider adapter가 tool result를 포함한 최종 wire body를 직렬화하면 `ProviderBodyEgressGate::authorize_exact_body(request, endpoint, bytes)`를 socket write 직전에 호출한다. `mentat-app`의 durable 구현만 runtime consent capability와 SQLite receipt를 소유하며 inference/provider crate는 repository나 storage를 직접 참조하지 않는다. 승인 성공 뒤에도 adapter는 같은 byte slice를 `.body(...)`로 전송하고, redirect를 자동 추적하지 않는다.
+
 ```mermaid
 stateDiagram-v2
     [*] --> Preparing
@@ -656,7 +658,7 @@ STALE/Incomplete snapshot에서는 metadata-only `repo_status` 외 신규 Reposi
 위 타입과 흐름은 구현 계약이며 현재 제품에 존재한다고 주장하지 않는다.
 
 ```text
-Architecture contract: FROZEN FOR REVIEW
-Runtime implementation: NOT STARTED
+Architecture contract: FROZEN AND IMPLEMENTED FOR AGENT/EGRESS/GROUNDING PATH
+Runtime implementation: PARTIAL — 29/43 Implemented+Verified, 9 Partial, 5 Not Implemented
 Source authorization: GRANTED — 2026-08-19 CR-UX-001 GO
 ```

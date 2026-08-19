@@ -17,10 +17,11 @@
 MentatChatApp
   → repository 없는 Conversation/ChatMessage
   → PromptProfile active revision + PromptComposer(CM_PROMPT_V1)
-  → AgentRequest(messages, tools=0)
-  → 활성 provider Markdown stream
-  → terminal CAS + AppData SQLite v4
-  → 세로 timeline/CommonMark projection
+  → AgentLoop(chat-only 또는 6개 read-only tool catalog)
+  → gateway redaction + exact-body consent/receipt
+  → OpenAI/Gemini native tool round + contract-specific terminal
+  → terminal CAS + Grounding/Audit AppData SQLite v5
+  → 세로 timeline/CommonMark + Grounding drawer/Audit projection
 ```
 
 - 기본 앱은 `312.5×660`, 최소 `240×360` 세로형이며 사용자 상태 전환에 `ViewportCommand::InnerSize`를 보내지 않는다.
@@ -35,21 +36,21 @@ MentatChatApp
 |---|---|
 | sealed tool surface | `RepositoryToolName::ALL` 정확히 6개, write/process variant 0 |
 | bounded gateway | 호출당 400행/64KiB, turn 256KiB, path/live-hash/STALE/cancel 검사 |
-| AgentLoop | 8 rounds, 24 calls, 300초, 동일 fingerprint 3회 차단, local tool→GroundingTrace |
+| AgentLoop | 8 rounds, 24 calls, 300초, 동일 fingerprint 3회 차단, production Chat UI 단일 진입점 |
 | Audit terminal | raw JSON UI 비노출, `answer_bundle.v1` parse와 Gateway SourceRef exact match |
 | canonical egress | `CM_TOOL_EGRESS_V1`, provider/full endpoint/model/snapshot/ref/payload/exact-body digest |
-| durable storage | SQLite v1→v4 `BEGIN IMMEDIATE`, online backup, DB/WAL/SHM quarantine, Prepared status CAS |
+| durable storage | SQLite v1→v5 `BEGIN IMMEDIATE`, online backup, DB/WAL/SHM quarantine, Prepared status CAS |
 | privacy delete | conversation cascade로 turn/message/trace/source/receipt/Audit result 삭제 |
 
-### 현재 fail-closed 잔여 경계
+### 현재 잔여 경계
 
-- OpenAI/Gemini adapter의 exact serialized provider body와 durable receipt를 한 호출로 결속하는 body-gate는 아직 기본 provider tool loop에 연결되지 않았다.
-- 따라서 외부 provider repository tool result는 `TOOL_EGRESS_CONSENT_REQUIRED`로 차단한다. 일반 chat과 local/fake AgentLoop 검증은 동작한다.
-- Grounding drawer와 cloud Audit mode projection은 타입/validator/store까지 구현됐으나 기본 Chat UI에 아직 연결되지 않았다.
+- OpenAI 호환/Gemini native tool mapping과 실제 capability probe는 연결됐다. emulated planner fallback과 provider 간 동일 event trace golden fixture는 아직 Partial이다.
+- context compaction, beginner 설명 eval, structured tracing, 전체 keyboard accessibility, privacy delete 전수 fixture는 추적표에서 Partial/Not Implemented를 유지한다.
+- `SEC-F007` 공급망 advisory와 실제 600×800 mouse drag smoke는 기존 위험/검증 한계로 유지한다.
 
 ### 2026-08-19 검증
 
-- `cargo test --workspace --locked`: 147 passed, 2 ignored(100k/2GiB profile, native credential smoke)
+- `cargo test --workspace --locked`: 161 passed, 2 ignored(100k/2GiB profile, native credential smoke)
 - `cargo test -p mentat-platform native_secret_store_round_trip_and_delete --locked -- --ignored`: Windows Credential Manager put/get/delete PASS
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: PASS
 - `cargo build -p mentat-app --locked`: PASS
@@ -57,6 +58,7 @@ MentatChatApp
 - `cargo audit --no-fetch --file Cargo.lock`: 기존 `quick-xml 0.30.0` High 2건과 unmaintained 2건으로 FAIL; keyring 신규 finding 0
 - ignored 100k/2GiB profile: 100,000 files, 2,147,483,648 bytes, 81,793ms, peak working set 48,783,360 bytes(<128MiB) PASS
 - 실제 Windows 실행: 313×660(DPI 반올림), 한글 폰트, 닫기/설정/핀/새 대화, 저장소 연결, 3행 composer 확인
+- AgentLoop remediation release 실행: 기본 chat 화면과 설정의 provider 3단계/OS 자격증명 안내/Prompt UI를 다시 확인하고 `×` 정상 종료 후 프로세스 창 0건을 확인
 - 실제 설정 스크롤: provider 3단계, Kernel read-only, System/Persona editor, Apply/Cancel/Factory Reset 확인
 - 600×800 실제 drag는 Windows helper가 창 외부 좌표를 거부해 미실행이며, 저장·재오픈은 SQLite integration test로 검증했다.
 
@@ -168,7 +170,7 @@ sequenceDiagram
 
 ## 4. CR-UX-001 전환 구현 Ledger
 
-### 4.1 현재 코드와 목표 차이
+### 4.1 이전 v0.1 기준선과 현재 목표 차이
 
 | 영역 | 현재 v0.1 | 목표 | 단계 |
 |---|---|---|---|
@@ -187,19 +189,19 @@ sequenceDiagram
 
 | 단계 | 상태 | 구현 파일 | 필수 증거 |
 |---|---|---|---|
-| CR-0 | Review Ready | 문서 세트만 변경 | 문서 ID/계약/trace 정합성, 사용자 GO |
-| CR-1 | Not Started | core/persona/storage | prompt checksum, migration/reopen/recovery |
-| CR-2 | Not Started | inference/analysis/provider/storage | no-repo chat, Markdown preservation, cancel |
-| CR-3 | Not Started | analysis/repository/inference/providers | six tools, loop/budget/cancel, no-write API |
-| CR-4 | Not Started | consent/egress/evidence/storage | zero-before-consent, canonical tamper, stale |
-| CR-5 | Not Started | app/widgets/storage | breakpoints, resize restore, prompt settings |
-| CR-6 | Not Started | app/answer bundle/grounding | Advisor/Audit isolation, source jump |
-| CR-7 | Not Started | providers/storage/app/CI | capability parity, legacy migration, compaction |
-| CR-8 | Not Started | audit reports | 3-pass + independent final re-audit |
+| CR-0 | PASS | 권위 문서/trace | 문서 ID/계약/사용자 GO |
+| CR-1 | Verified | core/persona/storage | prompt checksum, migration/reopen/recovery |
+| CR-2 | Verified | inference/analysis/provider/storage | no-repo chat, Markdown preservation, cancel |
+| CR-3 | Verified | analysis/repository/inference/providers | six tools, provider loop, no-write API |
+| CR-4 | Verified | consent/egress/evidence/storage | exact-body, zero-byte reject, redirect, durable CAS |
+| CR-5 | Partial | app/widgets/storage | runtime 600×800 drag smoke·접근성 전수 잔여 |
+| CR-6 | Verified | app/answer bundle/grounding | Advisor/Audit isolation, source detail/reload |
+| CR-7 | Partial | providers/storage/app/CI | emulated parity와 compaction 잔여 |
+| CR-8 | Pending | clean commit/audit reports | 3-pass independent final re-audit |
 
-### 4.3 계획 파일 책임
+### 4.3 구현 파일 책임
 
-| 파일/영역 | 계획 책임 |
+| 파일/영역 | 현재 책임 |
 |---|---|
 | `mentat-core` models/ports | neutral conversation, prompt, trace IDs/types and stores |
 | `mentat-persona` assets/composer | 4 System/3 Persona factory prompts, checksum, deterministic compose |
@@ -211,16 +213,17 @@ sequenceDiagram
 | `mentat-storage` | versioned migrations and AppData persistence/recovery |
 | `mentat-app` widgets | vertical chat, prompt/model/privacy settings, grounding/Audit projections |
 
-### 4.4 현재 승인 상태
+### 4.4 현재 구현 상태
 
 ```text
-CR implementation files changed: 0
-CR requirements implemented: 0/43
-Documentation gate: REVIEW READY
-Implementation authorization: PENDING USER CR-UX-001 GO
+CR requirements Implemented+Verified: 29/43
+CR requirements Partial: 9/43
+CR requirements Not Implemented: 5/43
+Documentation gate: SYNCHRONIZED — RE-AUDIT PENDING
+Implementation authorization: RECEIVED 2026-08-19 CR-UX-001 GO
 ```
 
-### 4.5 구현 착수 시 우선 제거할 현행 위험
+### 4.5 구현 과정에서 처리한 기준선 위험
 
 | 현행 위험 | 현재 위치 | 계획 처리 |
 |---|---|---|

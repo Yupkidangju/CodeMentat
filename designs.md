@@ -4,7 +4,7 @@
 - **문서 버전:** 2.0.0-implementation (`CR-UX-001`)
 - **표준 규격:** AI Implementation Documentation Standard Section 5
 - **기준 작성일:** 2026-08-18 (최종 갱신: 2026-08-19)
-- **현재 상태:** `CR-0~2 PASS / CR-3~4 IN PROGRESS / CR-5 PARTIAL VERIFIED`
+- **현재 상태:** `AgentLoop/egress/Grounding/Audit production 연결 완료 — 전체 CR은 29/43 Verified, 재감사 대기`
 - **역사적 구현:** 기존 3-Tier/Pill sections와 `MentatApp`은 v0.1 회귀·Audit migration inventory로 보존한다. 기본 실행 경로는 `MentatChatApp`이며 layout authority는 `DEC-UI-004`다.
 
 ---

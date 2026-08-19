@@ -1,34 +1,34 @@
 # CR-UX-001 요구사항 추적표
 
-- **상태:** `PLAN ONLY — IMPLEMENTATION NOT STARTED`
+- **상태:** `PRODUCTION IMPLEMENTATION PARTIAL — RE-AUDIT REQUEST PENDING`
 - **구현 승인:** 2026-08-19 `CR-UX-001 GO` 수신
-- **상태 의미:** 아래 `Not Implemented`는 계획 누락이 아니라 현재 코드에 기능이 아직 없음을 뜻한다.
+- **상태 의미:** `Implemented+Verified`는 production call site와 실행 테스트가 모두 있는 항목, `Partial`은 일부 계층 또는 수용 시나리오가 남은 항목, `Not Implemented`는 현재 기능이 없는 항목이다.
 
 ## 1. 기능 요구사항 FR-027~047
 
 | ID | 소유 단계 | 계획 파일/모듈 | 계획 검증 | 현재 상태 |
 |---|---|---|---|---|
-| FR-027 | CR-2 | `mentat-analysis/conversation_orchestrator.rs`, inference fake, app chat | `chat_without_repository_streams_and_calls_no_tools` | Implemented+Verified |
+| FR-027 | CR-2 | `mentat-analysis/agent_loop.rs`, inference fake, app chat | `agent_chat_without_repository_streams_free_markdown_and_calls_no_tools` | Implemented+Verified |
 | FR-028 | CR-2/7 | core conversation, orchestrator, storage | `mixed_chat_repository_followup_keeps_context` | Partial — CR-1 domain/storage |
 | FR-029 | CR-2/7 | conversation history/compaction | `followup_resolves_previous_subject_before_and_after_compaction` | Not Implemented |
-| FR-030 | CR-3 | `repository_tools.rs`, `agent_loop.rs` | `advisor_discovers_implementation_without_path_hint` | Partial — local loop verified |
+| FR-030 | CR-3 | `repository_tools.rs`, `agent_loop.rs`, provider loopback | `production_agent_loop_executes_provider_tool_round_and_returns_grounding` | Implemented+Verified |
 | FR-031 | CR-3 | core repository port, analysis tool registry | six-tool contract + compile/API surface no-write check | Implemented+Verified |
-| FR-032 | CR-3/7 | inference agent types, Gemini/OpenAI adapters | provider semantic contract fixture suite | Partial — Agent v1/local fake |
+| FR-032 | CR-3/7 | inference agent types, Gemini/OpenAI native adapters | OpenAI full loop + Gemini/OpenAI exact-body fixtures | Implemented+Verified — native mapping |
 | FR-033 | CR-2 | AgentEvent, orchestrator, chat storage/UI | `streamed_markdown_equals_completed_and_reloaded_markdown` | Implemented+Verified |
-| FR-034 | CR-3/6 | SourceRef/GroundingTrace, grounding drawer | valid path/range jump + invalid ref rejection | Partial — trace/store, drawer pending |
-| FR-035 | CR-1/5 | PromptProfile, composer, settings editor | edit/apply affects next turn only | Partial — CR-1 CAS/store |
-| FR-036 | CR-1/5 | 4 System prompt assets, preset UI | preset checksum/load/custom transition tests | Partial — CR-1 assets/checksum |
+| FR-034 | CR-3/6 | SourceRef/GroundingTrace, grounding drawer | provider loop→SourceRef + drawer source detail + reload | Implemented+Verified |
+| FR-035 | CR-1/5 | PromptProfile, composer, settings editor | CAS Apply + active revision request binding | Implemented+Verified |
+| FR-036 | CR-1/5 | 4 System prompt assets, preset UI | factory catalog/checksum/load tests | Implemented+Verified |
 | FR-037 | CR-1/5 | Persona prompt assets/composer/editor | style changes while tool/source facts remain equal | Partial — CR-1 assets/composer |
-| FR-038 | CR-1/5 | prompt factory loader + draft state | System/Persona/both reset byte-for-byte before apply | Partial — CR-1 factory resolver |
+| FR-038 | CR-1/5 | prompt factory loader + draft state | factory reference resolution + Reset UI | Implemented+Verified |
 | FR-039 | CR-1/7 | prompt profile/version SQLite stores | reopen restore + latest five versions + corrupt fallback | Partial — CR-1 version/migration/recovery |
 | FR-040 | CR-5 | app viewport/preferences/chat layout | 240/312.5/479/480/759/760 geometry + native resize persistence | Implemented+Verified — 312.5×660 runtime/settings round-trip |
 | FR-041 | CR-1/5 | PromptComposition preview/settings | Kernel read-only + secret/absolute-path absence | Partial — CR-1 framed composition |
-| FR-042 | CR-2/6 | ordinary conversation path | “프롬프트만” yields one Markdown code block, special UI 0 | Implemented — free Markdown path |
-| FR-043 | CR-6 | Advisor/Audit projection state | Advisor audit fields 0; Audit legacy features available | Partial — validator/store, projection pending |
-| FR-044 | CR-4 | consent/tool egress/receipt/trace | pre-consent zero bytes + canonical tamper matrix | Partial — seal/store verified, adapter gate pending |
-| FR-045 | CR-7 | model capability verification/setup UI | chat/native/emulated/advisor capability matrix | Partial — chat-only activation honest |
+| FR-042 | CR-2/6 | ordinary conversation path | “프롬프트만” yields one Markdown code block, special UI 0 | Implemented+Verified |
+| FR-043 | CR-6 | Advisor/Audit projection state | tagged terminal + Audit result store/reload + UI projection | Implemented+Verified |
+| FR-044 | CR-4 | consent/tool egress/receipt/trace | exact-body equality, zero-byte rejection, redirect, durable CAS | Implemented+Verified |
+| FR-045 | CR-7 | model capability verification/setup UI | 실제 native tool probe + chat-only/repo-tools badge | Partial — emulated planner 미구현 |
 | FR-046 | CR-2/6 | stream reducer/message status | terminal replacement 0 + Advisor partial/Audit no-content cancellation | Implemented+Verified |
-| FR-047 | CR-1/5 | conversation store/chat header/privacy settings | new/delete/reopen and repository mutation 0 | Partial — new/delete/reopen implemented |
+| FR-047 | CR-1/5 | conversation store/chat header/privacy settings | new/delete/reopen implemented; privacy wipe 전수 fixture 잔여 | Implemented+Verified |
 
 ## 2. 비기능 요구사항 NFR-014~024
 
@@ -38,11 +38,11 @@
 | NFR-015 | CR-2 | AgentEvent reducer/storage/Markdown renderer | Unicode/code fence byte preservation | Implemented+Verified |
 | NFR-016 | CR-3 | AgentLimits/AgentLoop | 8 rounds/24 calls/300s/cancel boundary tests | Partial — bounded loop implemented |
 | NFR-017 | CR-3 | RepositoryToolGateway budgets | 400 lines/64KiB call/256KiB turn omissions | Implemented+Verified |
-| NFR-018 | CR-1/7 | prompt factory/storage migration recovery | corrupt DB backup/quarantine/factory boot | Partial — CR-1 v2/backup/quarantine |
-| NFR-019 | CR-3/7 | provider semantic adapters | identical event trace across provider fixtures | Not Implemented |
+| NFR-018 | CR-1/7 | prompt factory/storage migration recovery | legacy/future/corrupt/backup/quarantine/v5 fixtures | Implemented+Verified |
+| NFR-019 | CR-3/7 | provider semantic adapters | OpenAI full loop + Gemini exact-body native mapping | Partial — cross-provider identical trace fixture 잔여 |
 | NFR-020 | CR-5 | responsive widgets/Markdown code block | boundary widths no clip + code scroll/copy geometry | Partial — 250px/code runtime verified |
-| NFR-021 | CR-3/6 | GroundingTrace/SourceRef UI | repository fact reverse trace; chat trace optional | Not Implemented |
-| NFR-022 | CR-1/4/7 | AppData stores/logging/deletion | repository write 0 + delete/reopen absence | Partial — CR-1 AppData persistence |
+| NFR-021 | CR-3/6 | GroundingTrace/SourceRef UI | provider loop trace + source detail drawer + reload | Implemented+Verified |
+| NFR-022 | CR-1/4/7 | AppData stores/logging/deletion | AppData persistence/cascade 구현; privacy deletion 전수 fixture 잔여 | Partial |
 | NFR-023 | CR-2/3/4 | structured tracing fields | log capture contains IDs/metrics, raw text/secrets 0 | Not Implemented |
 | NFR-024 | CR-5/6 | chat/settings/grounding accessibility | keyboard-only workflow + accessibility labels | Not Implemented |
 
@@ -59,7 +59,7 @@
 | CON-015 | CR-2/6 | route/widget inventory | Prompt Builder type/screen/export 0 | Implemented+Verified |
 | CON-016 | CR-3/7 | tool/context budgets/compaction | per-turn byte and history threshold tests | Not Implemented |
 | CON-017 | CR-1/3 | Kernel + untrusted content wrapper | repository text cannot change prompt/tool digest | Implemented+Verified |
-| CON-018 | CR-6 | projection/mode boundary | Advisor Claim/confidence/UUID/hash widgets 0 | Not Implemented |
+| CON-018 | CR-6 | projection/mode boundary | Advisor Markdown/Audit structured projection 분리 | Implemented+Verified |
 | CON-019 | CR-1 | versioned prompt assets | factory text absent from user DB source of truth | Implemented+Verified |
 
 ## 4. 기존 요구사항 영향
@@ -95,7 +95,10 @@
 
 ```text
 Traceability coverage: 43/43 planned with owner, file surface, verification and phase
-Implemented CR requirements: 0/43
-CR-0 exit: PENDING USER APPROVAL
-Implementation handoff: AUTHORIZED — CR-3~4 IN PROGRESS
+Implemented+Verified: 29/43
+Partial: 9/43
+Not Implemented: 5/43
+CR-0 exit: APPROVED
+Production remediation: IMP-CRUX-F001 / SEC-CRUX-F001 / IMP-CRUX-F002 implemented
+Re-audit request: PENDING CLEAN COMMIT GATES
 ```

@@ -3,7 +3,7 @@
 - **문서 상태:** `APPROVED PLAN — IMPLEMENTATION ACTIVE`
 - **변경요청:** `CR-UX-001`
 - **기준일:** 2026-08-19
-- **현재 게이트:** `CR-0~2 PASS / CR-3~4 IN PROGRESS`
+- **현재 게이트:** `CR-3/4/6 REMEDIATED / CR-7 PARTIAL / CR-8 RE-AUDIT PENDING`
 - **구현 권한:** 2026-08-19 사용자 `CR-UX-001 GO` 승인 수신
 - **Prompt 원문:** `PROMPT_CONTRACT.md`
 
@@ -308,17 +308,17 @@ git diff --check
 | CR-0 | PASS | 없음 |
 | CR-1 | PASS | privacy wipe retention hardening은 CR-7 재검증 |
 | CR-2 | PASS | provider-native message golden fixture 보강 |
-| CR-3 | Partial Verified | gateway/local loop 완료, cloud native/emulated body gate 연결 필요 |
-| CR-4 | Partial Verified | seal/v4 receipt store 완료, adapter exact-body authorization 연결 필요 |
+| CR-3 | Verified | Chat UI 단일 AgentLoop, OpenAI/Gemini native mapping, provider loopback 완료 |
+| CR-4 | Verified | redaction/consent/exact-body seal/durable receipt/redirect zero-replay 완료 |
 | CR-5 | Partial Verified | 실제 250px UI/prompt 확인, 600×800 실제 drag smoke 미실행 |
-| CR-6 | Partial Verified | Audit validator/store 완료, Grounding drawer/Audit projection 연결 필요 |
-| CR-7 | In Progress | capability tool probe, context compaction, platform 재검증 |
-| CR-8 | Not Started | 독립 3-pass audit |
+| CR-6 | Verified | Grounding drawer/source detail와 tagged Audit projection/store/reload 완료 |
+| CR-7 | Partial | native capability probe 완료; emulated planner/context compaction/platform 전수 재검증 잔여 |
+| CR-8 | Pending | clean commit 독립 3-pass re-audit 요청 |
 
 ```text
 CR-UX-001 Plan: APPROVED
 CR-0 Documentation: PASS
-Implementation: AUTHORIZED — CR-3~4 IN PROGRESS
+Implementation: PRODUCTION PARTIAL — 29/43 Implemented+Verified
 Approval received: 2026-08-19 CR-UX-001 GO
 ```
 
