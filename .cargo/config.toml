@@ -1,0 +1,2 @@
+[alias]
+mentat-build = "run --package xtask --"

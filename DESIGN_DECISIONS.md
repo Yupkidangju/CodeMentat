@@ -100,6 +100,12 @@
 - **내장 로컬:** 선택지는 제공하되 네이티브 실행 엔진 또는 설치 모델이 없으면 빈 카탈로그와 구조화 오류를 반환하여 활성화를 차단한다.
 - **대안 및 기각 사유:** 실패 시 코드 내 기본 모델 목록을 표시하는 방식은 존재하지 않거나 권한 없는 모델을 활성화할 수 있어 기각한다.
 
+### [DEC-INF-006] Gemini 호환성 probe는 thinking-aware 응답 전체를 검증한다
+- **배경:** `maxOutputTokens: 1`은 thinking 모델이 visible text 전에 `MAX_TOKENS`로 끝나게 할 수 있고, 첫 part 고정 포인터는 thought/signature 뒤의 text를 놓친다.
+- **결정:** exact-OK 지시 자체는 유지하되 임의 output token cap을 제거한다. 모든 candidate의 모든 part에서 non-empty text를 검색하며, text가 없으면 block/finish/thought token metadata를 노출한다.
+- **보안 경계:** 응답은 1MiB 제한과 timeout을 유지하고 provider 원문 전체나 자격 증명을 진단 메시지에 포함하지 않는다.
+- **결과:** 모델 ID 하드코딩이나 fail-open 없이 Gemini 2.5/3 계열의 실제 text 생성 능력을 판정한다.
+
 ### [DEC-SEC-005] 사용자 제외 토글은 generation 가드로 이전 패킷을 즉시 무효화한다 (SEC-F011)
 - **배경:** 제외 체크박스 변경 후 비동기 재조립이 끝나기 전 기존 `pending_egress_packet`을 승인하면, UI에는 제외된 파일이 전송 payload에는 남는 consent TOCTOU가 발생한다.
 - **결정:**
@@ -156,6 +162,12 @@
 
 ### [DEC-REL-001] Cargo 0.1.0과 문서 0.1.0-dev (IMP-F002)
 - **결정:** 패키지 SemVer는 `0.1.0`이다. `0.1.0-dev`는 미릴리스 문서 상태이며 다른 제품을 가리키지 않는다.
+
+### [DEC-BUILD-001] Rust xtask 기반 멀티 플랫폼 빌드 진입점
+- **배경:** 플랫폼별 독립 스크립트에 빌드 로직을 복제하면 target triple, 품질 게이트와 산출물 경로가 쉽게 어긋난다.
+- **결정:** 의존성 없는 workspace `xtask`가 메뉴/CLI 파싱, 타깃 매핑, 게이트 및 Cargo 실행을 소유한다. PowerShell과 POSIX shell 파일은 인자를 그대로 `cargo mentat-build`에 전달하는 wrapper로만 유지한다.
+- **실패 경계:** 명시적 target이 rustup에 설치되지 않았거나 linker/SDK가 없으면 다른 플랫폼 또는 host build로 fallback하지 않는다.
+- **결과:** Windows/Linux/macOS에서 같은 명령 계약과 테스트된 build plan을 사용한다.
 
 ### [DEC-INF-003] Cloud citation은 current snapshot의 hash/excerpt/range와 일치해야 한다 (IMP-F004)
 - **배경:** path만 맞으면 존재하는 파일을 가리키는 가짜 citation이 Observed로 남을 수 있다.

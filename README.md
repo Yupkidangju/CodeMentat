@@ -66,6 +66,21 @@ cargo test --workspace
 cargo run -p mentat-app
 ```
 
+### 메뉴형/명령형 멀티 플랫폼 빌드
+
+```bash
+# 대화형 메뉴
+cargo mentat-build
+
+# 현재 OS release + 품질 게이트
+cargo mentat-build build --platform current --profile release --gates
+
+# 명시적 타깃 dry-run
+cargo mentat-build build --platform macos --arch aarch64 --profile release --dry-run
+```
+
+Windows는 `./scripts/build.ps1`, Linux/macOS는 `sh ./scripts/build.sh`로 같은 메뉴와 인자를 사용할 수 있습니다. 명시적 크로스 타깃은 해당 Rust target과 linker/SDK가 준비되어야 하며, 준비되지 않으면 다른 산출물로 대체하지 않습니다.
+
 ### UI 문제 해결 / UI Troubleshooting / UI トラブルシューティング / UI 疑難排解 / UI 故障排除
 
 - **한국어:** 내장 한글 폴백 글꼴과 불투명 흰색 고대비 테마로 사각형 글리프와 흐린 글자를 방지합니다. 설정·질문·증거 패널은 자동 확장되며 상단의 `종료 ×`로 앱을 닫을 수 있습니다.
@@ -73,6 +88,14 @@ cargo run -p mentat-app
 - **日本語:** 内蔵の韓国語フォールバックフォントと不透明な高コントラスト白テーマで、文字化けと読みにくい文字を防ぎます。各パネルは自動拡張され、`終了 ×`でアプリを閉じられます。
 - **繁體中文:** 內嵌韓文字型與不透明的高對比白色主題可避免方框字元及文字過淡。設定、對話與證據面板會自動展開，並可用 `結束 ×` 關閉程式。
 - **简体中文:** 内置韩文字体和不透明高对比白色主题可避免方框字符与文字过淡。设置、对话和证据面板会自动展开，并可用 `退出 ×` 关闭程序。
+
+### Gemini 활성화 문제 해결 / Gemini Activation Troubleshooting / Gemini 有効化 / Gemini 啟用 / Gemini 激活
+
+- **한국어:** 모델 목록 조회 후 호환성 확인은 thinking 응답의 모든 candidate/part를 검사합니다. text가 없으면 `finishReason`과 thinking token 진단을 표시하며, 정상 검증 후에만 활성화됩니다.
+- **English:** Model verification scans every candidate/part in thinking responses. If visible text is absent, the UI reports `finishReason` and thinking-token diagnostics; activation remains fail-closed.
+- **日本語:** モデル検証では thinking 応答の全 candidate/part を確認します。表示テキストがない場合は `finishReason` と thinking token 診断を表示し、検証成功後のみ有効化します。
+- **繁體中文:** 模型驗證會檢查 thinking 回應中的所有 candidate/part。若沒有可見文字，介面會顯示 `finishReason` 與 thinking token 診斷，僅在驗證成功後啟用。
+- **简体中文:** 模型验证会检查 thinking 响应中的所有 candidate/part。若没有可见文本，界面会显示 `finishReason` 与 thinking token 诊断，仅在验证成功后激活。
 
 ---
 

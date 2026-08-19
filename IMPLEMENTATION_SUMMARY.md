@@ -69,10 +69,11 @@ sequenceDiagram
 | `mentat-storage` | AppData SQLite 영속화 | `SqliteStorage`, 최근 저장소, 프로필, 스냅샷, canonical root 조회 | `test_sqlite_storage_save_and_list_recent_repos`, `test_imp_f005_find_repo_by_canonical_root` |
 | `mentat-analysis` | 정적 분석 및 유출 통제 | 모든 cloud claim과 ConflictItem evidence invariant, verified answer projection, canonical seal, live hash lineage | `test_imp_f004_cloud_conflict_items_require_unique_valid_evidence`, `test_imp_f004_claim_invariants_reject_empty_duplicate_and_invalid_confidence` |
 | `mentat-inference` | 추론 도메인 인터페이스 | 동적 `ModelCatalog`, `ModelVerification`, 하드코딩 없는 `BackendProfile`, URL 검증, 테스트 더블 | `production_profile_does_not_choose_a_hardcoded_model`, `model_catalog_rejects_empty_ids_and_deduplicates_provider_data` |
-| `mentat-inference-openai` | 멀티 프로바이더 스트리밍 | Gemini/OpenAI 동적 모델 검색, redirect 차단과 secure client fail-closed, SSE | `gemini_cross_origin_redirect_never_receives_api_key`, `gemini_secure_client_build_failure_blocks_every_network_operation` |
+| `mentat-inference-openai` | 멀티 프로바이더 스트리밍 | Gemini thinking-aware 전체 candidate/part probe, finish 진단, 동적 모델 검색, redirect/client fail-closed, SSE | `selected_gemini_model_must_pass_a_real_generation_probe`, `gemini_verification_reports_finish_reason_when_visible_text_is_missing`, `gemini_cross_origin_redirect_never_receives_api_key` |
 | `mentat-inference-llama` | 미래 온디바이스 계약 | `NativeLlamaContract`, 하드웨어 탐지 스텁 | `test_native_llama_contract_isolated_context_and_kv_cleanup` 등 3개 |
 | `mentat-persona` | 페르소나 및 아나운서 | 이모지 글꼴에 의존하지 않는 3가지 페르소나 표시명, 사실 보존 렌더러, 중요도 기반 알림 정책 | `test_persona_rendering_preserves_facts_and_evidence`, `test_announcement_policy_levels` |
 | `mentat-app` | eframe 데스크톱 UI | 고대비 스위스 라이트 테마, 고정 trailing/저장소 ellipsis, 명시적 종료 수명주기, Draft/Verified/Active 공급자 상태, incomplete query gate | `long_ascii_repository_name_keeps_trailing_controls_visible_at_640_and_760`, `long_cjk_repository_name_keeps_trailing_controls_visible_at_640_and_760`, `shutdown_cancels_scan_and_stream_tokens` |
+| `xtask` | 멀티 플랫폼 빌드 오케스트레이터 | 메뉴/CLI 파싱, Windows/Linux/macOS target matrix, rustup preflight, locked gates/build plan, dry-run | `command_mode_parses_platform_arch_profile_and_switches`, `all_platforms_expand_to_the_documented_target_matrix`, `gated_release_plan_is_locked_and_builds_only_the_app` |
 
 ### UI 복구 실행 증거 (2026-08-19)
 
@@ -85,12 +86,14 @@ sequenceDiagram
 
 ## 3. 품질 게이트 검증 결과 (Verification Results)
 
-- **단위/회귀 테스트:** `cargo test --workspace --locked` 실행 증거 (102 passed, 1 ignored 100k/2GiB profile)
+- **단위/회귀 테스트:** `cargo test --workspace --locked` 실행 증거 (108 passed, 1 ignored 100k/2GiB profile)
 - **100k/2GiB profile:** 100,000 files / 2,147,483,648 bytes / preview 3,358,720 bytes / scan 80,377ms / Windows peak working set 46,231,552 bytes / 128MiB threshold (별도 ignored gate PASS)
 - **포맷팅 검사:** `cargo fmt --all -- --check` (0 diffs)
 - **정적 분석:** `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` (0 errors, 0 warnings)
 - **릴리스 바이너리 빌드:** `cargo build --release -p mentat-app --locked` (완료)
 - **Windows UI 런타임:** `760x56` Tier 1에서 우측 `고정`·`설정`·`종료 ×` 순서와 `760x480` 설정 확장, 종료 후 창 0개를 확인. 640/760px 긴 ASCII/CJK geometry는 headless render tests로 검증
+- **빌드 오케스트레이터:** `cargo mentat-build build --platform current --profile release --gates`가 fmt→Clippy→107 tests→locked release를 순서대로 통과하고 `target/release/mentat-app.exe`를 생성. PowerShell wrapper 실제 debug build, 메뉴 종료, POSIX shell syntax와 6-target dry-run을 확인
+- **CI matrix 연결:** Windows/Linux/macOS runner의 release 단계가 `cargo mentat-build build --platform current`를 사용하고 각 runner에서 6-target dry-run 계약을 함께 검사
 - **Windows global shortcut runtime:** 다른 앱 포커스에서 `Ctrl+Alt+M` 전역 event 수신과 Code Mentat 표시 유지/Tier 1 non-hide fallback 확인
 - **Baseline 원문 대조:** `CODE_MENTAT_SPEC.md`와 `spec.md`의 FR/NFR/CON 47개 정의·수용 기준, mismatch 0
 - **의존성 보안 감사:** `cargo audit --no-fetch --file Cargo.lock` FAIL — `quick-xml 0.30.0` High 2건(`RUSTSEC-2026-0194`, `RUSTSEC-2026-0195`)과 unmaintained 2건. High 2건은 `DEC-SEC-004`의 Windows 비도달 Accepted Risk이며 audit 실패를 PASS로 표기하지 않음

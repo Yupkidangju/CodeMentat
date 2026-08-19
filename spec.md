@@ -96,6 +96,7 @@ Draft
 - 모델 목록 응답은 신뢰하지 않는 외부 데이터로 파싱·검증하고 빈 ID, 중복 ID, 생성 비지원 모델을 제거한다.
 - 활성화는 검증 당시 프로필과 현재 Draft가 완전히 같을 때만 가능하다.
 - API 키가 없는 현재 개발 환경에서는 외부 실계정 검증을 수행하지 않고 루프백 픽스처로 계약을 검증한다.
+- Gemini 선택 모델 probe는 thinking token이 visible text를 소진하지 않도록 임의의 1-token output cap을 사용하지 않는다. 응답의 모든 candidate/content/part에서 non-empty text를 찾고, 없으면 `promptFeedback.blockReason`, candidate `finishReason`/`finishMessage`, `usageMetadata.thoughtsTokenCount`를 구조화 진단에 반영한다.
 
 ### 1.5 Canonical Egress Seal 보강 요구사항
 
@@ -131,3 +132,11 @@ Draft
 - Tier 1/2/3/설정 뷰포트는 각각 `760x56`, `760x360`, `900x620`, `760x480`으로 고정한다. Tier 1 입력창은 최소 200pt를 확보하고 좁아지면 `/onboard` 보조 칩부터 숨긴다.
 - Tier 1의 `고정`·`설정`·`종료 ×`는 우측 180pt trailing 영역에 먼저 배치해 동적 문자열이 침범할 수 없게 한다. 저장소 버튼은 최대 120pt이며 초과하는 ASCII/CJK 이름은 한 줄 ellipsis로 줄이고 전체 이름을 tooltip으로 제공한다.
 - 최소 창 폭 640px과 기본 폭 760px에서 긴 ASCII/CJK 저장소명을 사용해도 질문 입력 폭은 200pt 이상이고 trailing 세 버튼의 hit rect는 viewport 안에 있어야 한다.
+
+### 1.9 멀티 플랫폼 빌드 오케스트레이터 요구사항
+
+- Rust 표준 라이브러리만 사용하는 workspace `xtask`를 로컬 빌드의 단일 진실원으로 둔다. 인자 없이 실행하면 대화형 메뉴, `build`/`check` 인자를 주면 비대화형 명령으로 동작한다.
+- 지원 타깃은 Windows/Linux의 `x86_64`·`aarch64`, macOS의 `x86_64`·`aarch64`이며 `current`는 host 기본 타깃을 사용한다.
+- 명시적 target triple은 `rustup target list --installed` 결과에 있어야 한다. 미설치 타깃이나 필요한 linker/SDK가 없으면 host 산출물로 대체하지 않고 원인과 준비 명령을 표시하며 실패한다.
+- `--gates`는 build 전에 formatter, strict Clippy, workspace tests를 순서대로 실행한다. 모든 Cargo 호출은 `--locked`를 사용하고 빌드 대상 package는 `mentat-app`으로 고정한다.
+- `--dry-run`은 파일·도구 상태를 변경하지 않고 실행할 명령과 예상 산출물만 출력한다.

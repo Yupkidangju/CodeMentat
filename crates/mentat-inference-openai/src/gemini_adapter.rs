@@ -85,6 +85,73 @@ impl Default for GeminiAdapter {
 }
 
 impl GeminiAdapter {
+    fn generated_text(value: &serde_json::Value) -> Option<&str> {
+        value
+            .get("candidates")?
+            .as_array()?
+            .iter()
+            .filter_map(|candidate| candidate.pointer("/content/parts")?.as_array())
+            .flatten()
+            .filter(|part| part.get("thought").and_then(|flag| flag.as_bool()) != Some(true))
+            .filter_map(|part| part.get("text").and_then(|text| text.as_str()))
+            .find(|text| !text.trim().is_empty())
+    }
+
+    fn bounded_metadata(value: &str) -> String {
+        const MAX_CHARS: usize = 160;
+        let mut text: String = value.chars().take(MAX_CHARS).collect();
+        if value.chars().count() > MAX_CHARS {
+            text.push('…');
+        }
+        text
+    }
+
+    fn missing_text_message(value: &serde_json::Value) -> String {
+        let mut details = Vec::new();
+        if let Some(reason) = value
+            .pointer("/promptFeedback/blockReason")
+            .and_then(|reason| reason.as_str())
+        {
+            details.push(format!("prompt block: {}", Self::bounded_metadata(reason)));
+        }
+        if let Some(candidate) = value
+            .get("candidates")
+            .and_then(|candidates| candidates.as_array())
+            .and_then(|candidates| candidates.first())
+        {
+            if let Some(reason) = candidate
+                .get("finishReason")
+                .and_then(|reason| reason.as_str())
+            {
+                details.push(format!("finish reason: {}", Self::bounded_metadata(reason)));
+            }
+            if let Some(message) = candidate
+                .get("finishMessage")
+                .and_then(|message| message.as_str())
+            {
+                details.push(format!(
+                    "finish message: {}",
+                    Self::bounded_metadata(message)
+                ));
+            }
+        }
+        if let Some(tokens) = value
+            .pointer("/usageMetadata/thoughtsTokenCount")
+            .and_then(|tokens| tokens.as_u64())
+        {
+            details.push(format!("thinking tokens: {tokens}"));
+        }
+
+        if details.is_empty() {
+            "Gemini 응답에 visible text 생성 결과가 없습니다.".to_string()
+        } else {
+            format!(
+                "Gemini 응답에 visible text 생성 결과가 없습니다. ({})",
+                details.join(", ")
+            )
+        }
+    }
+
     fn api_key_header(profile: &BackendProfile) -> Result<HeaderMap, MentatError> {
         let api_key = profile.api_key.as_deref().unwrap_or("");
         if api_key.is_empty() {
@@ -201,8 +268,7 @@ impl GeminiAdapter {
             .headers(Self::api_key_header(profile)?)
             .timeout(Duration::from_secs(profile.timeout_secs.clamp(5, 300)))
             .json(&json!({
-                "contents": [{"parts": [{"text": "Reply with OK."}]}],
-                "generationConfig": {"maxOutputTokens": 1}
+                "contents": [{"parts": [{"text": "Reply exactly with OK."}]}]
             }))
             .send()
             .await
@@ -224,16 +290,13 @@ impl GeminiAdapter {
             "MODEL_VERIFY_INVALID_JSON",
         )
         .await?;
-        let compatible = value
-            .pointer("/candidates/0/content/parts/0/text")
-            .and_then(|text| text.as_str())
-            .is_some_and(|text| !text.trim().is_empty());
+        let compatible = Self::generated_text(&value).is_some();
         Ok(ModelVerification {
             compatible,
             message: if compatible {
                 "선택 Gemini 모델이 생성 요청에 정상 응답했습니다.".to_string()
             } else {
-                "Gemini 응답에 텍스트 생성 결과가 없습니다.".to_string()
+                Self::missing_text_message(&value)
             },
             latency_ms: Some(start.elapsed().as_millis() as u64),
         })

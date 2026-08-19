@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "xtask",
     "crates/mentat-core",
     "crates/mentat-repository",
     "crates/mentat-analysis",

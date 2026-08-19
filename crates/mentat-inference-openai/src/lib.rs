@@ -377,7 +377,8 @@ mod tests {
             let request = read_http_request(&mut stream).await;
             let request_text = String::from_utf8_lossy(&request);
             assert!(request_text.starts_with("POST /v1beta/models/dynamic-gemini:generateContent "));
-            let body = r#"{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}"#;
+            assert!(!request_text.contains("\"maxOutputTokens\":1"));
+            let body = r#"{"candidates":[{"content":{"parts":[{"thought":true,"text":""}]}},{"content":{"parts":[{"thought":true,"text":"internal"},{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"thoughtsTokenCount":7}}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(), body
@@ -395,6 +396,36 @@ mod tests {
         };
         let verification = adapter.verify_model(&profile).await.expect("verification");
         assert!(verification.compatible);
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn gemini_verification_reports_finish_reason_when_visible_text_is_missing() {
+        use tokio::io::AsyncWriteExt;
+        let (listener, port) = bind_listener().await;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let _ = read_http_request(&mut stream).await;
+            let body = r#"{"candidates":[{"content":{"parts":[]},"finishReason":"MAX_TOKENS","finishMessage":"Output limit reached"}],"usageMetadata":{"thoughtsTokenCount":128}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            stream.write_all(response.as_bytes()).await.expect("write");
+        });
+
+        let adapter = GeminiAdapter::new();
+        let profile = BackendProfile {
+            provider: ProviderKind::GoogleGemini,
+            base_url: format!("http://127.0.0.1:{port}"),
+            model: "dynamic-gemini".to_string(),
+            api_key: Some("test-key".to_string()),
+            ..Default::default()
+        };
+        let verification = adapter.verify_model(&profile).await.expect("verification");
+        assert!(!verification.compatible);
+        assert!(verification.message.contains("MAX_TOKENS"));
+        assert!(verification.message.contains("thinking tokens: 128"));
         server.await.expect("server");
     }
 
