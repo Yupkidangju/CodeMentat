@@ -86,4 +86,3 @@ MentatChatApp
 ## 5. 요청 판정
 
 이 문서는 구현 완료 주장이나 감사 PASS가 아니다. 독립 감사자는 `AI_AUDIT_DOC_STANDARD.md`와 `audit_roadmap.md`의 3-pass 절차로 새 보고서를 생성하고, Critical/High/Major/Minor finding과 `SEC-F007`을 다시 판정해야 한다.
-
