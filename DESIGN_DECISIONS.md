@@ -268,3 +268,12 @@
 - **실패 경계:** native store unavailable/locked/missing/corrupt 시 자체 암호 파일이나 이전 profile key로 fallback하지 않고 재입력 또는 session-only로 강등한다. Provider/Base URL 변경 시 이전 binding을 제거한다.
 - **한계:** 동일 사용자 권한 malware와 실행 중 process memory compromise까지 방어한다고 주장하지 않는다.
 - **대안 및 기각:** 자체 cipher/XOR/machine-ID derivation은 key management와 무결성 문제로 기각. master-password+표준 KDF/AEAD는 가능하지만 매 실행 입력이 필요해 자동 복원 기본 UX와 맞지 않아 기각.
+
+### [DEC-SEC-011] provider가 직렬화한 exact body에서 tool egress를 승인한다
+
+- **상태:** `APPROVED — Re-audit #18 remediation`
+- **배경:** analysis 계층의 semantic tool result만 seal하면 provider별 JSON 직렬화 과정에서 추가되거나 바뀐 bytes를 송신 직전에 검증할 수 없다.
+- **결정:** `mentat-inference`는 provider 중립 `ProviderBodyEgressGate` port만 소유한다. OpenAI/Gemini adapter는 최종 JSON body bytes를 만든 직후 gate를 호출하고, `mentat-app`의 adapter가 runtime consent capability, `ToolEgressSealer`, `mentat-storage` durable receipt를 조율한다. gate가 없거나 receipt 저장/재검증이 실패하면 socket write를 시작하지 않는다.
+- **상태 전이:** body 검증 및 `Prepared` 저장 뒤 send 성공은 `Sent`, 명확한 송신 전 실패는 `Failed`, send future가 network error로 끝나 전송 여부를 확정할 수 없으면 `OutcomeUnknown`이다. terminal 전이는 compare-and-set 한 번만 허용한다.
+- **redaction:** RepositoryToolGateway는 content와 SourceRef excerpt의 비밀 패턴을 먼저 제거하며 canonical ref의 redacted payload digest는 실제 provider body에 포함된 redacted excerpt에서 계산한다.
+- **대안 및 기각:** provider adapter가 SQLite 또는 repository에 직접 의존하는 구조는 계층 역전과 데이터 접근 확대로 기각한다. analysis가 provider wire JSON을 만드는 구조도 dialect 책임을 침범하므로 기각한다.

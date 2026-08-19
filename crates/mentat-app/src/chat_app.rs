@@ -6,7 +6,7 @@ use crate::widgets::markdown::render_markdown;
 use crate::widgets::settings_panel::SettingsPanel;
 use eframe::egui::{self, RichText, ScrollArea, ViewportCommand};
 use futures_util::StreamExt;
-use mentat_analysis::repository_tools::RepositoryToolGateway;
+use mentat_analysis::repository_tools::{repository_tool_definitions, RepositoryToolGateway};
 use mentat_core::{
     ChatMessage, ChatRole, ComposerSubmitMode, Conversation, ConversationPersistence,
     ConversationTurn, ExperiencePreset, FileRecord, MessageStatus, NewConversation,
@@ -1081,18 +1081,21 @@ impl MentatChatApp {
         self.composer.clear();
         self.status.clear();
 
-        let request = AgentRequest {
-            request_id: Uuid::new_v4(),
-            conversation_id: self.conversation.id,
+        let repository = self.repository.as_ref().map(|binding| {
+            (
+                &binding.snapshot,
+                binding.session.profile().display_name.as_str(),
+            )
+        });
+        let request = build_agent_request(
+            self.conversation.id,
             turn_id,
             profile,
-            effective_system_prompt: composition.effective_system_prompt,
+            composition.effective_system_prompt,
             messages,
-            tools: Vec::new(),
-            repository_context: None,
-            response_contract: ResponseContract::AdvisorMarkdown,
-            limits: AgentLimits::default(),
-        };
+            repository,
+            ResponseContract::AdvisorMarkdown,
+        );
         let cancel = CancellationToken::new();
         self.stream_cancel = Some(cancel.clone());
         self.active_turn = Some(ActiveTurn {
@@ -1541,6 +1544,47 @@ fn chat_to_agent_message(message: &ChatMessage) -> Option<AgentMessage> {
     }
 }
 
+fn build_agent_request(
+    conversation_id: Uuid,
+    turn_id: Uuid,
+    profile: mentat_inference::BackendProfile,
+    effective_system_prompt: String,
+    messages: Vec<AgentMessage>,
+    repository: Option<(&RepositorySnapshot, &str)>,
+    response_contract: ResponseContract,
+) -> AgentRequest {
+    let repository_context =
+        repository.map(
+            |(snapshot, display_name)| mentat_inference::RepositoryContext {
+                repository_id: snapshot.repo_id,
+                snapshot_id: snapshot.id,
+                snapshot_status: snapshot.status.clone(),
+                tools_available: snapshot.status == mentat_core::SnapshotStatus::Ready,
+                display_name: display_name.to_string(),
+            },
+        );
+    let tools = match repository_context.as_ref() {
+        Some(context) if context.tools_available => repository_tool_definitions(),
+        Some(_) => repository_tool_definitions()
+            .into_iter()
+            .filter(|definition| definition.name == "repo_status")
+            .collect(),
+        None => Vec::new(),
+    };
+    AgentRequest {
+        request_id: Uuid::new_v4(),
+        conversation_id,
+        turn_id,
+        profile,
+        effective_system_prompt,
+        messages,
+        tools,
+        repository_context,
+        response_contract,
+        limits: AgentLimits::default(),
+    }
+}
+
 fn append_status(status: &mut String, message: &str) {
     if !status.is_empty() {
         status.push('\n');
@@ -1718,5 +1762,30 @@ mod tests {
             persona_selection_from_source(&custom),
             (PersonaKind::DefaultAnalyst, true)
         );
+    }
+
+    #[test]
+    fn ready_repository_request_contains_gateway_catalog_and_context() {
+        let snapshot = RepositorySnapshot {
+            id: Uuid::new_v4(),
+            repo_id: Uuid::new_v4(),
+            status: mentat_core::SnapshotStatus::Ready,
+            file_count: 1,
+            total_bytes: 10,
+            tree_digest: "root".to_string(),
+            created_at: chrono::Utc::now(),
+        };
+        let request = build_agent_request(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            mentat_inference::BackendProfile::default(),
+            "system".to_string(),
+            vec![AgentMessage::user("구현을 찾아줘")],
+            Some((&snapshot, "fixture")),
+            ResponseContract::AdvisorMarkdown,
+        );
+
+        assert_eq!(request.tools.len(), 6);
+        assert_eq!(request.repository_context.unwrap().snapshot_id, snapshot.id);
     }
 }

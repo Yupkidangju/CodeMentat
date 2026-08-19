@@ -283,7 +283,20 @@ git diff --check
 | 공급자 tool dialect drift | 높음 | 공통 semantic contract + provider golden fixtures + capability 제한 |
 | 장기 대화 비용/누락 | 중간 | 동결 compaction threshold와 follow-up regression fixtures |
 
-## 7. 실행 상태와 잔여 게이트
+## 7. Re-audit #18 remediation 실행 순서
+
+`docs/audit/audit_report_19.md`와 `audit_report_20.md`의 Major 4건을 다음 production 수직 경로로 닫는다.
+
+1. 모든 chat turn을 `AgentLoop` 단일 진입점으로 통합한다. 저장소가 없으면 tool catalog/context가 없는 동일 경로를 사용한다.
+2. repository tool result는 gateway redaction 이후에만 provider message로 직렬화한다.
+3. provider adapter는 정확한 JSON body bytes를 만든 뒤 공통 `ProviderBodyEgressGate`에 전달한다. gate는 runtime consent, canonical seal, SQLite `Prepared` 영속, body 재검증을 모두 통과해야 송신을 허용한다.
+4. HTTP send 결과는 `Sent`, 명확한 송신 전 실패는 `Failed`, 송신 결과를 확정할 수 없는 network error는 `OutcomeUnknown`으로 단방향 전이한다.
+5. `AgentEvent::Completed`와 `GroundingTrace`를 같은 async 결과로 UI reducer에 전달하고 Advisor drawer 또는 Audit result projection으로 분리한다.
+6. 43개 추적 row는 production call site와 실행된 test 증거만으로 재판정한다. 구현되지 않은 compaction/eval/accessibility 항목은 Partial/Not Implemented를 유지한다.
+
+이 remediation은 `SEC-CRUX-F001`을 우회하는 단순 cloud 차단 해제를 금지한다. exact-body gate 또는 durable storage가 없으면 repository tool egress는 계속 fail-closed다.
+
+## 8. 실행 상태와 잔여 게이트
 
 2026-08-19 사용자 승인을 수신해 구현이 진행 중이다.
 

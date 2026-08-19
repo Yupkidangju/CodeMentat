@@ -8,7 +8,24 @@ use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 use futures_util::StreamExt;
 use mentat_core::error::MentatError;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+
+pub trait ProviderBodyEgressGate: Send + Sync {
+    fn authorize_exact_body(
+        &self,
+        request: &AgentRequest,
+        exact_provider_body: &[u8],
+    ) -> Result<Vec<uuid::Uuid>, MentatError>;
+
+    fn finish(
+        &self,
+        receipt_ids: &[uuid::Uuid],
+        status: mentat_core::ToolEgressStatus,
+    ) -> Result<(), MentatError>;
+
+    fn receipt_ids(&self) -> Result<Vec<uuid::Uuid>, MentatError>;
+}
 
 #[async_trait]
 pub trait InferenceBackend: Send + Sync {
@@ -109,6 +126,29 @@ pub trait InferenceBackend: Send + Sync {
                 safe_message: message,
             },
         })))
+    }
+
+    async fn infer_round_stream_guarded(
+        &self,
+        request: AgentRequest,
+        cancel_token: CancellationToken,
+        egress_gate: Option<Arc<dyn ProviderBodyEgressGate>>,
+    ) -> Result<BoxStream<'static, InferenceRoundEvent>, MentatError> {
+        let contains_tool_result = request
+            .messages
+            .iter()
+            .any(|message| matches!(message.content, AgentMessageContent::ToolResult(_)));
+        if contains_tool_result && request.profile.provider.requires_api_key() {
+            return Err(MentatError::BackendError {
+                code: if egress_gate.is_some() {
+                    "AGENT_TOOLS_UNSUPPORTED".to_string()
+                } else {
+                    "TOOL_EGRESS_GATE_REQUIRED".to_string()
+                },
+                message: "외부 provider tool result는 exact-body egress gate를 구현한 adapter만 전송할 수 있습니다.".to_string(),
+            });
+        }
+        self.infer_round_stream(request, cancel_token).await
     }
 
     fn estimate_tokens(&self, text: &str) -> usize {

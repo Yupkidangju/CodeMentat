@@ -3,6 +3,7 @@ use mentat_core::{
     RepositoryToolCall, RepositoryToolName, RepositoryToolResult, SnapshotStatus, SourceRef,
     ToolOmission, ToolOmissionReason,
 };
+use mentat_inference::ToolDefinition;
 use sha2::{Digest, Sha256};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -11,6 +12,74 @@ use uuid::Uuid;
 
 const MAX_RESULT_BYTES: usize = 64 * 1024;
 const MAX_READ_LINES: usize = 400;
+
+pub fn repository_tool_definitions() -> Vec<ToolDefinition> {
+    RepositoryToolName::ALL
+        .into_iter()
+        .map(|name| ToolDefinition {
+            name: name.wire_name().to_string(),
+            schema_version: "repository-tool.v1".to_string(),
+            description: tool_description(name).to_string(),
+            input_schema: tool_input_schema(name),
+        })
+        .collect()
+}
+
+fn tool_description(name: RepositoryToolName) -> &'static str {
+    match name {
+        RepositoryToolName::RepoStatus => "현재 repository snapshot의 metadata 상태를 조회합니다.",
+        RepositoryToolName::ListTree => "상대 경로 아래의 정렬된 파일 트리를 조회합니다.",
+        RepositoryToolName::SearchPaths => "파일 상대 경로에서 문자열을 검색합니다.",
+        RepositoryToolName::SearchText => "텍스트 파일 내용에서 문자열과 SourceRef를 검색합니다.",
+        RepositoryToolName::ReadFileLines => "텍스트 파일의 제한된 줄 범위를 읽습니다.",
+        RepositoryToolName::FileMetadata => "파일 크기, hash, line count metadata를 조회합니다.",
+    }
+}
+
+fn tool_input_schema(name: RepositoryToolName) -> serde_json::Value {
+    match name {
+        RepositoryToolName::RepoStatus => serde_json::json!({
+            "type": "object", "properties": {}, "additionalProperties": false
+        }),
+        RepositoryToolName::ListTree => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "relative_path": {"type": ["string", "null"]},
+                "depth": {"type": "integer", "minimum": 1, "maximum": 4},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 500}
+            },
+            "required": ["depth", "limit"], "additionalProperties": false
+        }),
+        RepositoryToolName::SearchPaths => serde_json::json!({
+            "type": "object",
+            "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+            "required": ["query", "limit"], "additionalProperties": false
+        }),
+        RepositoryToolName::SearchText => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "path_filter": {"type": ["string", "null"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100}
+            },
+            "required": ["query", "limit"], "additionalProperties": false
+        }),
+        RepositoryToolName::ReadFileLines => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "relative_path": {"type": "string"},
+                "start_line": {"type": "integer", "minimum": 1},
+                "end_line": {"type": "integer", "minimum": 1}
+            },
+            "required": ["relative_path", "start_line", "end_line"], "additionalProperties": false
+        }),
+        RepositoryToolName::FileMetadata => serde_json::json!({
+            "type": "object",
+            "properties": {"relative_path": {"type": "string"}},
+            "required": ["relative_path"], "additionalProperties": false
+        }),
+    }
+}
 
 pub struct RepositoryToolGateway {
     reader: Arc<dyn RepositoryReader>,
@@ -619,5 +688,24 @@ mod tests {
             .await
             .unwrap_err();
         assert!(blocked.to_string().contains("REPOSITORY_REINDEX_REQUIRED"));
+    }
+
+    #[test]
+    fn production_catalog_exposes_exactly_six_read_only_tools() {
+        let definitions = repository_tool_definitions();
+        assert_eq!(definitions.len(), RepositoryToolName::ALL.len());
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|definition| definition.name.as_str())
+                .collect::<Vec<_>>(),
+            RepositoryToolName::ALL
+                .iter()
+                .map(|name| name.wire_name())
+                .collect::<Vec<_>>()
+        );
+        assert!(definitions
+            .iter()
+            .all(|definition| definition.input_schema.is_object()));
     }
 }

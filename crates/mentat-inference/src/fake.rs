@@ -289,4 +289,40 @@ mod tests {
         assert_eq!(deltas, "## 답변\n자유 Markdown");
         assert_eq!(completed.as_deref(), Some(deltas.as_str()));
     }
+
+    #[tokio::test]
+    async fn tool_result_round_requires_an_exact_body_egress_gate() {
+        let backend = FakeInferenceBackend::default();
+        let snapshot_id = Uuid::new_v4();
+        let request = AgentRequest {
+            request_id: Uuid::new_v4(),
+            conversation_id: Uuid::new_v4(),
+            turn_id: Uuid::new_v4(),
+            profile: BackendProfile::default(),
+            effective_system_prompt: "system".to_string(),
+            messages: vec![AgentMessage {
+                role: AgentRole::Tool,
+                content: AgentMessageContent::ToolResult(mentat_core::RepositoryToolResult {
+                    call_id: Uuid::new_v4(),
+                    snapshot_id,
+                    content: "redacted tool result".to_string(),
+                    source_refs: Vec::new(),
+                    omissions: Vec::new(),
+                    content_bytes: 20,
+                }),
+            }],
+            tools: Vec::new(),
+            repository_context: None,
+            response_contract: mentat_core::ResponseContract::AdvisorMarkdown,
+            limits: AgentLimits::default(),
+        };
+
+        let result = backend
+            .infer_round_stream_guarded(request, CancellationToken::new(), None)
+            .await;
+        assert!(matches!(
+            result,
+            Err(MentatError::BackendError { code, .. }) if code == "TOOL_EGRESS_GATE_REQUIRED"
+        ));
+    }
 }
