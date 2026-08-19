@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 패키지 SemVer는 `0.1.0`이며 이 항목은 그 개발 스냅샷이다.
 
 ### Fixed
+- **[IMP-F003] Tier 1 trailing 불변조건:** 고정·설정·종료를 우측 고정 영역에 먼저 배치하고 저장소 이름을 최대 폭 ellipsis/tooltip으로 제한해 640/760px과 긴 ASCII/CJK 이름에서도 종료 경로를 보존했다.
+- **프레임리스 창 종료 복구:** Tier 1에 항상 보이는 `종료 ×`를 추가하고 `Ctrl+Q`와 동일한 작업 취소·채널 폐기·창 종료 수명주기를 연결했다.
+- **고대비 스위스 라이트 UI:** 투명 dark surface를 불투명 흰색 배경, 명시적 widget foreground, 8pt 그리드, 최소 13pt 보조 글자와 제한적인 Swiss red 강조로 교체했다.
+- **대화·설정 확장 가시성:** Tier 1/2/3/설정 크기를 `760x56` / `760x360` / `900x620` / `760x480`으로 조정하고 보조 아이콘 글리프 의존성을 제거했다.
 - **[IMP-F004] Complete cloud evidence invariant:** 모든 non-Unknown claim에 유효 evidence를 요구하고 invalid/missing/duplicate `ConflictItem`을 검증 UI에서 제거한다.
 - **[DBG-F002] Fail-closed watcher rescan:** notify `need_rescan`, Any, Other, 빈-path mutation과 `.gitignore`/`.git/info/exclude` scope 변경을 즉시 STALE로 처리하며 Access-only만 제외한다.
 - **[IMP-F004] Verified answer projection:** cloud `direct_answer`와 schema 위반 원문을 주요 UI에서 제거하고 검증된 claims로만 canonical 답변을 합성한다.

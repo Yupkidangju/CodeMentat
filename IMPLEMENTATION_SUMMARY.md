@@ -72,23 +72,25 @@ sequenceDiagram
 | `mentat-inference-openai` | 멀티 프로바이더 스트리밍 | Gemini/OpenAI 동적 모델 검색, redirect 차단과 secure client fail-closed, SSE | `gemini_cross_origin_redirect_never_receives_api_key`, `gemini_secure_client_build_failure_blocks_every_network_operation` |
 | `mentat-inference-llama` | 미래 온디바이스 계약 | `NativeLlamaContract`, 하드웨어 탐지 스텁 | `test_native_llama_contract_isolated_context_and_kv_cleanup` 등 3개 |
 | `mentat-persona` | 페르소나 및 아나운서 | 이모지 글꼴에 의존하지 않는 3가지 페르소나 표시명, 사실 보존 렌더러, 중요도 기반 알림 정책 | `test_persona_rendering_preserves_facts_and_evidence`, `test_announcement_policy_levels` |
-| `mentat-app` | eframe 데스크톱 UI | Draft/Verified/Active 공급자 상태, incomplete query gate, global hotkey 표시·포커스와 non-hide fallback | `incomplete_or_indexing_snapshot_cannot_enter_analysis`, `failed_or_colliding_registration_never_hides_the_window` |
+| `mentat-app` | eframe 데스크톱 UI | 고대비 스위스 라이트 테마, 고정 trailing/저장소 ellipsis, 명시적 종료 수명주기, Draft/Verified/Active 공급자 상태, incomplete query gate | `long_ascii_repository_name_keeps_trailing_controls_visible_at_640_and_760`, `long_cjk_repository_name_keeps_trailing_controls_visible_at_640_and_760`, `shutdown_cancels_scan_and_stream_tokens` |
 
 ### UI 복구 실행 증거 (2026-08-19)
 
-- 수정 전 실제 실행: 580×52 Tier 1에서 한국어·이모지가 사각형으로 표시되고, 설정 및 저장소 미선택 질문은 창 높이를 늘리지 않아 보조 UI가 보이지 않았다.
-- 수정 후 실제 실행: 초기 한글 레이블이 정상 표시되고, 설정과 질문 카드는 580×300, Detailed Inspector는 660×480으로 확장됐다.
+- 수정 전 원인: 프레임리스 투명 창에 앱 종료 동작이 없었고 dark visual의 암묵적 foreground와 작은 명시 글자 크기가 표시 환경에 따라 가독성을 떨어뜨렸다.
+- 수정 후 실제 실행: 초기 Tier 1은 불투명 흰색 `760×56`, 설정은 `760×480`, `/onboard` 대화 카드는 `760×360`으로 확장됐고 한글 레이블·상태·버튼이 검정 중심 고대비로 표시됐다.
+- 종료 실행 증거: 릴리스 앱의 `종료 ×` 클릭과 `Ctrl+Q` 입력을 각각 수행한 뒤 `Code Mentat` 창이 0개가 됨을 확인했다.
 - 폰트 자산: `crates/mentat-app/assets/fonts/NanumGothic-Regular.ttf`와 OFL 1.1 라이선스를 앱 바이너리에 포함한다.
 
 ---
 
 ## 3. 품질 게이트 검증 결과 (Verification Results)
 
-- **단위/회귀 테스트:** `cargo test --workspace --locked` 실행 증거 (96 passed, 1 ignored 100k/2GiB profile)
-- **100k/2GiB profile:** 100,000 files / 2,147,483,648 bytes / preview 3,358,720 bytes / scan 82,713ms / Windows peak working set 46,088,192 bytes / 128MiB threshold (별도 ignored gate PASS)
+- **단위/회귀 테스트:** `cargo test --workspace --locked` 실행 증거 (102 passed, 1 ignored 100k/2GiB profile)
+- **100k/2GiB profile:** 100,000 files / 2,147,483,648 bytes / preview 3,358,720 bytes / scan 80,377ms / Windows peak working set 46,231,552 bytes / 128MiB threshold (별도 ignored gate PASS)
 - **포맷팅 검사:** `cargo fmt --all -- --check` (0 diffs)
 - **정적 분석:** `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` (0 errors, 0 warnings)
-- **릴리스 바이너리 빌드:** `cargo build --release -p mentat-app` (완료)
+- **릴리스 바이너리 빌드:** `cargo build --release -p mentat-app --locked` (완료)
+- **Windows UI 런타임:** `760x56` Tier 1에서 우측 `고정`·`설정`·`종료 ×` 순서와 `760x480` 설정 확장, 종료 후 창 0개를 확인. 640/760px 긴 ASCII/CJK geometry는 headless render tests로 검증
 - **Windows global shortcut runtime:** 다른 앱 포커스에서 `Ctrl+Alt+M` 전역 event 수신과 Code Mentat 표시 유지/Tier 1 non-hide fallback 확인
 - **Baseline 원문 대조:** `CODE_MENTAT_SPEC.md`와 `spec.md`의 FR/NFR/CON 47개 정의·수용 기준, mismatch 0
-- **의존성 보안 감사:** `cargo audit --file Cargo.lock` FAIL — `quick-xml 0.30.0` High 2건(`RUSTSEC-2026-0194`, `RUSTSEC-2026-0195`)과 unmaintained 2건. High 2건은 `DEC-SEC-004`의 Windows 비도달 Accepted Risk이며 audit 실패를 PASS로 표기하지 않음
+- **의존성 보안 감사:** `cargo audit --no-fetch --file Cargo.lock` FAIL — `quick-xml 0.30.0` High 2건(`RUSTSEC-2026-0194`, `RUSTSEC-2026-0195`)과 unmaintained 2건. High 2건은 `DEC-SEC-004`의 Windows 비도달 Accepted Risk이며 audit 실패를 PASS로 표기하지 않음

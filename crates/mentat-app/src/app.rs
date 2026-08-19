@@ -3,9 +3,9 @@ use crate::provider_setup::ProviderSetupState;
 use crate::theme::MentatTheme;
 use crate::widgets::pill_bar::PillBar;
 use crate::widgets::settings_panel::SettingsPanel;
-use egui::{
-    vec2, CentralPanel, Color32, Context, Frame, RichText, Rounding, Stroke, ViewportCommand,
-};
+#[cfg(test)]
+use egui::Color32;
+use egui::{vec2, CentralPanel, Context, Frame, RichText, Rounding, Stroke, ViewportCommand};
 use futures_util::StreamExt;
 use mentat_analysis::{
     AnswerBundleNormalizer, ApprovedInferenceRequest, ConsentAssemblyState, EgressFilter,
@@ -42,10 +42,10 @@ pub enum ExpansionTier {
     Tier3Inspector,
 }
 
-pub const TIER1_SIZE: [f32; 2] = [580.0, 52.0];
-pub const TIER2_SIZE: [f32; 2] = [580.0, 300.0];
-pub const TIER3_SIZE: [f32; 2] = [660.0, 480.0];
-pub const SETTINGS_SIZE: [f32; 2] = [660.0, 420.0];
+pub const TIER1_SIZE: [f32; 2] = [760.0, 56.0];
+pub const TIER2_SIZE: [f32; 2] = [760.0, 360.0];
+pub const TIER3_SIZE: [f32; 2] = [900.0, 620.0];
+pub const SETTINGS_SIZE: [f32; 2] = [760.0, 480.0];
 
 pub fn viewport_size_for(tier: ExpansionTier, settings_open: bool) -> egui::Vec2 {
     let size = if settings_open && tier != ExpansionTier::Tier3Inspector {
@@ -67,6 +67,22 @@ fn snapshot_allows_analysis(status: SnapshotStatus) -> bool {
 fn install_scan_token(slot: &mut Option<CancellationToken>, next: CancellationToken) {
     if let Some(previous) = slot.replace(next) {
         previous.cancel();
+    }
+}
+
+fn close_shortcut() -> egui::KeyboardShortcut {
+    egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::Q)
+}
+
+fn cancel_shutdown_tokens(
+    scan_token: &mut Option<CancellationToken>,
+    stream_token: &mut Option<CancellationToken>,
+) {
+    if let Some(token) = scan_token.take() {
+        token.cancel();
+    }
+    if let Some(token) = stream_token.take() {
+        token.cancel();
     }
 }
 
@@ -522,6 +538,21 @@ impl MentatApp {
         self.status_text = "인덱싱 취소를 요청했습니다.".to_string();
     }
 
+    fn request_shutdown(&mut self, ctx: &Context) {
+        cancel_shutdown_tokens(&mut self.scan_cancel, &mut self.streaming_cancel);
+        self.is_streaming = false;
+        self.stream_rx = None;
+        self.scan_rx = None;
+        self.model_discovery_rx = None;
+        self.model_verification_rx = None;
+        self.local_query_rx = None;
+        self.egress_packet_rx = None;
+        self.preview_rx = None;
+        self.consent.cancel();
+        self.watcher = None;
+        ctx.send_viewport_cmd(ViewportCommand::Close);
+    }
+
     /// [DBG-F001] Fully asynchronous preview loading with zero blocking on the UI thread
     pub fn load_file_preview(&mut self, idx: usize) {
         if let Some(file) = self.files.get(idx) {
@@ -890,7 +921,8 @@ impl eframe::App for MentatApp {
             }
         }
 
-        // In-app shortcuts: Ctrl+K focus, Ctrl+P pin, Alt+Space / Ctrl+Alt+M hide
+        // 앱 단축키는 전역 단축키와 충돌하지 않도록 포커스된 창에서만 처리한다.
+        let close_requested = ctx.input_mut(|i| i.consume_shortcut(&close_shortcut()));
         let (focus_query, toggle_pin, toggle_visible) = ctx.input(|i| {
             let ctrl = i.modifiers.ctrl;
             let alt = i.modifiers.alt;
@@ -901,6 +933,10 @@ impl eframe::App for MentatApp {
                     || (ctrl && alt && i.key_pressed(egui::Key::M)),
             )
         });
+        if close_requested {
+            self.request_shutdown(ctx);
+            return;
+        }
         if focus_query {
             self.focus_query = true;
         }
@@ -959,7 +995,7 @@ impl eframe::App for MentatApp {
         let frame = Frame::none()
             .fill(MentatTheme::BG_BASE)
             .stroke(Stroke::new(1.0, MentatTheme::BORDER_COLOR))
-            .rounding(Rounding::same(12.0))
+            .rounding(Rounding::same(4.0))
             .inner_margin(egui::Margin::same(8.0));
 
         CentralPanel::default().frame(frame).show(ctx, |ui| {
@@ -1006,6 +1042,10 @@ impl eframe::App for MentatApp {
                 self.sync_viewport_size(ctx);
             }
 
+            if action.close_clicked {
+                self.request_shutdown(ctx);
+            }
+
             // Render Settings Panel (if toggled)
             if self.settings_open {
                 ui.add_space(8.0);
@@ -1030,7 +1070,7 @@ impl eframe::App for MentatApp {
                 // [IMP-F005] Quick Reopen of Recent Repositories
                 if !self.recent_repos.is_empty() {
                     ui.separator();
-                    ui.label(RichText::new("최근 저장소 다시 열기:").size(11.5).strong());
+                    ui.label(RichText::new("최근 저장소 다시 열기:").size(13.0).strong());
                     let mut reopened_root = None;
                     for repo in &self.recent_repos {
                         if ui.button(&repo.display_name).clicked() {
@@ -1064,9 +1104,9 @@ impl eframe::App for MentatApp {
                     ui.label(
                         RichText::new("인덱싱 진행 중")
                             .color(MentatTheme::STATUS_INFERENCING)
-                            .size(12.0),
+                            .size(14.0),
                     );
-                    if ui.button("⏹️ 인덱싱 취소").clicked() {
+                    if ui.button("인덱싱 취소").clicked() {
                         self.cancel_scan();
                     }
                 });
@@ -1103,7 +1143,7 @@ impl eframe::App for MentatApp {
                     if self.consent.rebuilding || !self.consent.can_approve() {
                         ui.label(RichText::new("제외 집합을 반영하는 중입니다. 새 패킷이 도착하기 전까지 승인할 수 없습니다.")
                             .color(MentatTheme::STATUS_INFERENCING)
-                            .size(12.0));
+                            .size(14.0));
                     }
 
                     if let Some(packet) = self.consent.display_packet() {
@@ -1116,20 +1156,20 @@ impl eframe::App for MentatApp {
                             packet.included_files.len(),
                             packet.estimated_tokens,
                             packet.packet_hash.chars().take(8).collect::<String>()
-                        )).size(12.0));
+                        )).size(14.0));
 
                         if !packet.excluded_sensitive_files.is_empty() {
                             ui.label(RichText::new(format!(
                                 "자동 제외된 파일: {}건 (.env, 인증서, 사용자 제외 파일 등)",
                                 packet.excluded_sensitive_files.len()
-                            )).color(MentatTheme::STATUS_READ_ONLY).size(11.5));
+                            )).color(MentatTheme::STATUS_READ_ONLY).size(13.0));
                         }
 
                         if packet.redacted_secret_occurrences > 0 {
                             ui.label(RichText::new(format!(
                                 "내용 중 마스킹된 비밀정보: {}건",
                                 packet.redacted_secret_occurrences
-                            )).color(MentatTheme::STATUS_INFERENCING).size(11.5));
+                            )).color(MentatTheme::STATUS_INFERENCING).size(13.0));
                         }
                     }
 
@@ -1208,7 +1248,7 @@ impl eframe::App for MentatApp {
 
                 // Quick Action Chips Row
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("빠른 분석:").size(11.5).color(MentatTheme::TEXT_MUTED));
+                    ui.label(RichText::new("빠른 분석:").size(13.0).color(MentatTheme::TEXT_MUTED));
                     if ui.small_button("/onboard").clicked() {
                         self.handle_query(ctx, "/onboard".to_string());
                     }
@@ -1227,7 +1267,7 @@ impl eframe::App for MentatApp {
 
                     if self.is_streaming {
                         ui.add_space(8.0);
-                        if ui.button(RichText::new("⏹️ 스트리밍 취소 (Esc)").color(MentatTheme::STATUS_CONFLICT).size(11.5)).clicked() {
+                        if ui.button(RichText::new("스트리밍 취소 (Esc)").color(MentatTheme::STATUS_CONFLICT).size(13.0)).clicked() {
                             self.cancel_inference();
                         }
                     }
@@ -1241,7 +1281,7 @@ impl eframe::App for MentatApp {
 
                 if let Some(ref text) = self.answer_preview {
                     ui.add_space(6.0);
-                    ui.label(RichText::new(text).color(MentatTheme::TEXT_PRIMARY).size(12.5));
+                    ui.label(RichText::new(text).color(MentatTheme::TEXT_PRIMARY).size(14.0));
                 }
 
                 // Render claims
@@ -1252,16 +1292,16 @@ impl eframe::App for MentatApp {
                             let (badge_text, color) = match claim.classification {
                                 ClaimClassification::Observed => ("[OBSERVED]", MentatTheme::STATUS_READ_ONLY),
                                 ClaimClassification::Inferred => ("[INFERRED]", MentatTheme::STATUS_INFERENCING),
-                                ClaimClassification::Proposed => ("[PROPOSED]", Color32::from_rgb(168, 85, 247)),
+                                ClaimClassification::Proposed => ("[PROPOSED]", MentatTheme::STATUS_PROPOSED),
                                 ClaimClassification::Conflict => ("[CONFLICT]", MentatTheme::STATUS_CONFLICT),
                                 ClaimClassification::Unknown => ("[UNKNOWN]", MentatTheme::TEXT_MUTED),
                             };
 
-                            ui.label(RichText::new(badge_text).color(color).strong().size(11.5));
-                            ui.label(RichText::new(&claim.statement).color(MentatTheme::TEXT_PRIMARY).size(12.0));
+                            ui.label(RichText::new(badge_text).color(color).strong().size(13.0));
+                            ui.label(RichText::new(&claim.statement).color(MentatTheme::TEXT_PRIMARY).size(14.0));
                         });
                         if let Some(ref rationale) = claim.rationale {
-                            ui.label(RichText::new(format!("  └─ {}", rationale)).color(MentatTheme::TEXT_MUTED).size(11.0));
+                            ui.label(RichText::new(format!("  - {}", rationale)).color(MentatTheme::TEXT_MUTED).size(13.0));
                         }
                     });
                 }
@@ -1270,10 +1310,10 @@ impl eframe::App for MentatApp {
                 for conflict in &self.recent_conflicts {
                     ui.group(|ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("[CONFLICT]").color(MentatTheme::STATUS_CONFLICT).strong().size(11.5));
-                            ui.label(RichText::new(format!("{} vs {}", conflict.side_a, conflict.side_b)).color(MentatTheme::STATUS_CONFLICT).size(12.0));
+                            ui.label(RichText::new("[CONFLICT]").color(MentatTheme::STATUS_CONFLICT).strong().size(13.0));
+                            ui.label(RichText::new(format!("{} vs {}", conflict.side_a, conflict.side_b)).color(MentatTheme::STATUS_CONFLICT).size(14.0));
                         });
-                        ui.label(RichText::new(format!("  └─ 영향: {}", conflict.impact)).color(MentatTheme::TEXT_MUTED).size(11.0));
+                        ui.label(RichText::new(format!("  - 영향: {}", conflict.impact)).color(MentatTheme::TEXT_MUTED).size(13.0));
                     });
                 }
 
@@ -1287,9 +1327,9 @@ impl eframe::App for MentatApp {
                     }
 
                     let inspector_label = if self.expansion_tier == ExpansionTier::Tier3Inspector {
-                        "▴ 소스 증거 인스펙터 접기"
+                        "소스 증거 접기"
                     } else {
-                        "▾ 소스 증거 인스펙터 열기"
+                        "소스 증거 열기"
                     };
 
                     if ui.button(inspector_label).clicked() {
@@ -1312,7 +1352,7 @@ impl eframe::App for MentatApp {
 
                     ui.columns(2, |cols| {
                         cols[0].group(|ui| {
-                            ui.label(RichText::new("저장소 파일 트리").strong().size(12.0));
+                            ui.label(RichText::new("저장소 파일 트리").strong().size(14.0));
                             egui::ScrollArea::vertical().id_salt("file_tree_scroll").max_height(160.0).show(ui, |ui| {
                                 for (idx, file) in self.files.iter().enumerate() {
                                     let label = format!("{} ({}행)", file.relative_path.display(), file.line_count.unwrap_or(0));
@@ -1325,7 +1365,7 @@ impl eframe::App for MentatApp {
                         });
 
                         cols[1].group(|ui| {
-                            ui.label(RichText::new("소스코드 행 뷰어").strong().size(12.0));
+                            ui.label(RichText::new("소스코드 행 뷰어").strong().size(14.0));
                             egui::ScrollArea::vertical().id_salt("code_view_scroll").max_height(160.0).show(ui, |ui| {
                                 if let Some(ref content) = self.selected_file_content {
                                     for (i, line) in content.lines().enumerate() {
@@ -1353,15 +1393,38 @@ mod tests {
 
     #[test]
     fn test_imp_f003_viewport_and_theme_tokens() {
-        assert_eq!(TIER1_SIZE, [580.0, 52.0]);
-        assert_eq!(TIER2_SIZE, [580.0, 300.0]);
-        assert_eq!(TIER3_SIZE, [660.0, 480.0]);
-        assert_eq!(MentatTheme::BG_BASE, Color32::from_rgb(18, 21, 26));
-        assert_eq!(
-            MentatTheme::STATUS_CONFLICT,
-            Color32::from_rgb(245, 158, 11)
-        );
-        assert_eq!(MentatTheme::TEXT_PRIMARY, Color32::from_rgb(243, 244, 246));
+        assert_eq!(TIER1_SIZE, [760.0, 56.0]);
+        assert_eq!(TIER2_SIZE, [760.0, 360.0]);
+        assert_eq!(TIER3_SIZE, [900.0, 620.0]);
+        assert_eq!(SETTINGS_SIZE, [760.0, 480.0]);
+        assert_eq!(MentatTheme::BG_BASE, Color32::WHITE);
+        assert_eq!(MentatTheme::STATUS_CONFLICT, Color32::from_rgb(146, 64, 14));
+        assert_eq!(MentatTheme::TEXT_PRIMARY, Color32::from_rgb(17, 17, 17));
+    }
+
+    #[test]
+    fn ctrl_q_is_the_only_close_keyboard_chord() {
+        let shortcut = close_shortcut();
+
+        assert_eq!(shortcut.modifiers, egui::Modifiers::CTRL);
+        assert_eq!(shortcut.logical_key, egui::Key::Q);
+    }
+
+    #[test]
+    fn shutdown_cancels_scan_and_stream_tokens() {
+        let scan = CancellationToken::new();
+        let scan_observer = scan.clone();
+        let stream = CancellationToken::new();
+        let stream_observer = stream.clone();
+        let mut scan_slot = Some(scan);
+        let mut stream_slot = Some(stream);
+
+        cancel_shutdown_tokens(&mut scan_slot, &mut stream_slot);
+
+        assert!(scan_observer.is_cancelled());
+        assert!(stream_observer.is_cancelled());
+        assert!(scan_slot.is_none());
+        assert!(stream_slot.is_none());
     }
 
     #[test]

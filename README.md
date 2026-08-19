@@ -11,7 +11,7 @@ Code Mentat는 로컬 소프트웨어 저장소(Repository)를 **완전한 읽�
 ## 🌟 주요 특징 (Key Features)
 
 1. **컴팩트 스마트 알약 위젯 (3-Tier Progressive Disclosure)**
-   - **Tier 1 (Smart Pill, 580×52):** 개발자 화면을 가리지 않고 상단/모서리에 상주하는 초슬림 검색 바 (`Alt+Space` / `Ctrl+Alt+M`은 전역 표시·포커스 및 안전 접기)
+   - **Tier 1 (Smart Pill, 760×56):** 흰색 고대비 스위스 스타일의 검색 바. 긴 저장소명은 ellipsis/tooltip으로 제한하고 고정·설정·종료를 우측에 보존합니다. `종료 ×`와 `Ctrl+Q`로 언제든 안전하게 종료 가능 (`Alt+Space` / `Ctrl+Alt+M`은 전역 표시·포커스 및 안전 접기)
    - **Tier 2 (Smart Card):** 질문 시 스트리밍 답변과 핵심 주장 태그(`[OBSERVED]`, `[INFERRED]`, `[CONFLICT]`)를 요약 노출
    - **Tier 3 (Detailed Inspector):** 클릭 시 펼쳐지는 실제 소스코드 행 번호 뷰어 및 관련 파일 트리
 2. **엄격한 읽기 전용 불변조건 (Strict Read-Only Guarantee)**
@@ -47,6 +47,7 @@ Code Mentat는 로컬 소프트웨어 저장소(Repository)를 **완전한 읽�
 | `/` 또는 `Ctrl + K` | 질문 입력창 포커스 |
 | `Esc` | 단계별 축소 (Inspector → Card → Pill), 스트리밍·인덱싱 취소 |
 | `Ctrl + P` | Always-on-Top 최상위 핀 고정 토글 |
+| `Ctrl + Q` | 진행 작업을 취소하고 Code Mentat 종료 |
 | `Enter` | 질문 전송 및 Egress 승인 |
 
 ---
@@ -67,11 +68,11 @@ cargo run -p mentat-app
 
 ### UI 문제 해결 / UI Troubleshooting / UI トラブルシューティング / UI 疑難排解 / UI 故障排除
 
-- **한국어:** 한글이 사각형으로 보이던 문제는 앱에 포함된 한글 폴백 글꼴로 해결됩니다. 설정·질문·증거 패널은 버튼 또는 `Enter` 입력에 맞춰 자동 확장됩니다.
-- **English:** The app embeds a Korean fallback font to prevent square glyphs. Settings, chat, and evidence panels resize the native window automatically.
-- **日本語:** 内蔵の韓国語フォールバックフォントにより文字化けを防ぎます。設定・チャット・証拠パネルは自動的にウィンドウを拡張します。
-- **繁體中文:** 應用程式內嵌韓文字型以避免方框字元；設定、對話與證據面板會自動調整視窗大小。
-- **简体中文:** 应用内置韩文字体以避免方框字符；设置、对话和证据面板会自动调整窗口大小。
+- **한국어:** 내장 한글 폴백 글꼴과 불투명 흰색 고대비 테마로 사각형 글리프와 흐린 글자를 방지합니다. 설정·질문·증거 패널은 자동 확장되며 상단의 `종료 ×`로 앱을 닫을 수 있습니다.
+- **English:** The embedded Korean fallback font and opaque high-contrast white theme prevent square glyphs and faint text. Settings, chat, and evidence panels resize automatically, and `Close ×` exits the app.
+- **日本語:** 内蔵の韓国語フォールバックフォントと不透明な高コントラスト白テーマで、文字化けと読みにくい文字を防ぎます。各パネルは自動拡張され、`終了 ×`でアプリを閉じられます。
+- **繁體中文:** 內嵌韓文字型與不透明的高對比白色主題可避免方框字元及文字過淡。設定、對話與證據面板會自動展開，並可用 `結束 ×` 關閉程式。
+- **简体中文:** 内置韩文字体和不透明高对比白色主题可避免方框字符与文字过淡。设置、对话和证据面板会自动展开，并可用 `退出 ×` 关闭程序。
 
 ---
 

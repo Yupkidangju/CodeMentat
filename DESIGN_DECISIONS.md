@@ -86,9 +86,9 @@
 ## 3. UI/UX 및 추론 엔진 결정
 
 ### [DEC-UI-001] 3단계 점진적 공개(3-Tier Progressive Disclosure) 위젯 채택
-- **Tier 1 (Smart Pill, `580x48px`):** 상단 상주 슬림 검색 바
-- **Tier 2 (Smart Card, `580x280px`):** 질문 시 스트리밍 답변과 Claim 태그 표출
-- **Tier 3 (Detailed Inspector, `640x460px`):** 소스코드 행 뷰어 및 파일 트리
+- **Tier 1 (Smart Pill, `760x56px`):** 상단 상주 슬림 검색 바와 명시적 종료 동작
+- **Tier 2 (Smart Card, `760x360px`):** 질문 시 스트리밍 답변과 Claim 태그 표출
+- **Tier 3 (Detailed Inspector, `900x620px`):** 소스코드 행 뷰어 및 파일 트리
 
 ### [DEC-INF-001] 다중 공급자 공통 계약 및 Google Gemini / OpenRouter 지원
 - 단일 `InferenceBackend` 인터페이스 하에 Google Gemini REST/SSE 및 OpenRouter / OpenAI SSE 어댑터 지원.
@@ -131,7 +131,15 @@
 - **결정:** `user_question`도 `scan_and_redact_secrets`를 통과한다. 질문은 packet의 `redacted_user_question` 한 곳에만 두고 어댑터는 `prompt_context`에 다시 붙이지 않는다.
 
 ### [DEC-UI-002] 뷰포트·테마·단축키는 구현값을 제품 기준으로 동결한다 (IMP-F003)
+- **상태:** 아래 초기 동결값은 `DEC-UI-003`으로 대체됐다.
 - **결정:** Tier 크기는 `580x52` / `580x300` / `660x480`, conflict 색은 amber `#F59E0B`이다. `Ctrl+K`/`Ctrl+P`는 앱 단축키, `Alt+Space`/`Ctrl+Alt+M`은 OS 전역 표시·포커스/접기로 등록한다. hidden winit 창의 self-unhide dead-end를 피하기 위해 창 숨김은 금지한다.
+
+### [DEC-UI-003] 불투명 고대비 스위스 UI와 명시적 종료 경계
+- **배경:** 프레임리스 투명 창에는 운영체제 종료 버튼이 없었고, dark visual의 암묵적 foreground와 반투명 표면 때문에 일부 글자와 경계가 표시 환경에 따라 흐려졌다.
+- **결정:** `DEC-UI-002`의 색상과 크기를 대체한다. 창은 불투명 흰색으로 렌더링하고 8pt 그리드, 검정 타이포그래피, 1px 선, 최소 모서리 반경과 제한적인 Swiss red 강조를 사용한다. Tier 크기는 `760x56` / `760x360` / `900x620`, 설정은 `760x480`이다. Tier 1에는 항상 `종료 ×`를 두고 `Ctrl+Q`와 같은 종료 수명주기를 공유한다.
+- **Trailing 불변조건:** `고정`·`설정`·`종료 ×`는 우측 180pt 고정 영역에 먼저 배치한다. 저장소 버튼은 최대 120pt에서 ellipsis 처리하며 640/760px, 긴 ASCII/CJK 이름에서도 질문 입력 200pt와 종료 hit target을 보존한다.
+- **대안 및 기각 사유:** 운영체제 장식을 복구하면 컴팩트 상주 위젯의 화면 점유가 커지므로 기각했다. 투명 흰색 프레임은 Windows 합성 결과가 달라질 수 있어 기각했다.
+- **결과:** 종료 경로를 발견할 수 있고, 글자·포커스·상태가 흰 배경에서 일관되게 식별된다.
 
 ### [DEC-DBG-003] OS watcher event + changed-path full hash (DBG-F002)
 - **배경:** 3초마다 전 파일 첫 8KiB를 읽는 방식은 tail edit를 놓치면서 100k 파일 I/O를 반복한다.

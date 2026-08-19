@@ -53,11 +53,11 @@ impl<'a> SettingsPanel<'a> {
             ui.horizontal(|ui| {
                 ui.heading(
                     RichText::new("추론 백엔드 및 페르소나 설정")
-                        .size(13.5)
+                        .size(17.0)
                         .strong(),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("닫기").clicked() {
+                    if ui.button("패널 닫기").clicked() {
                         action.close_clicked = true;
                     }
                 });
@@ -67,7 +67,7 @@ impl<'a> SettingsPanel<'a> {
 
             // Persona Selection
             ui.horizontal(|ui| {
-                ui.label(RichText::new("페르소나 (Persona):").size(12.0).strong());
+                ui.label(RichText::new("페르소나 (Persona):").size(14.0).strong());
                 ComboBox::from_id_salt("persona_select")
                     .selected_text(self.persona.display_name())
                     .show_ui(ui, |ui| {
@@ -96,7 +96,7 @@ impl<'a> SettingsPanel<'a> {
             // Provider Dropdown
             let prev_provider = self.profile.provider;
             ui.horizontal(|ui| {
-                ui.label(RichText::new("공급자 (Provider):").size(12.0).strong());
+                ui.label(RichText::new("공급자 (Provider):").size(14.0).strong());
                 ComboBox::from_id_salt("provider_select")
                     .selected_text(match self.profile.provider {
                         ProviderKind::GoogleGemini => "Google Gemini (AI Studio)",
@@ -146,7 +146,7 @@ impl<'a> SettingsPanel<'a> {
 
             // 공급자에서 검색해 검증한 모델 목록만 선택지로 표시한다.
             ui.horizontal(|ui| {
-                ui.label(RichText::new("모델 (Model):").size(12.0));
+                ui.label(RichText::new("모델 (Model):").size(14.0));
                 let mut selected_model = self.profile.model.clone();
                 ui.add_enabled_ui(!self.available_models.is_empty() && !self.is_busy, |ui| {
                     ComboBox::from_id_salt("model_select")
@@ -174,11 +174,11 @@ impl<'a> SettingsPanel<'a> {
 
             // Custom Base URL
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Base URL:").size(12.0));
+                ui.label(RichText::new("Base URL:").size(14.0));
                 ui.add_sized(
                     vec2(ui.available_width() - 20.0, 24.0),
                     egui::TextEdit::singleline(&mut self.profile.base_url)
-                        .font(egui::FontId::monospace(11.5)),
+                        .font(egui::FontId::monospace(13.0)),
                 );
             });
 
@@ -186,7 +186,7 @@ impl<'a> SettingsPanel<'a> {
 
             // API 키는 세션 메모리에만 유지하며 내장 로컬에는 요구하지 않는다.
             ui.horizontal(|ui| {
-                ui.label(RichText::new("API Key:").size(12.0));
+                ui.label(RichText::new("API Key:").size(14.0));
                 if self.profile.provider.requires_api_key() {
                     let mut current_key = self.profile.api_key.clone().unwrap_or_default();
                     let resp = ui.add_sized(
@@ -194,7 +194,7 @@ impl<'a> SettingsPanel<'a> {
                         egui::TextEdit::singleline(&mut current_key)
                             .password(true)
                             .hint_text("API 키를 입력하세요...")
-                            .font(egui::FontId::monospace(11.5)),
+                            .font(egui::FontId::monospace(13.0)),
                     );
                     if resp.changed() {
                         self.profile.api_key = if current_key.trim().is_empty() {
@@ -204,7 +204,7 @@ impl<'a> SettingsPanel<'a> {
                         };
                     }
                 } else {
-                    ui.label(RichText::new("내장 로컬은 API 키가 필요하지 않습니다.").size(11.5));
+                    ui.label(RichText::new("내장 로컬은 API 키가 필요하지 않습니다.").size(13.0));
                 }
             });
 
@@ -222,7 +222,7 @@ impl<'a> SettingsPanel<'a> {
                         egui::Button::new("1. API 확인 및 모델 불러오기")
                             .fill(MentatTheme::BG_CARD)
                             .stroke(Stroke::new(1.0, MentatTheme::STATUS_INFERENCING))
-                            .rounding(Rounding::same(6.0)),
+                            .rounding(Rounding::same(3.0)),
                     )
                     .clicked()
                 {
@@ -235,7 +235,7 @@ impl<'a> SettingsPanel<'a> {
                             && !self.profile.model.is_empty(),
                         egui::Button::new("2. 선택 모델 호환성 확인")
                             .fill(MentatTheme::BG_CARD)
-                            .rounding(Rounding::same(6.0)),
+                            .rounding(Rounding::same(3.0)),
                     )
                     .clicked()
                 {
@@ -247,7 +247,7 @@ impl<'a> SettingsPanel<'a> {
                         egui::Button::new("3. 활성화")
                             .fill(MentatTheme::BG_CARD)
                             .stroke(Stroke::new(1.0, MentatTheme::STATUS_READ_ONLY))
-                            .rounding(Rounding::same(6.0)),
+                            .rounding(Rounding::same(3.0)),
                     )
                     .clicked()
                 {
@@ -269,7 +269,7 @@ impl<'a> SettingsPanel<'a> {
             ui.label(
                 RichText::new(stage_text)
                     .color(MentatTheme::TEXT_MUTED)
-                    .size(11.5),
+                    .size(13.0),
             );
             if !self.provider_status.is_empty() {
                 ui.label(
@@ -279,7 +279,7 @@ impl<'a> SettingsPanel<'a> {
                         } else {
                             MentatTheme::STATUS_CONFLICT
                         })
-                        .size(11.5),
+                        .size(13.0),
                 );
             }
         });

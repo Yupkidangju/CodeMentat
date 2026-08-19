@@ -120,3 +120,14 @@ Draft
 - Cloud `Observed`/`Inferred`/`Proposed`/`Conflict` claim은 모두 최소 1개의 유효 evidence를 요구한다.
 - Cloud `ConflictItem`은 evidence가 비어 있거나 missing/invalid/duplicate이면 검증된 conflicts와 `[CONFLICT]` UI에서 제거한다.
 - 검증 가능한 claim이 없으면 고정된 “검증된 근거 기반 답변 없음” 상태를 표시하고 모델 원문은 `raw_model_response`로만 보존한다.
+
+### 1.8 고대비 스위스 UI 및 종료 수명주기 요구사항
+
+- 프레임리스 창은 Tier 1 우측 끝에 항상 보이는 `종료 ×` 버튼을 제공한다. 설정 패널의 `패널 닫기`와 프로그램 종료를 용어와 동작으로 구분한다.
+- `종료 ×` 또는 `Ctrl+Q`를 받으면 추론·인덱싱 취소 토큰을 먼저 취소하고 비동기 수신 채널과 동의 조립 상태를 폐기한 뒤 `ViewportCommand::Close`를 요청한다. 전역 단축키와 watcher는 소유 객체의 Drop 수명주기로 해제한다.
+- 창은 투명 합성을 사용하지 않는 불투명 흰색 표면이어야 한다. 기본/카드/입력 배경은 각각 `#FFFFFF`, `#F5F5F2`, `#FFFFFF`이고 기본/보조 글자는 `#111111`, `#525252`이다.
+- 모든 egui widget state(`noninteractive`, `inactive`, `hovered`, `active`, `open`)의 foreground stroke를 명시해 운영체제나 기본 dark visual에 따라 글자가 사라지지 않게 한다.
+- 정상 크기 텍스트는 흰색 배경에서 WCAG AA 대비율 4.5:1 이상이어야 하며, 상태는 색상만으로 전달하지 않고 `R/O`, `상태:`, `오류:` 등의 텍스트를 함께 표시한다.
+- Tier 1/2/3/설정 뷰포트는 각각 `760x56`, `760x360`, `900x620`, `760x480`으로 고정한다. Tier 1 입력창은 최소 200pt를 확보하고 좁아지면 `/onboard` 보조 칩부터 숨긴다.
+- Tier 1의 `고정`·`설정`·`종료 ×`는 우측 180pt trailing 영역에 먼저 배치해 동적 문자열이 침범할 수 없게 한다. 저장소 버튼은 최대 120pt이며 초과하는 ASCII/CJK 이름은 한 줄 ellipsis로 줄이고 전체 이름을 tooltip으로 제공한다.
+- 최소 창 폭 640px과 기본 폭 760px에서 긴 ASCII/CJK 저장소명을 사용해도 질문 입력 폭은 200pt 이상이고 trailing 세 버튼의 hit rect는 viewport 안에 있어야 한다.
