@@ -1,10 +1,10 @@
 use crate::db::{parse_datetime, parse_uuid, storage_error, SqliteStorage};
 use mentat_core::{
     ChatMessage, ChatRole, ComposerSubmitMode, Conversation, ConversationPersistence,
-    DeleteReceipt, GroundingFreshness, MentatError, MessageStatus, NewConversation, TurnStart,
-    TurnTerminalUpdate, UiPreferences,
+    DeleteReceipt, GroundingFreshness, GroundingTrace, MentatError, MessageStatus, NewConversation,
+    TurnStart, TurnTerminalUpdate, UiPreferences,
 };
-use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use uuid::Uuid;
 
 impl SqliteStorage {
@@ -295,163 +295,57 @@ impl SqliteStorage {
     }
 
     pub fn finish_turn(&self, update: &TurnTerminalUpdate) -> Result<(), MentatError> {
-        if let TurnTerminalUpdate::AuditCompleted {
-            turn_id,
-            assistant_message_id,
-            result,
-            grounding_trace_id,
-            freshness,
-            completed_at,
-        } = update
-        {
-            return self.finish_audit_turn(
-                *turn_id,
-                *assistant_message_id,
-                result,
-                *grounding_trace_id,
-                freshness,
-                *completed_at,
-            );
-        }
-        let (turn_id, assistant_message_id, markdown, status, error_code, trace_id, freshness, at) =
-            terminal_values(update)?;
         let mut conn = self.lock_conn()?;
         let transaction = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| storage_error("TURN_FINISH_BEGIN_FAILED", &error.to_string()))?;
-        let changed_message = transaction
-            .execute(
-                "UPDATE chat_messages SET
-                    markdown = ?1,
-                    status = ?2,
-                    error_code = ?3,
-                    grounding_trace_id = ?4,
-                    grounding_freshness = ?5,
-                    updated_at = ?6
-                 WHERE id = ?7 AND turn_id = ?8 AND role = 'Assistant'
-                   AND status IN ('Pending', 'Streaming')",
-                params![
-                    markdown,
-                    status,
-                    error_code,
-                    trace_id.map(|id| id.to_string()),
-                    freshness,
-                    at.to_rfc3339(),
-                    assistant_message_id.to_string(),
-                    turn_id.to_string(),
-                ],
-            )
-            .map_err(|error| storage_error("TURN_MESSAGE_FINISH_FAILED", &error.to_string()))?;
-        let changed_turn = transaction
-            .execute(
-                "UPDATE conversation_turns SET completed_at = ?1
-                 WHERE id = ?2 AND completed_at IS NULL",
-                params![at.to_rfc3339(), turn_id.to_string()],
-            )
-            .map_err(|error| storage_error("TURN_FINISH_FAILED", &error.to_string()))?;
-        if changed_message != 1 || changed_turn != 1 {
-            return Err(storage_error(
-                "TURN_TERMINAL_CONFLICT",
-                "turn 또는 assistant message가 이미 terminal 상태입니다.",
-            ));
-        }
+        apply_terminal_update_in_transaction(&transaction, update)?;
         transaction
             .commit()
             .map_err(|error| storage_error("TURN_FINISH_COMMIT_FAILED", &error.to_string()))?;
         Ok(())
     }
 
-    fn finish_audit_turn(
+    pub fn finish_turn_with_grounding(
         &self,
-        turn_id: Uuid,
-        assistant_message_id: Uuid,
-        result: &mentat_core::AnswerBundle,
-        grounding_trace_id: Uuid,
-        freshness: &GroundingFreshness,
-        completed_at: chrono::DateTime<chrono::Utc>,
+        trace: &GroundingTrace,
+        update: &TurnTerminalUpdate,
     ) -> Result<(), MentatError> {
-        if result.raw_model_response.is_some() {
-            return Err(storage_error(
-                "AUDIT_RAW_RESPONSE_FORBIDDEN",
-                "validated Audit result에는 raw_model_response를 저장할 수 없습니다.",
-            ));
-        }
-        let result_id = Uuid::new_v4();
-        let validated_bundle = serde_json::to_string(result)
-            .map_err(|error| storage_error("AUDIT_RESULT_ENCODE_FAILED", &error.to_string()))?;
-        let freshness = serde_json::to_string(freshness).map_err(|error| {
-            storage_error("GROUNDING_FRESHNESS_ENCODE_FAILED", &error.to_string())
-        })?;
+        self.finish_turn_with_grounding_internal(trace, update, false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn finish_turn_with_grounding_killpoint(
+        &self,
+        trace: &GroundingTrace,
+        update: &TurnTerminalUpdate,
+    ) -> Result<(), MentatError> {
+        self.finish_turn_with_grounding_internal(trace, update, true)
+    }
+
+    fn finish_turn_with_grounding_internal(
+        &self,
+        trace: &GroundingTrace,
+        update: &TurnTerminalUpdate,
+        kill_before_commit: bool,
+    ) -> Result<(), MentatError> {
+        validate_grounding_terminal_binding(trace, update)?;
         let mut conn = self.lock_conn()?;
         let transaction = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| storage_error("AUDIT_FINISH_BEGIN_FAILED", &error.to_string()))?;
-        let contract_json: String = transaction
-            .query_row(
-                "SELECT response_contract FROM conversation_turns WHERE id = ?1",
-                [turn_id.to_string()],
-                |row| row.get(0),
-            )
-            .map_err(|error| storage_error("AUDIT_CONTRACT_READ_FAILED", &error.to_string()))?;
-        let contract: mentat_core::ResponseContract = serde_json::from_str(&contract_json)
-            .map_err(|error| storage_error("AUDIT_CONTRACT_DECODE_FAILED", &error.to_string()))?;
-        if !matches!(
-            contract,
-            mentat_core::ResponseContract::AuditAnswerBundle { ref schema_version }
-                if schema_version == "answer_bundle.v1"
-        ) {
+            .map_err(|error| storage_error("TURN_GROUNDING_BEGIN_FAILED", &error.to_string()))?;
+        validate_trace_database_binding(&transaction, trace)?;
+        crate::grounding_store::write_grounding_trace_in_transaction(&transaction, trace)?;
+        apply_terminal_update_in_transaction(&transaction, update)?;
+        if kill_before_commit {
             return Err(storage_error(
-                "AUDIT_TURN_CONTRACT_MISMATCH",
-                "Advisor turn에는 Audit result를 저장할 수 없습니다.",
-            ));
-        }
-        transaction
-            .execute(
-                "INSERT INTO audit_turn_results (id, turn_id, schema_version, validated_bundle, created_at)
-                 VALUES (?1, ?2, 'answer_bundle.v1', ?3, ?4)",
-                params![
-                    result_id.to_string(),
-                    turn_id.to_string(),
-                    validated_bundle,
-                    completed_at.to_rfc3339(),
-                ],
-            )
-            .map_err(|error| storage_error("AUDIT_RESULT_INSERT_FAILED", &error.to_string()))?;
-        let changed_message = transaction
-            .execute(
-                "UPDATE chat_messages SET markdown = '', status = 'Completed', error_code = NULL,
-                    grounding_trace_id = ?1, grounding_freshness = ?2, updated_at = ?3
-                 WHERE id = ?4 AND turn_id = ?5 AND role = 'Assistant'
-                   AND status IN ('Pending', 'Streaming')",
-                params![
-                    grounding_trace_id.to_string(),
-                    freshness,
-                    completed_at.to_rfc3339(),
-                    assistant_message_id.to_string(),
-                    turn_id.to_string(),
-                ],
-            )
-            .map_err(|error| storage_error("AUDIT_MESSAGE_FINISH_FAILED", &error.to_string()))?;
-        let changed_turn = transaction
-            .execute(
-                "UPDATE conversation_turns SET audit_result_id = ?1, completed_at = ?2
-                 WHERE id = ?3 AND completed_at IS NULL",
-                params![
-                    result_id.to_string(),
-                    completed_at.to_rfc3339(),
-                    turn_id.to_string(),
-                ],
-            )
-            .map_err(|error| storage_error("AUDIT_TURN_FINISH_FAILED", &error.to_string()))?;
-        if changed_message != 1 || changed_turn != 1 {
-            return Err(storage_error(
-                "TURN_TERMINAL_CONFLICT",
-                "Audit turn 또는 assistant message가 이미 terminal 상태입니다.",
+                "TURN_GROUNDING_KILLPOINT",
+                "commit 직전 crash killpoint가 실행되었습니다.",
             ));
         }
         transaction
             .commit()
-            .map_err(|error| storage_error("AUDIT_FINISH_COMMIT_FAILED", &error.to_string()))?;
+            .map_err(|error| storage_error("TURN_GROUNDING_COMMIT_FAILED", &error.to_string()))?;
         Ok(())
     }
 
@@ -573,6 +467,213 @@ impl SqliteStorage {
             updated_at: parse_datetime(&updated_at, "ui_preferences.updated_at")?,
         })
     }
+}
+
+fn validate_grounding_terminal_binding(
+    trace: &GroundingTrace,
+    update: &TurnTerminalUpdate,
+) -> Result<(), MentatError> {
+    let valid = match update {
+        TurnTerminalUpdate::AdvisorCompleted {
+            turn_id,
+            grounding_trace_id: Some(trace_id),
+            freshness: Some(freshness),
+            ..
+        } => *turn_id == trace.turn_id && *trace_id == trace.id && freshness == &trace.freshness,
+        TurnTerminalUpdate::AuditCompleted {
+            turn_id,
+            grounding_trace_id,
+            freshness,
+            result,
+            ..
+        } => {
+            *turn_id == trace.turn_id
+                && *grounding_trace_id == trace.id
+                && freshness == &trace.freshness
+                && trace.snapshot_id == Some(result.snapshot_id)
+        }
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(storage_error(
+            "TURN_GROUNDING_BINDING_INVALID",
+            "terminal update와 최종 GroundingTrace 결속이 유효하지 않습니다.",
+        ))
+    }
+}
+
+fn validate_trace_database_binding(
+    transaction: &Transaction<'_>,
+    trace: &GroundingTrace,
+) -> Result<(), MentatError> {
+    let (conversation_id, snapshot_id): (String, Option<String>) = transaction
+        .query_row(
+            "SELECT conversation_id, snapshot_id FROM conversation_turns WHERE id = ?1",
+            [trace.turn_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| storage_error("TURN_GROUNDING_BINDING_READ_FAILED", &error.to_string()))?;
+    if conversation_id != trace.conversation_id.to_string()
+        || snapshot_id != trace.snapshot_id.map(|id| id.to_string())
+    {
+        return Err(storage_error(
+            "TURN_GROUNDING_BINDING_INVALID",
+            "DB turn과 final GroundingTrace의 conversation/snapshot이 다릅니다.",
+        ));
+    }
+    Ok(())
+}
+
+fn apply_terminal_update_in_transaction(
+    transaction: &Transaction<'_>,
+    update: &TurnTerminalUpdate,
+) -> Result<(), MentatError> {
+    if let TurnTerminalUpdate::AuditCompleted {
+        turn_id,
+        assistant_message_id,
+        result,
+        grounding_trace_id,
+        freshness,
+        completed_at,
+    } = update
+    {
+        return apply_audit_terminal_in_transaction(
+            transaction,
+            *turn_id,
+            *assistant_message_id,
+            result,
+            *grounding_trace_id,
+            freshness,
+            *completed_at,
+        );
+    }
+    let (turn_id, assistant_message_id, markdown, status, error_code, trace_id, freshness, at) =
+        terminal_values(update)?;
+    let changed_message = transaction
+        .execute(
+            "UPDATE chat_messages SET
+                markdown = ?1,
+                status = ?2,
+                error_code = ?3,
+                grounding_trace_id = ?4,
+                grounding_freshness = ?5,
+                updated_at = ?6
+             WHERE id = ?7 AND turn_id = ?8 AND role = 'Assistant'
+               AND status IN ('Pending', 'Streaming')",
+            params![
+                markdown,
+                status,
+                error_code,
+                trace_id.map(|id| id.to_string()),
+                freshness,
+                at.to_rfc3339(),
+                assistant_message_id.to_string(),
+                turn_id.to_string(),
+            ],
+        )
+        .map_err(|error| storage_error("TURN_MESSAGE_FINISH_FAILED", &error.to_string()))?;
+    let changed_turn = transaction
+        .execute(
+            "UPDATE conversation_turns SET completed_at = ?1
+             WHERE id = ?2 AND completed_at IS NULL",
+            params![at.to_rfc3339(), turn_id.to_string()],
+        )
+        .map_err(|error| storage_error("TURN_FINISH_FAILED", &error.to_string()))?;
+    if changed_message != 1 || changed_turn != 1 {
+        return Err(storage_error(
+            "TURN_TERMINAL_CONFLICT",
+            "turn 또는 assistant message가 이미 terminal 상태입니다.",
+        ));
+    }
+    Ok(())
+}
+
+fn apply_audit_terminal_in_transaction(
+    transaction: &Transaction<'_>,
+    turn_id: Uuid,
+    assistant_message_id: Uuid,
+    result: &mentat_core::AnswerBundle,
+    grounding_trace_id: Uuid,
+    freshness: &GroundingFreshness,
+    completed_at: chrono::DateTime<chrono::Utc>,
+) -> Result<(), MentatError> {
+    if result.raw_model_response.is_some() {
+        return Err(storage_error(
+            "AUDIT_RAW_RESPONSE_FORBIDDEN",
+            "validated Audit result에는 raw_model_response를 저장할 수 없습니다.",
+        ));
+    }
+    let result_id = Uuid::new_v4();
+    let validated_bundle = serde_json::to_string(result)
+        .map_err(|error| storage_error("AUDIT_RESULT_ENCODE_FAILED", &error.to_string()))?;
+    let freshness = serde_json::to_string(freshness)
+        .map_err(|error| storage_error("GROUNDING_FRESHNESS_ENCODE_FAILED", &error.to_string()))?;
+    let contract_json: String = transaction
+        .query_row(
+            "SELECT response_contract FROM conversation_turns WHERE id = ?1",
+            [turn_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(|error| storage_error("AUDIT_CONTRACT_READ_FAILED", &error.to_string()))?;
+    let contract: mentat_core::ResponseContract = serde_json::from_str(&contract_json)
+        .map_err(|error| storage_error("AUDIT_CONTRACT_DECODE_FAILED", &error.to_string()))?;
+    if !matches!(
+        contract,
+        mentat_core::ResponseContract::AuditAnswerBundle { ref schema_version }
+            if schema_version == "answer_bundle.v1"
+    ) {
+        return Err(storage_error(
+            "AUDIT_TURN_CONTRACT_MISMATCH",
+            "Advisor turn에는 Audit result를 저장할 수 없습니다.",
+        ));
+    }
+    transaction
+        .execute(
+            "INSERT INTO audit_turn_results (id, turn_id, schema_version, validated_bundle, created_at)
+             VALUES (?1, ?2, 'answer_bundle.v1', ?3, ?4)",
+            params![
+                result_id.to_string(),
+                turn_id.to_string(),
+                validated_bundle,
+                completed_at.to_rfc3339(),
+            ],
+        )
+        .map_err(|error| storage_error("AUDIT_RESULT_INSERT_FAILED", &error.to_string()))?;
+    let changed_message = transaction
+        .execute(
+            "UPDATE chat_messages SET markdown = '', status = 'Completed', error_code = NULL,
+                grounding_trace_id = ?1, grounding_freshness = ?2, updated_at = ?3
+             WHERE id = ?4 AND turn_id = ?5 AND role = 'Assistant'
+               AND status IN ('Pending', 'Streaming')",
+            params![
+                grounding_trace_id.to_string(),
+                freshness,
+                completed_at.to_rfc3339(),
+                assistant_message_id.to_string(),
+                turn_id.to_string(),
+            ],
+        )
+        .map_err(|error| storage_error("AUDIT_MESSAGE_FINISH_FAILED", &error.to_string()))?;
+    let changed_turn = transaction
+        .execute(
+            "UPDATE conversation_turns SET audit_result_id = ?1, completed_at = ?2
+             WHERE id = ?3 AND completed_at IS NULL",
+            params![
+                result_id.to_string(),
+                completed_at.to_rfc3339(),
+                turn_id.to_string(),
+            ],
+        )
+        .map_err(|error| storage_error("AUDIT_TURN_FINISH_FAILED", &error.to_string()))?;
+    if changed_message != 1 || changed_turn != 1 {
+        return Err(storage_error(
+            "TURN_TERMINAL_CONFLICT",
+            "Audit turn 또는 assistant message가 이미 terminal 상태입니다.",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_turn_start(start: &TurnStart) -> Result<(), MentatError> {

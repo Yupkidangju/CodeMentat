@@ -277,3 +277,12 @@
 - **상태 전이:** body 검증 및 `Prepared` 저장 뒤 send 성공은 `Sent`, 명확한 송신 전 실패는 `Failed`, send future가 network error로 끝나 전송 여부를 확정할 수 없으면 `OutcomeUnknown`이다. terminal 전이는 compare-and-set 한 번만 허용한다.
 - **redaction:** RepositoryToolGateway는 content와 SourceRef excerpt의 비밀 패턴을 먼저 제거하며 canonical ref의 redacted payload digest는 실제 provider body에 포함된 redacted excerpt에서 계산한다.
 - **대안 및 기각:** provider adapter가 SQLite 또는 repository에 직접 의존하는 구조는 계층 역전과 데이터 접근 확대로 기각한다. analysis가 provider wire JSON을 만드는 구조도 dialect 책임을 침범하므로 기각한다.
+
+### [DEC-SEC-012] terminal durability는 outcome 단위의 atomic transaction이다
+
+- **상태:** `APPROVED — Re-audit #19 remediation`
+- **배경:** 모델 terminal event, 최종 GroundingTrace, 같은 provider body의 여러 receipt가 별도 transaction으로 저장되면 crash 시 완료 답변과 근거 또는 receipt 상태가 갈릴 수 있다.
+- **결정:** UI는 `AgentEvent::Completed/Cancelled/Failed`를 즉시 durable terminal로 저장하지 않고 active turn에 보류한다. `AgentFinished`가 최종 trace와 함께 도착하면 `finish_turn_with_grounding` 단일 `BEGIN IMMEDIATE` transaction이 trace/tool/source와 turn/message/Audit terminal을 함께 확정한다. repository trace가 없는 chat-only turn은 기존 `finish_turn`을 사용한다.
+- **receipt batch:** 같은 exact provider body에서 발급된 receipt IDs는 `compare_and_set_tool_egress_status_batch` 한 transaction으로 전이한다. ID 중복, 빈 batch, expected 상태 불일치 또는 갱신 수 불일치는 전체 rollback이다.
+- **killpoint:** 테스트 전용 failpoint는 commit 직전 오류를 반환해 transaction rollback을 검증한다. 두 번째 receipt update 실패 fixture도 첫 receipt의 부분 terminal을 허용하지 않는다.
+- **recovery:** 시작 시 오래된 `Prepared` receipt는 개별 추측 없이 body 단위로 `OutcomeUnknown` reconciliation 대상이 되며, 현재 remediation은 runtime batch atomicity를 우선 닫는다.

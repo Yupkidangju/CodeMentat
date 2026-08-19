@@ -296,6 +296,13 @@ git diff --check
 
 이 remediation은 `SEC-CRUX-F001`을 우회하는 단순 cloud 차단 해제를 금지한다. exact-body gate 또는 durable storage가 없으면 repository tool egress는 계속 fail-closed다.
 
+### Re-audit #19 durability remediation
+
+1. terminal event와 final AgentLoop outcome을 active turn에 모아 storage 단일 transaction으로 전달한다.
+2. trace/tool/source 저장과 Advisor/Audit terminal update 사이 commit 직전 killpoint를 둔다.
+3. 동일 exact body receipt IDs를 batch CAS하고 두 번째 ID 상태 불일치 시 전부 rollback한다.
+4. crash fixture는 재실행 상태가 `Completed + full trace` 또는 기존 non-terminal 중 하나인지 확인하며 `Completed + empty trace`를 금지한다.
+
 ## 8. 실행 상태와 잔여 게이트
 
 2026-08-19 사용자 승인을 수신해 구현이 진행 중이다.

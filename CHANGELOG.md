@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 창 크기·핀·Enter/Ctrl+Enter 전송 방식·마지막 모델 선택·Prompt/Persona 표시를 재실행 후 복원한다. 모델은 복원돼도 새 catalog/생성 검증 전 자동 활성화하지 않는다.
 
 ### Security
+- repository-backed completion은 final GroundingTrace/tool/source와 Advisor/Audit terminal을 하나의 `BEGIN IMMEDIATE` transaction으로 저장하며 commit 전 killpoint는 전체 rollback한다.
+- 동일 exact provider body의 여러 receipt terminal을 batch atomic CAS로 전환하고, 두 번째 update 전 실패 시 부분 `Sent`를 남기지 않는다. 재실행 시 남은 `Prepared`는 한 transaction에서 `OutcomeUnknown`으로 복구한다.
 - 외부 provider repository tool result는 gateway redaction, 명시적 세션 동의, exact provider-body 검증, durable `Prepared→Sent/Failed/OutcomeUnknown` receipt를 통과해야만 전송한다.
 - OpenAI 호환/Gemini agent client는 redirect를 자동 추적하지 않으며 승인 거부 fixture에서 network 수신 0건을 강제한다.
 - API key 기억 기능은 `keyring 4.1.6`을 통해 Windows Credential Manager/macOS Keychain/Linux Secret Service를 사용한다. SQLite에는 profile-scoped reference만 저장하며 native store 실패 시 file fallback을 만들지 않는다.

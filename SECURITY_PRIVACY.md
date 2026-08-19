@@ -232,5 +232,7 @@ Security contract: FROZEN FOR REVIEW
 Dynamic tool egress implementation: PRODUCTION CONNECTED — RE-AUDIT PENDING
 
 현재 OpenAI 호환/Gemini native tool round는 provider가 만든 최종 JSON bytes를 `ProviderBodyEgressGate`에 넘긴다. 앱 gate는 runtime consent capability, canonical seal, SQLite `Prepared` receipt, exact-body 재검증을 모두 통과한 뒤에만 송신을 허용한다. 응답 수신은 `Sent`, network/cancel의 송신 여부 불명은 `OutcomeUnknown`으로 닫고 redirect 자동 추적은 두 adapter 모두 금지한다. RepositoryToolGateway는 tool content와 SourceRef excerpt를 provider 직렬화 전에 redaction한다.
+
+동일 provider body의 receipt terminal은 전체 ID 집합을 하나의 `BEGIN IMMEDIATE` batch CAS로 갱신한다. 하나라도 `Prepared`가 아니거나 테스트 killpoint가 commit 전에 발생하면 전체 rollback한다. repository-backed completed/Audit terminal도 최종 GroundingTrace/tool/source와 하나의 transaction으로 저장하며, UI는 transaction 성공 전 Completed로 확정하지 않는다.
 Implementation approval: GRANTED — 2026-08-19 CR-UX-001 GO
 ```

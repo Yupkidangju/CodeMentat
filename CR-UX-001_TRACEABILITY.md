@@ -100,5 +100,6 @@ Partial: 9/43
 Not Implemented: 5/43
 CR-0 exit: APPROVED
 Production remediation: IMP-CRUX-F001 / SEC-CRUX-F001 / IMP-CRUX-F002 implemented
+Durability remediation: DBG-CRUX-F001 / SEC-CRUX-F002 implemented, killpoint 재실행 검증 대기
 Re-audit request: PENDING CLEAN COMMIT GATES
 ```

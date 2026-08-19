@@ -16,8 +16,9 @@ mod tests {
         AnswerBundle, ChatMessage, ChatRole, ConversationPersistence, ConversationTurn,
         ExperiencePreset, GroundingFreshness, GroundingTrace, MessageStatus, NewConversation,
         PromptContentSource, PromptDraft, PromptLayerDraft, RepositoryProfile, RepositorySnapshot,
-        RepositoryType, ResponseContract, SnapshotStatus, SystemPreset, TurnStart,
-        TurnTerminalUpdate, UiPreferences,
+        RepositoryToolCallRecord, RepositoryToolCallStatus, RepositoryToolName, RepositoryType,
+        ResponseContract, SnapshotStatus, SourceRef, SystemPreset, TurnStart, TurnTerminalUpdate,
+        UiPreferences,
     };
     use mentat_inference::{BackendProfile, ProviderKind};
     use rusqlite::Connection;
@@ -664,18 +665,17 @@ mod tests {
             })
             .unwrap();
         let trace_id = Uuid::new_v4();
-        storage
-            .prepare_grounding_trace(&GroundingTrace {
-                id: trace_id,
-                conversation_id: conversation.id,
-                turn_id,
-                snapshot_id: Some(snapshot_id),
-                tool_calls: Vec::new(),
-                source_refs: Vec::new(),
-                egress_receipt_ids: Vec::new(),
-                freshness: GroundingFreshness::FreshAtSend,
-            })
-            .unwrap();
+        let trace = GroundingTrace {
+            id: trace_id,
+            conversation_id: conversation.id,
+            turn_id,
+            snapshot_id: Some(snapshot_id),
+            tool_calls: Vec::new(),
+            source_refs: Vec::new(),
+            egress_receipt_ids: Vec::new(),
+            freshness: GroundingFreshness::FreshAtSend,
+        };
+        storage.prepare_grounding_trace(&trace).unwrap();
         let result = AnswerBundle {
             request_id: Uuid::new_v4(),
             snapshot_id,
@@ -687,14 +687,17 @@ mod tests {
             raw_model_response: None,
         };
         storage
-            .finish_turn(&TurnTerminalUpdate::AuditCompleted {
-                turn_id,
-                assistant_message_id: assistant.id,
-                result: result.clone(),
-                grounding_trace_id: trace_id,
-                freshness: GroundingFreshness::FreshAtSend,
-                completed_at: chrono::Utc::now(),
-            })
+            .finish_turn_with_grounding(
+                &trace,
+                &TurnTerminalUpdate::AuditCompleted {
+                    turn_id,
+                    assistant_message_id: assistant.id,
+                    result: result.clone(),
+                    grounding_trace_id: trace_id,
+                    freshness: GroundingFreshness::FreshAtSend,
+                    completed_at: chrono::Utc::now(),
+                },
+            )
             .unwrap();
 
         assert_eq!(
@@ -713,6 +716,148 @@ mod tests {
                 .messages[1]
                 .grounding_trace_id,
             Some(trace_id)
+        );
+    }
+
+    #[test]
+    fn terminal_and_final_grounding_killpoint_roll_back_together() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("mentat.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+        let profile = storage
+            .seed_factory_prompt_profile(&factory_seed())
+            .unwrap();
+        let active = storage
+            .load_active_prompt_profile(profile.id)
+            .unwrap()
+            .unwrap();
+        let snapshot_id = Uuid::new_v4();
+        let conversation = storage
+            .create_conversation(&NewConversation {
+                repository_id: Some(Uuid::new_v4()),
+                active_snapshot_id: Some(snapshot_id),
+                prompt_profile_id: profile.id,
+                persistence: ConversationPersistence::Durable,
+            })
+            .unwrap();
+        let turn_id = Uuid::new_v4();
+        let assistant = ChatMessage::new(
+            conversation.id,
+            turn_id,
+            ChatRole::Assistant,
+            1,
+            "",
+            MessageStatus::Pending,
+        );
+        storage
+            .begin_turn(&TurnStart {
+                turn: ConversationTurn {
+                    id: turn_id,
+                    conversation_id: conversation.id,
+                    sequence: 1,
+                    prompt_profile_id: profile.id,
+                    prompt_profile_revision_id: active.revision.id,
+                    kernel_version: "kernel.v1".to_string(),
+                    kernel_digest: "kernel".to_string(),
+                    snapshot_id: Some(snapshot_id),
+                    response_contract: ResponseContract::AdvisorMarkdown,
+                    audit_result_id: None,
+                    started_at: chrono::Utc::now(),
+                    completed_at: None,
+                },
+                user_message: ChatMessage::new(
+                    conversation.id,
+                    turn_id,
+                    ChatRole::User,
+                    0,
+                    "질문",
+                    MessageStatus::Completed,
+                ),
+                assistant_placeholder: assistant.clone(),
+            })
+            .unwrap();
+        storage
+            .append_assistant_delta(assistant.id, "streaming")
+            .unwrap();
+        let trace_id = Uuid::new_v4();
+        storage
+            .prepare_grounding_trace(&GroundingTrace {
+                id: trace_id,
+                conversation_id: conversation.id,
+                turn_id,
+                snapshot_id: Some(snapshot_id),
+                tool_calls: Vec::new(),
+                source_refs: Vec::new(),
+                egress_receipt_ids: Vec::new(),
+                freshness: GroundingFreshness::FreshAtSend,
+            })
+            .unwrap();
+        let source_id = Uuid::new_v4();
+        let call_id = Uuid::new_v4();
+        let final_trace = GroundingTrace {
+            id: trace_id,
+            conversation_id: conversation.id,
+            turn_id,
+            snapshot_id: Some(snapshot_id),
+            tool_calls: vec![RepositoryToolCallRecord {
+                trace_id,
+                call_id,
+                round: 1,
+                name: RepositoryToolName::ReadFileLines,
+                canonical_arguments_digest: "args".to_string(),
+                result_digest: Some("result".to_string()),
+                content_bytes: 4,
+                source_ref_ids: vec![source_id],
+                status: RepositoryToolCallStatus::Completed,
+            }],
+            source_refs: vec![SourceRef {
+                id: source_id,
+                snapshot_id,
+                relative_path: PathBuf::from("src/lib.rs"),
+                line_start: 1,
+                line_end: 1,
+                content_hash: "hash".to_string(),
+                excerpt: "code".to_string(),
+            }],
+            egress_receipt_ids: Vec::new(),
+            freshness: GroundingFreshness::FreshAtSend,
+        };
+        let update = TurnTerminalUpdate::AdvisorCompleted {
+            turn_id,
+            assistant_message_id: assistant.id,
+            markdown: "완료".to_string(),
+            grounding_trace_id: Some(trace_id),
+            freshness: Some(GroundingFreshness::FreshAtSend),
+            completed_at: chrono::Utc::now(),
+        };
+
+        assert!(storage
+            .finish_turn_with_grounding_killpoint(&final_trace, &update)
+            .is_err());
+        drop(storage);
+        let storage = SqliteStorage::open(&db_path).unwrap();
+        let after_kill = storage.load_conversation(conversation.id).unwrap().unwrap();
+        assert_eq!(after_kill.messages[1].status, MessageStatus::Streaming);
+        assert!(storage
+            .load_grounding_trace(trace_id)
+            .unwrap()
+            .unwrap()
+            .source_refs
+            .is_empty());
+
+        storage
+            .finish_turn_with_grounding(&final_trace, &update)
+            .unwrap();
+        let completed = storage.load_conversation(conversation.id).unwrap().unwrap();
+        assert_eq!(completed.messages[1].status, MessageStatus::Completed);
+        assert_eq!(
+            storage
+                .load_grounding_trace(trace_id)
+                .unwrap()
+                .unwrap()
+                .source_refs
+                .len(),
+            1
         );
     }
 

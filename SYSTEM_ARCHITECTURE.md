@@ -266,7 +266,7 @@ trait ToolEgressStore {
 }
 ```
 
-`begin_turn`, prompt Apply, terminal update, delete, Prepared receipt는 각각 독립 transaction이다. streaming delta write는 250ms 또는 4KiB 중 먼저 도달한 조건으로 batch하고 terminal 시 즉시 flush한다.
+`begin_turn`, prompt Apply, delete, Prepared receipt는 각각 독립 transaction이다. repository-backed turn의 terminal update는 최종 GroundingTrace/tool/source와 같은 `finish_turn_with_grounding` transaction에서만 확정한다. 같은 provider body의 receipt terminal은 ID별 호출이 아니라 batch CAS transaction을 사용한다. streaming delta write는 250ms 또는 4KiB 중 먼저 도달한 조건으로 batch하고 terminal 시 즉시 flush한다.
 
 ### 2.2 Prompt 합성
 

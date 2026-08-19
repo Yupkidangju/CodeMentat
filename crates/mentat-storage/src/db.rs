@@ -383,7 +383,39 @@ fn open_and_migrate(
     };
     run_migrations(&mut conn, version)?;
     verify_database(&conn)?;
+    reconcile_stale_prepared_receipts(&mut conn)?;
     Ok((conn, backup))
+}
+
+fn reconcile_stale_prepared_receipts(conn: &mut Connection) -> Result<(), MentatError> {
+    let receipt_table_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'tool_egress_receipts'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| storage_error("TOOL_EGRESS_RECOVERY_READ_FAILED", &error.to_string()))?;
+    if !receipt_table_exists {
+        return Ok(());
+    }
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| storage_error("TOOL_EGRESS_RECOVERY_BEGIN_FAILED", &error.to_string()))?;
+    transaction
+        .execute(
+            "UPDATE tool_egress_receipts
+                SET status = 'OutcomeUnknown', updated_at = ?1
+              WHERE status = 'Prepared'",
+            [chrono::Utc::now().to_rfc3339()],
+        )
+        .map_err(|error| storage_error("TOOL_EGRESS_RECOVERY_FAILED", &error.to_string()))?;
+    transaction
+        .commit()
+        .map_err(|error| storage_error("TOOL_EGRESS_RECOVERY_COMMIT_FAILED", &error.to_string()))?;
+    Ok(())
 }
 
 fn should_quarantine(error: &MentatError) -> bool {

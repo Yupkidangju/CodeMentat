@@ -66,6 +66,7 @@ struct ActiveTurn {
     assistant_message_id: Uuid,
     accumulated: String,
     response_contract: ResponseContract,
+    pending_completion: Option<(CompletedPayload, Option<Uuid>)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1390,6 +1391,7 @@ impl MentatChatApp {
             assistant_message_id: assistant_message.id,
             accumulated: String::new(),
             response_contract,
+            pending_completion: None,
         });
         let backend = self.backend.clone();
         let tx = self.async_tx.clone();
@@ -1550,23 +1552,7 @@ impl MentatChatApp {
                 AsyncResult::AgentFinished {
                     assistant_message_id,
                     result,
-                } => match result {
-                    Ok(Some(trace)) => {
-                        if let Some(storage) = &self.storage {
-                            if let Err(error) = storage.prepare_grounding_trace(&trace) {
-                                self.status = format!("Grounding 저장 실패: {error}");
-                            }
-                        }
-                        self.grounding_by_message
-                            .insert(assistant_message_id, trace);
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        if self.status.is_empty() {
-                            self.status = error.to_string();
-                        }
-                    }
-                },
+                } => self.finish_agent_outcome(assistant_message_id, result),
             }
         }
     }
@@ -1607,60 +1593,8 @@ impl MentatChatApp {
                 }
             }
             AgentEvent::Completed { payload, trace_id } => {
-                let completed_at = chrono::Utc::now();
-                let update = match payload {
-                    CompletedPayload::AdvisorMarkdown(markdown) => {
-                        if let Some(message) = self
-                            .conversation
-                            .messages
-                            .iter_mut()
-                            .find(|message| message.id == active.assistant_message_id)
-                        {
-                            message.markdown = markdown.clone();
-                            message.status = MessageStatus::Completed;
-                        }
-                        TurnTerminalUpdate::AdvisorCompleted {
-                            turn_id: active.turn_id,
-                            assistant_message_id: active.assistant_message_id,
-                            markdown,
-                            grounding_trace_id: trace_id,
-                            freshness: trace_id.map(|_| GroundingFreshness::FreshAtSend),
-                            completed_at,
-                        }
-                    }
-                    CompletedPayload::ValidatedAuditBundle(bundle) => {
-                        let Some(trace_id) = trace_id else {
-                            self.status = "Audit 결과에 GroundingTrace가 없습니다.".to_string();
-                            return;
-                        };
-                        if let Some(message) = self
-                            .conversation
-                            .messages
-                            .iter_mut()
-                            .find(|message| message.id == active.assistant_message_id)
-                        {
-                            message.markdown.clear();
-                            message.status = MessageStatus::Completed;
-                        }
-                        self.audit_by_message
-                            .insert(active.assistant_message_id, bundle.clone());
-                        TurnTerminalUpdate::AuditCompleted {
-                            turn_id: active.turn_id,
-                            assistant_message_id: active.assistant_message_id,
-                            result: bundle,
-                            grounding_trace_id: trace_id,
-                            freshness: GroundingFreshness::FreshAtSend,
-                            completed_at,
-                        }
-                    }
-                };
-                if let Some(storage) = &self.storage {
-                    if let Err(error) = storage.finish_turn(&update) {
-                        self.status = format!("완료 상태 저장 실패: {error}");
-                    }
-                }
-                self.active_turn = None;
-                self.stream_cancel = None;
+                active.pending_completion = Some((payload, trace_id));
+                self.status = "응답과 근거를 원자적으로 저장하는 중…".to_string();
             }
             AgentEvent::Cancelled { payload } => {
                 let update = match payload {
@@ -1757,6 +1691,142 @@ impl MentatChatApp {
                 self.stream_cancel = None;
             }
         }
+    }
+
+    fn finish_agent_outcome(
+        &mut self,
+        assistant_message_id: Uuid,
+        result: Result<Option<GroundingTrace>, mentat_core::MentatError>,
+    ) {
+        let Some(mut active) = self.active_turn.take() else {
+            return;
+        };
+        if active.assistant_message_id != assistant_message_id {
+            self.status = "완료 outcome의 assistant message 결속이 다릅니다.".to_string();
+            self.active_turn = Some(active);
+            return;
+        }
+        let trace = match result {
+            Ok(trace) => trace,
+            Err(error) => {
+                self.fail_atomic_completion(&active, "AGENT_LOOP_FAILED", &error.to_string());
+                self.stream_cancel = None;
+                return;
+            }
+        };
+        let Some((payload, event_trace_id)) = active.pending_completion.take() else {
+            self.fail_atomic_completion(
+                &active,
+                "AGENT_TERMINAL_MISSING",
+                "Agent outcome 전에 completion terminal이 도착하지 않았습니다.",
+            );
+            self.stream_cancel = None;
+            return;
+        };
+        if event_trace_id != trace.as_ref().map(|trace| trace.id) {
+            self.fail_atomic_completion(
+                &active,
+                "TURN_GROUNDING_BINDING_INVALID",
+                "completion terminal과 final GroundingTrace ID가 다릅니다.",
+            );
+            self.stream_cancel = None;
+            return;
+        }
+        let completed_at = chrono::Utc::now();
+        let update = match &payload {
+            CompletedPayload::AdvisorMarkdown(markdown) => TurnTerminalUpdate::AdvisorCompleted {
+                turn_id: active.turn_id,
+                assistant_message_id,
+                markdown: markdown.clone(),
+                grounding_trace_id: event_trace_id,
+                freshness: trace.as_ref().map(|trace| trace.freshness.clone()),
+                completed_at,
+            },
+            CompletedPayload::ValidatedAuditBundle(bundle) => {
+                let Some(trace) = trace.as_ref() else {
+                    self.fail_atomic_completion(
+                        &active,
+                        "TURN_GROUNDING_BINDING_INVALID",
+                        "Audit completion에 final GroundingTrace가 없습니다.",
+                    );
+                    self.stream_cancel = None;
+                    return;
+                };
+                TurnTerminalUpdate::AuditCompleted {
+                    turn_id: active.turn_id,
+                    assistant_message_id,
+                    result: bundle.clone(),
+                    grounding_trace_id: trace.id,
+                    freshness: trace.freshness.clone(),
+                    completed_at,
+                }
+            }
+        };
+        let persisted = self.storage.as_ref().map_or(Ok(()), |storage| {
+            if let Some(trace) = &trace {
+                storage.finish_turn_with_grounding(trace, &update)
+            } else {
+                storage.finish_turn(&update)
+            }
+        });
+        if let Err(error) = persisted {
+            self.fail_atomic_completion(
+                &active,
+                "TURN_GROUNDING_COMMIT_FAILED",
+                &error.to_string(),
+            );
+            self.stream_cancel = None;
+            return;
+        }
+        if let Some(message) = self
+            .conversation
+            .messages
+            .iter_mut()
+            .find(|message| message.id == assistant_message_id)
+        {
+            match payload {
+                CompletedPayload::AdvisorMarkdown(markdown) => message.markdown = markdown,
+                CompletedPayload::ValidatedAuditBundle(ref bundle) => {
+                    message.markdown.clear();
+                    self.audit_by_message
+                        .insert(assistant_message_id, bundle.clone());
+                }
+            }
+            message.status = MessageStatus::Completed;
+            message.grounding_trace_id = event_trace_id;
+            message.grounding_freshness = trace.as_ref().map(|trace| trace.freshness.clone());
+        }
+        if let Some(trace) = trace {
+            self.grounding_by_message
+                .insert(assistant_message_id, trace);
+        }
+        self.status.clear();
+        self.stream_cancel = None;
+    }
+
+    fn fail_atomic_completion(&mut self, active: &ActiveTurn, error_code: &str, message: &str) {
+        let safe_message = "응답과 근거를 함께 저장하지 못해 완료 처리를 취소했습니다.";
+        if let Some(storage) = &self.storage {
+            let _ = storage.finish_turn(&TurnTerminalUpdate::Failed {
+                turn_id: active.turn_id,
+                assistant_message_id: active.assistant_message_id,
+                error_code: error_code.to_string(),
+                safe_message: safe_message.to_string(),
+                completed_at: chrono::Utc::now(),
+            });
+        }
+        if let Some(chat_message) = self
+            .conversation
+            .messages
+            .iter_mut()
+            .find(|chat_message| chat_message.id == active.assistant_message_id)
+        {
+            chat_message.markdown = safe_message.to_string();
+            chat_message.status = MessageStatus::Failed {
+                error_code: error_code.to_string(),
+            };
+        }
+        self.status = format!("{safe_message} {message}");
     }
 
     fn ensure_durable_conversation(&mut self) {
@@ -2267,6 +2337,8 @@ mod tests {
         let forbidden = ["backend", ".infer_round_stream(request"].join("");
         assert!(!source.contains(&forbidden));
         assert!(source.contains("AsyncResult::AgentFinished"));
+        assert!(source.contains("pending_completion"));
+        assert!(source.contains("finish_turn_with_grounding"));
     }
 
     #[test]

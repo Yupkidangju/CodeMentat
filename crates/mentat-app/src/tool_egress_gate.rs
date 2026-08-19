@@ -158,14 +158,14 @@ impl ProviderBodyEgressGate for DurableToolEgressGate {
     }
 
     fn finish(&self, receipt_ids: &[Uuid], status: ToolEgressStatus) -> Result<(), MentatError> {
-        for id in receipt_ids {
-            self.storage.compare_and_set_tool_egress_status(
-                *id,
-                ToolEgressStatus::Prepared,
-                status,
-            )?;
+        if receipt_ids.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        self.storage.compare_and_set_tool_egress_status_batch(
+            receipt_ids,
+            ToolEgressStatus::Prepared,
+            status,
+        )
     }
 
     fn receipt_ids(&self) -> Result<Vec<Uuid>, MentatError> {
@@ -178,9 +178,9 @@ impl ProviderBodyEgressGate for DurableToolEgressGate {
 
 impl DurableToolEgressGate {
     fn fail_prepared(&self, ids: &[Uuid]) {
-        for id in ids {
-            let _ = self.storage.compare_and_set_tool_egress_status(
-                *id,
+        if !ids.is_empty() {
+            let _ = self.storage.compare_and_set_tool_egress_status_batch(
+                ids,
                 ToolEgressStatus::Prepared,
                 ToolEgressStatus::Failed,
             );
@@ -322,6 +322,7 @@ mod tests {
         };
         storage.save_repository_consent_scope(&scope).unwrap();
         let call_id = Uuid::new_v4();
+        let second_call_id = Uuid::new_v4();
         let request = mentat_inference::AgentRequest {
             request_id: Uuid::new_v4(),
             conversation_id: conversation.id,
@@ -332,12 +333,20 @@ mod tests {
                 AgentMessage::user("status"),
                 AgentMessage {
                     role: AgentRole::Assistant,
-                    content: AgentMessageContent::ToolCalls(vec![RepositoryToolCall {
-                        call_id,
-                        snapshot_id,
-                        name: RepositoryToolName::RepoStatus,
-                        arguments: RepositoryToolArguments::RepoStatus,
-                    }]),
+                    content: AgentMessageContent::ToolCalls(vec![
+                        RepositoryToolCall {
+                            call_id,
+                            snapshot_id,
+                            name: RepositoryToolName::RepoStatus,
+                            arguments: RepositoryToolArguments::RepoStatus,
+                        },
+                        RepositoryToolCall {
+                            call_id: second_call_id,
+                            snapshot_id,
+                            name: RepositoryToolName::RepoStatus,
+                            arguments: RepositoryToolArguments::RepoStatus,
+                        },
+                    ]),
                 },
                 AgentMessage {
                     role: AgentRole::Tool,
@@ -348,6 +357,17 @@ mod tests {
                         source_refs: Vec::new(),
                         omissions: Vec::new(),
                         content_bytes: 5,
+                    }),
+                },
+                AgentMessage {
+                    role: AgentRole::Tool,
+                    content: AgentMessageContent::ToolResult(RepositoryToolResult {
+                        call_id: second_call_id,
+                        snapshot_id,
+                        content: "ready-again".to_string(),
+                        source_refs: Vec::new(),
+                        omissions: Vec::new(),
+                        content_bytes: 11,
                     }),
                 },
             ],
@@ -369,17 +389,21 @@ mod tests {
         ));
         let body = br#"{"messages":[{"role":"tool","content":"ready"}]}"#;
         let ids = gate.authorize_exact_body(&request, endpoint, body).unwrap();
-        assert_eq!(ids.len(), 1);
-        let receipt = storage.load_tool_egress_receipt(ids[0]).unwrap().unwrap();
-        ToolEgressSealer::verify_exact_body(&receipt, body).unwrap();
+        assert_eq!(ids.len(), 2);
+        for id in &ids {
+            let receipt = storage.load_tool_egress_receipt(*id).unwrap().unwrap();
+            ToolEgressSealer::verify_exact_body(&receipt, body).unwrap();
+        }
         gate.finish(&ids, ToolEgressStatus::Sent).unwrap();
-        assert_eq!(
-            storage
-                .load_tool_egress_receipt(ids[0])
-                .unwrap()
-                .unwrap()
-                .status,
-            ToolEgressStatus::Sent
-        );
+        for id in ids {
+            assert_eq!(
+                storage
+                    .load_tool_egress_receipt(id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                ToolEgressStatus::Sent
+            );
+        }
     }
 }

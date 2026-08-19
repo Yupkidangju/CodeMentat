@@ -4,7 +4,7 @@ use mentat_core::{
     RepositoryConsentScope, RepositoryToolCallRecord, RepositoryToolCallStatus, RepositoryToolName,
     SourceRef, ToolEgressReceipt, ToolEgressStatus,
 };
-use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use uuid::Uuid;
 
 impl SqliteStorage {
@@ -13,100 +13,7 @@ impl SqliteStorage {
         let transaction = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| storage_error("GROUNDING_TRACE_BEGIN_FAILED", &error.to_string()))?;
-        transaction
-            .execute(
-                "INSERT INTO grounding_traces (
-                    id, conversation_id, turn_id, snapshot_id, freshness, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(id) DO UPDATE SET
-                    conversation_id = excluded.conversation_id,
-                    turn_id = excluded.turn_id,
-                    snapshot_id = excluded.snapshot_id,
-                    freshness = excluded.freshness",
-                params![
-                    trace.id.to_string(),
-                    trace.conversation_id.to_string(),
-                    trace.turn_id.to_string(),
-                    trace.snapshot_id.map(|id| id.to_string()),
-                    serde_json::to_string(&trace.freshness).map_err(|error| storage_error(
-                        "GROUNDING_FRESHNESS_ENCODE_FAILED",
-                        &error.to_string()
-                    ))?,
-                    chrono::Utc::now().to_rfc3339(),
-                ],
-            )
-            .map_err(|error| storage_error("GROUNDING_TRACE_INSERT_FAILED", &error.to_string()))?;
-        transaction
-            .execute(
-                "DELETE FROM tool_call_records WHERE trace_id = ?1",
-                [trace.id.to_string()],
-            )
-            .map_err(|error| {
-                storage_error("GROUNDING_TOOL_RECORD_RESET_FAILED", &error.to_string())
-            })?;
-        transaction
-            .execute(
-                "DELETE FROM source_refs WHERE trace_id = ?1",
-                [trace.id.to_string()],
-            )
-            .map_err(|error| storage_error("GROUNDING_SOURCE_RESET_FAILED", &error.to_string()))?;
-        for record in &trace.tool_calls {
-            transaction
-                .execute(
-                    "INSERT INTO tool_call_records (
-                        trace_id, call_id, round, tool_name, canonical_arguments_digest,
-                        result_digest, content_bytes, source_ref_ids, status
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    params![
-                        trace.id.to_string(),
-                        record.call_id.to_string(),
-                        i64::from(record.round),
-                        record.name.wire_name(),
-                        record.canonical_arguments_digest,
-                        record.result_digest,
-                        i64::from(record.content_bytes),
-                        serde_json::to_string(&record.source_ref_ids).map_err(|error| {
-                            storage_error("GROUNDING_SOURCE_IDS_ENCODE_FAILED", &error.to_string())
-                        })?,
-                        format!("{:?}", record.status),
-                    ],
-                )
-                .map_err(|error| {
-                    storage_error("GROUNDING_TOOL_RECORD_INSERT_FAILED", &error.to_string())
-                })?;
-        }
-        for (ordinal, source) in trace.source_refs.iter().enumerate() {
-            transaction
-                .execute(
-                    "INSERT INTO source_refs (
-                        id, trace_id, ordinal, snapshot_id, relative_path,
-                        line_start, line_end, content_hash, excerpt
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    params![
-                        source.id.to_string(),
-                        trace.id.to_string(),
-                        i64::try_from(ordinal).map_err(|_| storage_error(
-                            "GROUNDING_ORDINAL_OVERFLOW",
-                            "SourceRef ordinal이 SQLite 범위를 초과했습니다."
-                        ))?,
-                        source.snapshot_id.to_string(),
-                        source.relative_path.to_string_lossy().replace('\\', "/"),
-                        i64::try_from(source.line_start).map_err(|_| storage_error(
-                            "GROUNDING_LINE_OVERFLOW",
-                            "SourceRef line_start가 SQLite 범위를 초과했습니다."
-                        ))?,
-                        i64::try_from(source.line_end).map_err(|_| storage_error(
-                            "GROUNDING_LINE_OVERFLOW",
-                            "SourceRef line_end가 SQLite 범위를 초과했습니다."
-                        ))?,
-                        source.content_hash,
-                        source.excerpt,
-                    ],
-                )
-                .map_err(|error| {
-                    storage_error("GROUNDING_SOURCE_INSERT_FAILED", &error.to_string())
-                })?;
-        }
+        write_grounding_trace_in_transaction(&transaction, trace)?;
         transaction
             .commit()
             .map_err(|error| storage_error("GROUNDING_TRACE_COMMIT_FAILED", &error.to_string()))?;
@@ -353,6 +260,41 @@ impl SqliteStorage {
         expected: ToolEgressStatus,
         next: ToolEgressStatus,
     ) -> Result<(), MentatError> {
+        self.compare_and_set_tool_egress_status_batch(&[id], expected, next)
+    }
+
+    pub fn compare_and_set_tool_egress_status_batch(
+        &self,
+        ids: &[Uuid],
+        expected: ToolEgressStatus,
+        next: ToolEgressStatus,
+    ) -> Result<(), MentatError> {
+        self.compare_and_set_tool_egress_status_batch_internal(ids, expected, next, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compare_and_set_tool_egress_status_batch_killpoint(
+        &self,
+        ids: &[Uuid],
+        expected: ToolEgressStatus,
+        next: ToolEgressStatus,
+        fail_before_index: usize,
+    ) -> Result<(), MentatError> {
+        self.compare_and_set_tool_egress_status_batch_internal(
+            ids,
+            expected,
+            next,
+            Some(fail_before_index),
+        )
+    }
+
+    fn compare_and_set_tool_egress_status_batch_internal(
+        &self,
+        ids: &[Uuid],
+        expected: ToolEgressStatus,
+        next: ToolEgressStatus,
+        fail_before_index: Option<usize>,
+    ) -> Result<(), MentatError> {
         if expected != ToolEgressStatus::Prepared
             || !matches!(
                 next,
@@ -366,27 +308,94 @@ impl SqliteStorage {
                 "receipt status는 Prepared에서 terminal 상태로 한 번만 전이할 수 있습니다.",
             ));
         }
-        let conn = self.lock_conn()?;
-        let changed = conn
-            .execute(
-                "UPDATE tool_egress_receipts SET status = ?1, updated_at = ?2
-                 WHERE id = ?3 AND status = ?4",
-                params![
-                    egress_status_text(next),
-                    chrono::Utc::now().to_rfc3339(),
-                    id.to_string(),
-                    egress_status_text(expected),
-                ],
-            )
-            .map_err(|error| {
-                storage_error("TOOL_EGRESS_STATUS_UPDATE_FAILED", &error.to_string())
-            })?;
-        if changed != 1 {
+        if ids.is_empty() {
             return Err(storage_error(
-                "TOOL_EGRESS_STATUS_CONFLICT",
-                "receipt가 없거나 이미 terminal 상태입니다.",
+                "TOOL_EGRESS_BATCH_EMPTY",
+                "receipt batch는 비어 있을 수 없습니다.",
             ));
         }
+        let unique = ids
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        if unique.len() != ids.len() {
+            return Err(storage_error(
+                "TOOL_EGRESS_BATCH_DUPLICATE",
+                "receipt batch에 중복 ID가 있습니다.",
+            ));
+        }
+        let mut conn = self.lock_conn()?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| storage_error("TOOL_EGRESS_BATCH_BEGIN_FAILED", &error.to_string()))?;
+        let mut exact_body_digest: Option<String> = None;
+        for id in ids {
+            let receipt: Option<(String, String)> = transaction
+                .query_row(
+                    "SELECT status, exact_provider_body_digest
+                       FROM tool_egress_receipts WHERE id = ?1",
+                    [id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|error| {
+                    storage_error("TOOL_EGRESS_STATUS_READ_FAILED", &error.to_string())
+                })?;
+            let Some((status, body_digest)) = receipt else {
+                return Err(storage_error(
+                    "TOOL_EGRESS_STATUS_CONFLICT",
+                    "receipt batch에 존재하지 않는 ID가 있습니다.",
+                ));
+            };
+            if status != egress_status_text(expected) {
+                return Err(storage_error(
+                    "TOOL_EGRESS_STATUS_CONFLICT",
+                    "receipt batch expected 상태와 다릅니다.",
+                ));
+            }
+            if exact_body_digest
+                .as_ref()
+                .is_some_and(|expected_digest| expected_digest != &body_digest)
+            {
+                return Err(storage_error(
+                    "TOOL_EGRESS_BATCH_BODY_MISMATCH",
+                    "receipt batch가 서로 다른 exact provider body를 가리킵니다.",
+                ));
+            }
+            exact_body_digest.get_or_insert(body_digest);
+        }
+        let updated_at = chrono::Utc::now().to_rfc3339();
+        for (index, id) in ids.iter().enumerate() {
+            if fail_before_index == Some(index) {
+                return Err(storage_error(
+                    "TOOL_EGRESS_BATCH_KILLPOINT",
+                    "receipt batch commit 전 killpoint가 실행되었습니다.",
+                ));
+            }
+            let changed = transaction
+                .execute(
+                    "UPDATE tool_egress_receipts SET status = ?1, updated_at = ?2
+                 WHERE id = ?3 AND status = ?4",
+                    params![
+                        egress_status_text(next),
+                        updated_at,
+                        id.to_string(),
+                        egress_status_text(expected),
+                    ],
+                )
+                .map_err(|error| {
+                    storage_error("TOOL_EGRESS_STATUS_UPDATE_FAILED", &error.to_string())
+                })?;
+            if changed != 1 {
+                return Err(storage_error(
+                    "TOOL_EGRESS_STATUS_CONFLICT",
+                    "receipt batch 갱신 수가 예상과 다릅니다.",
+                ));
+            }
+        }
+        transaction.commit().map_err(|error| {
+            storage_error("TOOL_EGRESS_BATCH_COMMIT_FAILED", &error.to_string())
+        })?;
         Ok(())
     }
 
@@ -458,6 +467,103 @@ impl SqliteStorage {
     }
 }
 
+pub(crate) fn write_grounding_trace_in_transaction(
+    transaction: &Transaction<'_>,
+    trace: &GroundingTrace,
+) -> Result<(), MentatError> {
+    transaction
+        .execute(
+            "INSERT INTO grounding_traces (
+                id, conversation_id, turn_id, snapshot_id, freshness, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                conversation_id = excluded.conversation_id,
+                turn_id = excluded.turn_id,
+                snapshot_id = excluded.snapshot_id,
+                freshness = excluded.freshness",
+            params![
+                trace.id.to_string(),
+                trace.conversation_id.to_string(),
+                trace.turn_id.to_string(),
+                trace.snapshot_id.map(|id| id.to_string()),
+                serde_json::to_string(&trace.freshness).map_err(|error| storage_error(
+                    "GROUNDING_FRESHNESS_ENCODE_FAILED",
+                    &error.to_string()
+                ))?,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )
+        .map_err(|error| storage_error("GROUNDING_TRACE_INSERT_FAILED", &error.to_string()))?;
+    transaction
+        .execute(
+            "DELETE FROM tool_call_records WHERE trace_id = ?1",
+            [trace.id.to_string()],
+        )
+        .map_err(|error| storage_error("GROUNDING_TOOL_RECORD_RESET_FAILED", &error.to_string()))?;
+    transaction
+        .execute(
+            "DELETE FROM source_refs WHERE trace_id = ?1",
+            [trace.id.to_string()],
+        )
+        .map_err(|error| storage_error("GROUNDING_SOURCE_RESET_FAILED", &error.to_string()))?;
+    for record in &trace.tool_calls {
+        transaction
+            .execute(
+                "INSERT INTO tool_call_records (
+                    trace_id, call_id, round, tool_name, canonical_arguments_digest,
+                    result_digest, content_bytes, source_ref_ids, status
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    trace.id.to_string(),
+                    record.call_id.to_string(),
+                    i64::from(record.round),
+                    record.name.wire_name(),
+                    record.canonical_arguments_digest,
+                    record.result_digest,
+                    i64::from(record.content_bytes),
+                    serde_json::to_string(&record.source_ref_ids).map_err(|error| {
+                        storage_error("GROUNDING_SOURCE_IDS_ENCODE_FAILED", &error.to_string())
+                    })?,
+                    format!("{:?}", record.status),
+                ],
+            )
+            .map_err(|error| {
+                storage_error("GROUNDING_TOOL_RECORD_INSERT_FAILED", &error.to_string())
+            })?;
+    }
+    for (ordinal, source) in trace.source_refs.iter().enumerate() {
+        transaction
+            .execute(
+                "INSERT INTO source_refs (
+                    id, trace_id, ordinal, snapshot_id, relative_path,
+                    line_start, line_end, content_hash, excerpt
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    source.id.to_string(),
+                    trace.id.to_string(),
+                    i64::try_from(ordinal).map_err(|_| storage_error(
+                        "GROUNDING_ORDINAL_OVERFLOW",
+                        "SourceRef ordinal이 SQLite 범위를 초과했습니다."
+                    ))?,
+                    source.snapshot_id.to_string(),
+                    source.relative_path.to_string_lossy().replace('\\', "/"),
+                    i64::try_from(source.line_start).map_err(|_| storage_error(
+                        "GROUNDING_LINE_OVERFLOW",
+                        "SourceRef line_start가 SQLite 범위를 초과했습니다."
+                    ))?,
+                    i64::try_from(source.line_end).map_err(|_| storage_error(
+                        "GROUNDING_LINE_OVERFLOW",
+                        "SourceRef line_end가 SQLite 범위를 초과했습니다."
+                    ))?,
+                    source.content_hash,
+                    source.excerpt,
+                ],
+            )
+            .map_err(|error| storage_error("GROUNDING_SOURCE_INSERT_FAILED", &error.to_string()))?;
+    }
+    Ok(())
+}
+
 fn parse_tool_name(value: &str) -> Result<RepositoryToolName, MentatError> {
     RepositoryToolName::ALL
         .into_iter()
@@ -515,6 +621,136 @@ mod tests {
         TurnStart,
     };
     use tempfile::tempdir;
+
+    fn two_prepared_receipts_for_same_body() -> (SqliteStorage, Uuid, Uuid) {
+        let directory = tempdir().unwrap().keep();
+        let storage = SqliteStorage::open(directory.join("mentat.db")).unwrap();
+        let profile_id = Uuid::new_v4();
+        let profile = storage
+            .seed_factory_prompt_profile(&FactoryPromptSeed {
+                profile_id,
+                profile_name: "batch".to_string(),
+                experience_preset: ExperiencePreset::Intermediate,
+                base_system_preset: SystemPreset::Intermediate,
+                system_resource_key: "system.intermediate.v1".to_string(),
+                system_resource_version: "v1".to_string(),
+                system_checksum: "system".to_string(),
+                persona_resource_key: "persona.default_analyst.v1".to_string(),
+                persona_resource_version: "v1".to_string(),
+                persona_checksum: "persona".to_string(),
+            })
+            .unwrap();
+        let active = storage
+            .load_active_prompt_profile(profile.id)
+            .unwrap()
+            .unwrap();
+        let repository_id = Uuid::new_v4();
+        let snapshot_id = Uuid::new_v4();
+        let conversation = storage
+            .create_conversation(&NewConversation {
+                repository_id: Some(repository_id),
+                active_snapshot_id: Some(snapshot_id),
+                prompt_profile_id: profile.id,
+                persistence: ConversationPersistence::Durable,
+            })
+            .unwrap();
+        let turn_id = Uuid::new_v4();
+        storage
+            .begin_turn(&TurnStart {
+                turn: ConversationTurn {
+                    id: turn_id,
+                    conversation_id: conversation.id,
+                    sequence: 1,
+                    prompt_profile_id: profile.id,
+                    prompt_profile_revision_id: active.revision.id,
+                    kernel_version: "kernel.v1".to_string(),
+                    kernel_digest: "kernel".to_string(),
+                    snapshot_id: Some(snapshot_id),
+                    response_contract: ResponseContract::AdvisorMarkdown,
+                    audit_result_id: None,
+                    started_at: chrono::Utc::now(),
+                    completed_at: None,
+                },
+                user_message: ChatMessage::new(
+                    conversation.id,
+                    turn_id,
+                    ChatRole::User,
+                    0,
+                    "질문",
+                    MessageStatus::Completed,
+                ),
+                assistant_placeholder: ChatMessage::new(
+                    conversation.id,
+                    turn_id,
+                    ChatRole::Assistant,
+                    1,
+                    "",
+                    MessageStatus::Pending,
+                ),
+            })
+            .unwrap();
+        let trace_id = Uuid::new_v4();
+        storage
+            .prepare_grounding_trace(&GroundingTrace {
+                id: trace_id,
+                conversation_id: conversation.id,
+                turn_id,
+                snapshot_id: Some(snapshot_id),
+                tool_calls: Vec::new(),
+                source_refs: Vec::new(),
+                egress_receipt_ids: Vec::new(),
+                freshness: GroundingFreshness::FreshAtSend,
+            })
+            .unwrap();
+        let binding = ProviderBinding::new(
+            Uuid::new_v4(),
+            "OpenAICompatible",
+            "https://api.example.com/v1/chat/completions",
+            "dynamic",
+        )
+        .unwrap();
+        let scope_id = Uuid::new_v4();
+        storage
+            .save_repository_consent_scope(&RepositoryConsentScope {
+                id: scope_id,
+                conversation_id: conversation.id,
+                repository_id,
+                snapshot_id,
+                provider_binding: binding.clone(),
+                kind: RepositoryConsentKind::RepositorySession,
+                granted_at: chrono::Utc::now(),
+                revoked_at: None,
+            })
+            .unwrap();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        for id in [first, second] {
+            let now = chrono::Utc::now();
+            storage
+                .prepare_tool_egress_receipt(&ToolEgressReceipt {
+                    id,
+                    seal_version: "CM_TOOL_EGRESS_V1".to_string(),
+                    trace_id,
+                    consent_scope_id: scope_id,
+                    conversation_id: conversation.id,
+                    turn_id,
+                    tool_call_id: Uuid::new_v4(),
+                    repository_id,
+                    snapshot_id,
+                    tool_name: RepositoryToolName::ReadFileLines,
+                    canonical_refs: Vec::new(),
+                    provider_binding: binding.clone(),
+                    semantic_payload_digest: format!("semantic-{id}"),
+                    exact_provider_body_digest: "same-body".to_string(),
+                    canonical_digest: format!("canonical-{id}"),
+                    status: ToolEgressStatus::Prepared,
+                    prepared_at: now,
+                    updated_at: now,
+                })
+                .unwrap();
+        }
+        (storage, first, second)
+    }
 
     #[test]
     fn prepared_receipt_is_durable_and_status_transition_is_compare_and_set() {
@@ -670,5 +906,110 @@ mod tests {
         assert_eq!(restored.id, trace_id);
         assert_eq!(restored.snapshot_id, Some(snapshot_id));
         assert_eq!(restored.egress_receipt_ids, vec![receipt_id]);
+    }
+
+    #[test]
+    fn second_receipt_update_failure_rolls_back_entire_body_batch() {
+        let (storage, first, second) = two_prepared_receipts_for_same_body();
+
+        assert!(storage
+            .compare_and_set_tool_egress_status_batch_killpoint(
+                &[first, second],
+                ToolEgressStatus::Prepared,
+                ToolEgressStatus::Sent,
+                1,
+            )
+            .is_err());
+        assert_eq!(
+            storage
+                .load_tool_egress_receipt(first)
+                .unwrap()
+                .unwrap()
+                .status,
+            ToolEgressStatus::Prepared
+        );
+        assert_eq!(
+            storage
+                .load_tool_egress_receipt(second)
+                .unwrap()
+                .unwrap()
+                .status,
+            ToolEgressStatus::Prepared
+        );
+
+        storage
+            .compare_and_set_tool_egress_status_batch(
+                &[first, second],
+                ToolEgressStatus::Prepared,
+                ToolEgressStatus::Sent,
+            )
+            .unwrap();
+        assert_eq!(
+            storage
+                .load_tool_egress_receipt(first)
+                .unwrap()
+                .unwrap()
+                .status,
+            ToolEgressStatus::Sent
+        );
+        assert_eq!(
+            storage
+                .load_tool_egress_receipt(second)
+                .unwrap()
+                .unwrap()
+                .status,
+            ToolEgressStatus::Sent
+        );
+    }
+
+    #[test]
+    fn restart_reconciles_stale_prepared_body_batch_to_outcome_unknown() {
+        let (storage, first, second) = two_prepared_receipts_for_same_body();
+        let db_path = storage.db_path().to_path_buf();
+        drop(storage);
+
+        let reopened = SqliteStorage::open(db_path).unwrap();
+        for id in [first, second] {
+            assert_eq!(
+                reopened
+                    .load_tool_egress_receipt(id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                ToolEgressStatus::OutcomeUnknown
+            );
+        }
+    }
+
+    #[test]
+    fn receipt_batch_rejects_mixed_exact_body_digests_without_partial_update() {
+        let (storage, first, second) = two_prepared_receipts_for_same_body();
+        storage
+            .lock_conn()
+            .unwrap()
+            .execute(
+                "UPDATE tool_egress_receipts SET exact_provider_body_digest = 'other-body'
+                 WHERE id = ?1",
+                [second.to_string()],
+            )
+            .unwrap();
+
+        assert!(storage
+            .compare_and_set_tool_egress_status_batch(
+                &[first, second],
+                ToolEgressStatus::Prepared,
+                ToolEgressStatus::Sent,
+            )
+            .is_err());
+        for id in [first, second] {
+            assert_eq!(
+                storage
+                    .load_tool_egress_receipt(id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                ToolEgressStatus::Prepared
+            );
+        }
     }
 }

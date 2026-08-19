@@ -10,6 +10,8 @@
 - semantic tool result만 seal해서는 provider별 JSON 직렬화 이후 bytes를 보장할 수 없다. 최종 body를 만드는 adapter가 provider 중립 gate를 호출하고, 앱이 consent/seal/storage를 조율해야 의존 방향과 송신 직전 검증을 함께 지킬 수 있다.
 - Grounding receipt는 provider 송신 전에 FK 대상 trace가 durable해야 한다. 빈 trace를 먼저 만들고 같은 ID로 tool/source를 완결하는 upsert 흐름이 재시작 복원과 receipt 선영속을 양립시킨다.
 - capability는 모델 이름으로 추정하지 않고 실제 read-only tool probe로 확인해야 한다. probe 실패는 전체 모델 활성화 실패가 아니라 정직한 chat-only 강등으로 처리한다.
+- event stream의 `Completed`는 화면 의미일 뿐 durable commit 증거가 아니다. final AgentLoop outcome과 GroundingTrace가 도착한 뒤 단일 storage transaction이 성공해야만 UI/DB를 Completed로 확정해야 한다.
+- 한 HTTP body에 여러 receipt가 있으면 상태 전이는 receipt별 CAS가 아니라 body 단위 batch CAS여야 한다. 첫 update 후 두 번째 실패를 주입하는 killpoint가 이 불변조건을 가장 직접적으로 검증한다.
 
 ---
 
