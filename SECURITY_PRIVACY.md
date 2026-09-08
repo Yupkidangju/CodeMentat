@@ -194,7 +194,7 @@ GroundingTrace/turn record prepared
 ## 10. 마이그레이션 및 복구
 
 1. DB schema version을 확인한다.
-2. SQLite online backup/checkpoint로 DB/WAL 일관성이 있는 `<db>.pre-cr-ux-001-<UTC>.sqlite`를 만들고 AppData `migration-artifacts.json`에 category/time/path를 기록한다.
+2. SQLite online backup/checkpoint로 DB/WAL 일관성이 있는 `<db>.pre-cr-ux-001-<UTC>.sqlite`를 만든다. 현재 별도 artifact registry는 없으며, process lock 아래에서 정규화된 DB 부모 경로와 앱 고유 파일명 규칙으로 보존본을 식별한다.
 3. 각 migration version을 별도 `BEGIN IMMEDIATE` transaction으로 수행한다.
 4. 성공 시 schema version을 갱신하고 backup 정책에 따라 보존한다.
 5. 실패 시 transaction rollback, 원본을 파괴하지 않고 quarantine 상태로 기록한다.
@@ -202,7 +202,9 @@ GroundingTrace/turn record prepared
 
 자동 `DROP`, 무조건 `INSERT OR REPLACE`를 이용한 conversation/prompt overwrite, 복구 실패 DB 삭제는 금지한다.
 
-privacy wipe가 요청되면 live DB transaction이 성공한 뒤 앱이 만든 migration backup/WAL/SHM/quarantine의 관련 보존본도 정리한다. 어느 단계든 실패하면 UI를 삭제 완료로 표시하지 않는다.
+privacy wipe는 process lock을 보유한 storage에서 DB와 같은 부모 경로의 앱 생성 migration backup/quarantine을 먼저 정리한다. symlink/중첩 디렉터리는 거부하고 실제 제거 목록을 DeleteReceipt에 남긴다. 정리가 실패하면 live conversation을 유지해 재시도할 수 있다. 이후 live row cascade transaction이 성공해야 삭제 완료를 표시한다. OS snapshot과 물리적 복구까지 삭제한다고 주장하지 않는다.
+
+멀티 감사 2 보정: 공유 cancellation으로 UI 철회/provider 변경을 gate까지 전파한다. 송신 직전 재검사와 취소 우선 select를 수행하며, authorize 이후 future drop은 receipt batch를 OutcomeUnknown으로 정리한다. 민감 파일명은 gateway의 전체 catalog에서 제외한다. 도구 예산은 SourceRef/omission을 포함한 result JSON 상한(64KiB/call, 256KiB/turn)이며 omission은 최대 128개다. 실제 content_bytes 필드 폭을 포함할 수 있도록 보수적으로 계산한다. SSE 수신은 round 4MiB, 버퍼 1MiB, native tool 인자 64KiB/24 calls다.
 
 storage open/migration/decode 오류는 `.ok()`, `flatten()`, 임의 UUID/현재 시각/`Ready` fallback으로 숨기지 않는다. DB unavailable에서는 factory prompt 기반 ephemeral chat만 허용하고 UI에 `저장되지 않음`을 표시한다. repository egress는 durable receipt store가 없으면 차단한다.
 

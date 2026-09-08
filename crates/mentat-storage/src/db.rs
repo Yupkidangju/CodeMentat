@@ -385,6 +385,93 @@ impl SqliteStorage {
     pub fn db_path(&self) -> &Path {
         &self.db_path
     }
+
+    pub(crate) fn remove_privacy_backups(&self) -> Result<Vec<PathBuf>, MentatError> {
+        let parent = self
+            .db_path
+            .parent()
+            .ok_or_else(|| storage_error("PRIVACY_PATH", "DB 부모 경로 없음"))?
+            .canonicalize()
+            .map_err(|e| storage_error("PRIVACY_PATH", &e.to_string()))?;
+        let name = self
+            .db_path
+            .file_name()
+            .ok_or_else(|| storage_error("PRIVACY_PATH", "DB 파일명 없음"))?
+            .to_string_lossy();
+        let mut removed = Vec::new();
+        for entry in std::fs::read_dir(&parent)
+            .map_err(|e| storage_error("PRIVACY_CLEANUP", &e.to_string()))?
+        {
+            let entry = entry.map_err(|e| storage_error("PRIVACY_CLEANUP", &e.to_string()))?;
+            let filename = entry.file_name().to_string_lossy().into_owned();
+            let backup = filename.starts_with(&format!("{name}.pre-cr-ux-001-"))
+                && filename.ends_with(".sqlite");
+            let quarantine = filename.starts_with(&format!("{name}.quarantine-"));
+            if !backup && !quarantine {
+                continue;
+            }
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|e| storage_error("PRIVACY_CLEANUP", &e.to_string()))?;
+            if metadata.file_type().is_symlink()
+                || path
+                    .canonicalize()
+                    .map_err(|e| storage_error("PRIVACY_CLEANUP", &e.to_string()))?
+                    .parent()
+                    != Some(parent.as_path())
+            {
+                return Err(storage_error(
+                    "PRIVACY_CLEANUP",
+                    "보존본 경로가 경계 밖입니다.",
+                ));
+            }
+            if metadata.is_dir() {
+                // 자체 quarantine에는 DB/WAL/SHM 일반 파일만 허용한다.
+                if !quarantine {
+                    return Err(storage_error(
+                        "PRIVACY_CLEANUP",
+                        "보존본이 일반 파일이 아닙니다.",
+                    ));
+                }
+                let mut children = Vec::new();
+                for child in std::fs::read_dir(&path)
+                    .map_err(|e| storage_error("PRIVACY_CLEANUP", &e.to_string()))?
+                {
+                    let child =
+                        child.map_err(|e| storage_error("PRIVACY_CLEANUP", &e.to_string()))?;
+                    let child_name = child.file_name().to_string_lossy().into_owned();
+                    if ![
+                        name.to_string(),
+                        format!("{name}-wal"),
+                        format!("{name}-shm"),
+                    ]
+                    .contains(&child_name)
+                        || !child
+                            .file_type()
+                            .map_err(|e| storage_error("PRIVACY_CLEANUP", &e.to_string()))?
+                            .is_file()
+                    {
+                        return Err(storage_error(
+                            "PRIVACY_CLEANUP",
+                            "알 수 없는 quarantine 내용",
+                        ));
+                    }
+                    children.push(child.path());
+                }
+                for child in children {
+                    std::fs::remove_file(child)
+                        .map_err(|e| storage_error("PRIVACY_CLEANUP", &e.to_string()))?;
+                }
+                std::fs::remove_dir(&path)
+                    .map_err(|e| storage_error("PRIVACY_CLEANUP", &e.to_string()))?;
+            } else {
+                std::fs::remove_file(&path)
+                    .map_err(|e| storage_error("PRIVACY_CLEANUP", &e.to_string()))?;
+            }
+            removed.push(path);
+        }
+        Ok(removed)
+    }
 }
 
 fn open_and_migrate(

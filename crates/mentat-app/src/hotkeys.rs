@@ -26,6 +26,18 @@ pub struct GlobalShortcutController {
 }
 
 impl GlobalShortcutController {
+    #[cfg(test)]
+    pub(crate) fn disabled_for_test() -> Self {
+        let (_, visibility_rx) = mpsc::channel();
+        Self {
+            manager: None,
+            registered: vec![],
+            visibility_rx,
+            stop: Arc::new(AtomicBool::new(false)),
+            worker: None,
+            status: "disabled".into(),
+        }
+    }
     pub fn register(ctx: &egui::Context) -> Self {
         let requested = [
             (

@@ -51,10 +51,16 @@ enum AsyncResult {
         result: Result<(ModelVerification, AgentCapabilities), mentat_core::MentatError>,
     },
     RepositoryScanned {
+        conversation_id: Uuid,
+        generation: Uuid,
         session: Arc<ReadOnlySession>,
         result: Result<(RepositorySnapshot, Vec<FileRecord>), mentat_core::MentatError>,
     },
-    AgentEvent(AgentEvent),
+    AgentEvent {
+        conversation_id: Uuid,
+        turn_id: Uuid,
+        event: AgentEvent,
+    },
     AgentFinished {
         assistant_message_id: Uuid,
         result: Result<Option<GroundingTrace>, mentat_core::MentatError>,
@@ -76,6 +82,7 @@ enum ConversationMode {
 }
 
 struct RepositoryBinding {
+    watcher: mentat_repository::RepositoryWatcher,
     session: Arc<ReadOnlySession>,
     snapshot: RepositorySnapshot,
     gateway: Arc<RepositoryToolGateway>,
@@ -109,6 +116,7 @@ pub struct MentatChatApp {
     repository: Option<RepositoryBinding>,
     repository_busy: bool,
     repository_cancel: Option<CancellationToken>,
+    scan_generation: Uuid,
     settings_open: bool,
     composer: String,
     submit_mode: ComposerSubmitMode,
@@ -124,6 +132,7 @@ pub struct MentatChatApp {
     pending_dirty_action: Option<DirtyPromptAction>,
     mode: ConversationMode,
     repository_egress_approved: bool,
+    active_consent_scope: Option<Uuid>,
     grounding_by_message: HashMap<Uuid, GroundingTrace>,
     audit_by_message: HashMap<Uuid, AnswerBundle>,
     selected_grounding_message: Option<Uuid>,
@@ -137,7 +146,7 @@ impl MentatChatApp {
         let (async_tx, async_rx) = mpsc::unbounded_channel();
         let catalog = FactoryPromptCatalog::load().expect("내장 prompt asset 검증 실패");
         let mut status = String::new();
-        let storage = match open_storage() {
+        let mut storage = match open_storage() {
             Ok(storage) => {
                 if storage.recovery_quarantine_path().is_some() {
                     status = "손상된 이전 DB를 격리하고 새 저장소로 시작했습니다.".to_string();
@@ -149,8 +158,14 @@ impl MentatChatApp {
                 None
             }
         };
-        if let Some(storage) = &storage {
-            let _ = storage.seed_factory_prompt_profile(&factory_seed(&catalog));
+        if let Some(database) = &storage {
+            if let Err(error) = database.seed_factory_prompt_profile(&factory_seed(&catalog)) {
+                append_status(
+                    &mut status,
+                    &format!("프롬프트 저장 초기화 실패 · 세션 전용: {error}"),
+                );
+                storage = None;
+            }
         }
         let conversation = match storage
             .as_ref()
@@ -163,6 +178,25 @@ impl MentatChatApp {
                 Conversation::new(DEFAULT_PROFILE_ID, None, None)
             }
         };
+        if let Some(database) = &storage {
+            let valid = database
+                .load_active_prompt_profile(DEFAULT_PROFILE_ID)
+                .and_then(|stored| {
+                    let stored = stored.ok_or_else(|| {
+                        mentat_core::MentatError::IoError("활성 프롬프트 없음".into())
+                    })?;
+                    catalog.resolve_source(&stored.system_source)?;
+                    catalog.resolve_source(&stored.persona_source)?;
+                    Ok(())
+                });
+            if let Err(error) = valid {
+                append_status(
+                    &mut status,
+                    &format!("프롬프트 복원 실패 · 세션 전용: {error}"),
+                );
+                storage = None;
+            }
+        }
         let mut saved_backend = match storage.as_ref().map(SqliteStorage::load_backend_profile) {
             Some(Ok(Some(profile))) => profile,
             Some(Ok(None)) | None => mentat_inference::BackendProfile::default(),
@@ -249,7 +283,7 @@ impl MentatChatApp {
             });
         let (grounding_by_message, audit_by_message) = storage
             .as_ref()
-            .map(|storage| restore_message_projections(storage, &conversation))
+            .map(|storage| restore_message_projections(storage, &conversation, &mut status))
             .unwrap_or_default();
 
         Self {
@@ -273,6 +307,7 @@ impl MentatChatApp {
             repository: None,
             repository_busy: false,
             repository_cancel: None,
+            scan_generation: Uuid::new_v4(),
             settings_open: false,
             composer: String::new(),
             submit_mode: preferences.submit_mode,
@@ -288,6 +323,7 @@ impl MentatChatApp {
             pending_dirty_action: None,
             mode: ConversationMode::Advisor,
             repository_egress_approved: false,
+            active_consent_scope: None,
             grounding_by_message,
             audit_by_message,
             selected_grounding_message: None,
@@ -409,6 +445,12 @@ impl MentatChatApp {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!self.repository_busy && self.active_turn.is_none(), egui::Button::new("저장소 연결 / 재인덱싱")).clicked() { self.begin_repository_scan(); }
+                if self.repository_busy && ui.button("스캔 취소").clicked() {
+                    if let Some(token) = &self.repository_cancel { token.cancel(); }
+                }
+            });
             ScrollArea::vertical()
                 .id_salt("conversation_timeline")
                 .stick_to_bottom(true)
@@ -473,13 +515,16 @@ impl MentatChatApp {
                             .is_some_and(|profile| profile.provider.requires_api_key())
                             && repository_capable
                         {
-                            ui.checkbox(
+                            let consent_changed = ui.checkbox(
                                 &mut self.repository_egress_approved,
                                 "이 세션에서 필요한 저장소 발췌의 공급자 전송 허용",
                             )
                             .on_hover_text(
                                 "현재 대화·snapshot·provider·model에만 결속됩니다. 변경 시 자동 해제됩니다.",
-                            );
+                            ).changed();
+                            if consent_changed && !self.repository_egress_approved {
+                                if let Some(token) = &self.stream_cancel { token.cancel(); }
+                            }
                         }
                     }
                     let mut open_grounding = None;
@@ -574,6 +619,7 @@ impl MentatChatApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ScrollArea::vertical().show(ui, |ui| {
                 let stage = self.provider_setup.stage();
+                ui.label(self.global_shortcuts.status());
                 let models = self.provider_setup.catalog.models.clone();
                 let previous = self.provider_setup.draft_profile.clone();
                 let previous_persona = self.persona;
@@ -592,6 +638,9 @@ impl MentatChatApp {
                     != self.provider_setup.draft_profile.provider
                     || previous.base_url != self.provider_setup.draft_profile.base_url;
                 if provider_target_changed {
+                    if let Some(token) = &self.stream_cancel {
+                        token.cancel();
+                    }
                     self.repository_egress_approved = false;
                     self.mode = ConversationMode::Advisor;
                     self.provider_setup.draft_profile.api_key = None;
@@ -621,6 +670,9 @@ impl MentatChatApp {
                         self.provider_status = error;
                     } else {
                         self.repository_egress_approved = false;
+                        if let Some(token) = &self.stream_cancel {
+                            token.cancel();
+                        }
                         self.mode = ConversationMode::Advisor;
                     }
                 }
@@ -753,7 +805,6 @@ impl MentatChatApp {
             )
             .changed()
         {
-            self.persona_is_custom = true;
             self.prompt_dirty = true;
         }
 
@@ -767,6 +818,7 @@ impl MentatChatApp {
             )
             .changed()
         {
+            self.persona_is_custom = true;
             self.prompt_dirty = true;
         }
 
@@ -845,6 +897,21 @@ impl MentatChatApp {
             if ui.button("Factory Reset").clicked() {
                 if let Ok(catalog) = FactoryPromptCatalog::load() {
                     self.system_prompt_draft = catalog.system(self.base_system_preset).to_string();
+                    self.persona_prompt_draft = catalog.persona(self.persona).to_string();
+                    self.persona_is_custom = false;
+                    self.prompt_dirty = true;
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui.button("System 기본값").clicked() {
+                if let Ok(catalog) = FactoryPromptCatalog::load() {
+                    self.system_prompt_draft = catalog.system(self.base_system_preset).to_string();
+                    self.prompt_dirty = true;
+                }
+            }
+            if ui.button("Persona 기본값").clicked() {
+                if let Ok(catalog) = FactoryPromptCatalog::load() {
                     self.persona_prompt_draft = catalog.persona(self.persona).to_string();
                     self.persona_is_custom = false;
                     self.prompt_dirty = true;
@@ -1018,6 +1085,14 @@ impl MentatChatApp {
     }
 
     fn execute_dirty_action(&mut self, action: DirtyPromptAction, ctx: &egui::Context) {
+        if matches!(action, DirtyPromptAction::CloseApp) {
+            if let Some(token) = &self.stream_cancel {
+                token.cancel();
+            }
+            if let Some(token) = &self.repository_cancel {
+                token.cancel();
+            }
+        }
         match action {
             DirtyPromptAction::CloseApp => match self.persist_window_preferences() {
                 Ok(()) => ctx.send_viewport_cmd(ViewportCommand::Close),
@@ -1099,11 +1174,16 @@ impl MentatChatApp {
             self.ensure_durable_conversation();
         }
         let cancel = CancellationToken::new();
-        self.repository_cancel = Some(cancel.clone());
         self.repository_busy = true;
         self.status = "저장소를 읽기 전용으로 인덱싱하는 중…".to_string();
         let tx = self.async_tx.clone();
         let session_for_task = session.clone();
+        if let Some(token) = self.repository_cancel.replace(cancel.clone()) {
+            token.cancel();
+        }
+        self.scan_generation = Uuid::new_v4();
+        let generation = self.scan_generation;
+        let conversation_id = self.conversation.id;
         self.runtime.spawn(async move {
             let result = session_for_task
                 .scan_files_with_limits(ScanLimits::default(), cancel)
@@ -1112,7 +1192,12 @@ impl MentatChatApp {
                     let snapshot = session_for_task.create_snapshot_from_outcome(&outcome);
                     (snapshot, outcome.files)
                 });
-            let _ = tx.send(AsyncResult::RepositoryScanned { session, result });
+            let _ = tx.send(AsyncResult::RepositoryScanned {
+                conversation_id,
+                generation,
+                session,
+                result,
+            });
         });
     }
 
@@ -1151,6 +1236,9 @@ impl MentatChatApp {
     }
 
     fn submit_chat(&mut self) {
+        if self.active_turn.is_some() {
+            return;
+        }
         let Some(profile) = self.provider_setup.active_profile().cloned() else {
             self.status = "설정에서 공급자 모델을 확인하고 활성화해 주세요.".to_string();
             self.settings_open = true;
@@ -1322,6 +1410,7 @@ impl MentatChatApp {
                 return;
             }
         }
+        let cancel = CancellationToken::new();
         let egress_gate = if profile.provider.requires_api_key() {
             match (&self.storage, repository, trace_id) {
                 (Some(storage), Some(repository), Some(trace_id)) => {
@@ -1364,9 +1453,10 @@ impl MentatChatApp {
                         self.status = format!("동의 기록 저장 실패: {error}");
                         return;
                     }
+                    self.active_consent_scope = Some(scope.id);
                     Some(Arc::new(DurableToolEgressGate::new(
                         storage.clone(),
-                        RuntimeConsentCapability::new(scope),
+                        RuntimeConsentCapability::new(scope).with_revocation(cancel.clone()),
                         trace_id,
                     ))
                         as Arc<dyn mentat_inference::ProviderBodyEgressGate>)
@@ -1384,7 +1474,6 @@ impl MentatChatApp {
         self.conversation.messages.push(assistant_message.clone());
         self.composer.clear();
         self.status.clear();
-        let cancel = CancellationToken::new();
         self.stream_cancel = Some(cancel.clone());
         self.active_turn = Some(ActiveTurn {
             turn_id,
@@ -1397,11 +1486,34 @@ impl MentatChatApp {
         let tx = self.async_tx.clone();
         let assistant_message_id = assistant_message.id;
         let gateway = repository.map(|repository| repository.gateway.clone());
+        let conversation_id = self.conversation.id;
+        let stream_storage = self.storage.clone();
         self.runtime.spawn(async move {
             let event_tx = tx.clone();
+            let (delta_tx, delta_rx) = mpsc::unbounded_channel();
+            let writer = tokio::spawn(crate::stream_store::persist_deltas(
+                stream_storage,
+                assistant_message_id,
+                delta_rx,
+            ));
             let mut agent =
                 AgentLoop::new(backend, gateway).with_event_sink(Arc::new(move |event| {
-                    let _ = event_tx.send(AsyncResult::AgentEvent(event));
+                    if matches!(
+                        event,
+                        AgentEvent::Completed { .. }
+                            | AgentEvent::Cancelled { .. }
+                            | AgentEvent::Failed { .. }
+                    ) {
+                        return;
+                    }
+                    if let AgentEvent::TextDelta(ref text) = event {
+                        let _ = delta_tx.send(text.clone());
+                    }
+                    let _ = event_tx.send(AsyncResult::AgentEvent {
+                        conversation_id,
+                        turn_id,
+                        event,
+                    });
                 }));
             if let Some(trace_id) = trace_id {
                 agent = agent.with_trace_id(trace_id);
@@ -1409,15 +1521,31 @@ impl MentatChatApp {
             if let Some(gate) = egress_gate {
                 agent = agent.with_egress_gate(gate);
             }
-            let result = agent
-                .run(request, cancel)
+            let outcome = agent.run(request, cancel).await;
+            drop(agent);
+            let stored = writer
                 .await
-                .map(|outcome| outcome.grounding_trace);
+                .map_err(|e| mentat_core::MentatError::IoError(e.to_string()))
+                .and_then(|result| result);
+            let result = stored.and(outcome).map(|outcome| {
+                if let Some(event) = outcome.events.last() {
+                    let _ = tx.send(AsyncResult::AgentEvent {
+                        conversation_id,
+                        turn_id,
+                        event: event.clone(),
+                    });
+                }
+                outcome.grounding_trace
+            });
             if let Err(error) = &result {
-                let _ = tx.send(AsyncResult::AgentEvent(AgentEvent::Failed {
-                    error_code: "AGENT_LOOP_FAILED".to_string(),
-                    safe_message: error.to_string(),
-                }));
+                let _ = tx.send(AsyncResult::AgentEvent {
+                    conversation_id,
+                    turn_id,
+                    event: AgentEvent::Failed {
+                        error_code: "AGENT_LOOP_FAILED".to_string(),
+                        safe_message: error.to_string(),
+                    },
+                });
             }
             let _ = tx.send(AsyncResult::AgentFinished {
                 assistant_message_id,
@@ -1473,6 +1601,47 @@ impl MentatChatApp {
     }
 
     fn poll_async(&mut self) {
+        if self
+            .stream_cancel
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled())
+        {
+            if let Some(scope) = self.active_consent_scope.take() {
+                if let Some(storage) = &self.storage {
+                    if let Err(error) = storage.revoke_repository_consent(scope) {
+                        self.status = error.to_string();
+                    }
+                }
+            }
+        }
+        if let Some(repository) = self.repository.as_mut() {
+            if repository.watcher.poll_changes().unwrap_or(true)
+                && repository.snapshot.status != mentat_core::SnapshotStatus::Stale
+            {
+                repository.gateway.mark_stale();
+                repository.snapshot.status = mentat_core::SnapshotStatus::Stale;
+                for trace in self
+                    .grounding_by_message
+                    .values_mut()
+                    .filter(|trace| trace.snapshot_id == Some(repository.snapshot.id))
+                {
+                    trace.freshness = GroundingFreshness::ChangedAfterSend {
+                        detected_at: chrono::Utc::now(),
+                    };
+                }
+                if let Some(storage) = &self.storage {
+                    if let Err(error) = storage.mark_snapshot_changed(repository.snapshot.id) {
+                        self.status = error.to_string();
+                    }
+                }
+                self.repository_egress_approved = false;
+                if let Some(token) = &self.stream_cancel {
+                    token.cancel();
+                }
+                self.status =
+                    "저장소가 변경되었습니다. 재연결하여 인덱스를 갱신하세요.".to_string();
+            }
+        }
         while let Ok(result) = self.async_rx.try_recv() {
             match result {
                 AsyncResult::Catalog { requested, result } => {
@@ -1511,25 +1680,45 @@ impl MentatChatApp {
                         Err(error) => self.provider_status = error.to_string(),
                     }
                 }
-                AsyncResult::RepositoryScanned { session, result } => {
+                AsyncResult::RepositoryScanned {
+                    conversation_id,
+                    generation,
+                    session,
+                    result,
+                } => {
+                    if conversation_id != self.conversation.id || generation != self.scan_generation
+                    {
+                        continue;
+                    }
                     self.repository_busy = false;
                     self.repository_cancel = None;
                     match result {
                         Ok((snapshot, files)) => {
+                            let mut watcher =
+                                mentat_repository::RepositoryWatcher::new(session.root_path());
+                            watcher.spawn_background();
                             if let Some(storage) = &self.storage {
-                                let _ = storage.save_recent_repo(session.profile());
-                                let _ = storage.save_snapshot_meta(&snapshot);
-                                let _ = storage.bind_conversation_repository(
-                                    self.conversation.id,
-                                    snapshot.repo_id,
-                                    snapshot.id,
-                                );
+                                let persisted = storage
+                                    .save_recent_repo(session.profile())
+                                    .and_then(|_| storage.save_snapshot_meta(&snapshot))
+                                    .and_then(|_| {
+                                        storage.bind_conversation_repository(
+                                            self.conversation.id,
+                                            snapshot.repo_id,
+                                            snapshot.id,
+                                        )
+                                    });
+                                if let Err(error) = persisted {
+                                    self.status = format!("저장소 연결 저장 실패: {error}");
+                                    continue;
+                                }
                             }
                             self.conversation.repository_id = Some(snapshot.repo_id);
                             self.conversation.active_snapshot_id = Some(snapshot.id);
                             self.repository_egress_approved = false;
                             self.mode = ConversationMode::Advisor;
                             self.repository = Some(RepositoryBinding {
+                                watcher,
                                 gateway: Arc::new(RepositoryToolGateway::new(
                                     session.clone(),
                                     snapshot.clone(),
@@ -1548,11 +1737,32 @@ impl MentatChatApp {
                         Err(error) => self.status = error.to_string(),
                     }
                 }
-                AsyncResult::AgentEvent(event) => self.apply_agent_event(event),
+                AsyncResult::AgentEvent {
+                    conversation_id,
+                    turn_id,
+                    event,
+                } => {
+                    if conversation_id == self.conversation.id
+                        && self
+                            .active_turn
+                            .as_ref()
+                            .is_some_and(|active| active.turn_id == turn_id)
+                    {
+                        self.apply_agent_event(event);
+                    }
+                }
                 AsyncResult::AgentFinished {
                     assistant_message_id,
                     result,
-                } => self.finish_agent_outcome(assistant_message_id, result),
+                } => {
+                    if self
+                        .active_turn
+                        .as_ref()
+                        .is_some_and(|active| active.assistant_message_id == assistant_message_id)
+                    {
+                        self.finish_agent_outcome(assistant_message_id, result);
+                    }
+                }
             }
         }
     }
@@ -1583,13 +1793,6 @@ impl MentatChatApp {
                 {
                     message.markdown.push_str(&delta);
                     message.status = MessageStatus::Streaming;
-                }
-                if let Some(storage) = &self.storage {
-                    if let Err(error) =
-                        storage.append_assistant_delta(active.assistant_message_id, &delta)
-                    {
-                        self.status = format!("stream 저장 실패: {error}");
-                    }
                 }
             }
             AgentEvent::Completed { payload, trace_id } => {
@@ -1706,7 +1909,7 @@ impl MentatChatApp {
             self.active_turn = Some(active);
             return;
         }
-        let trace = match result {
+        let mut trace = match result {
             Ok(trace) => trace,
             Err(error) => {
                 self.fail_atomic_completion(&active, "AGENT_LOOP_FAILED", &error.to_string());
@@ -1714,6 +1917,17 @@ impl MentatChatApp {
                 return;
             }
         };
+        if self
+            .repository
+            .as_ref()
+            .is_some_and(|repo| repo.gateway.is_stale())
+        {
+            if let Some(trace) = trace.as_mut() {
+                trace.freshness = GroundingFreshness::ChangedAfterSend {
+                    detected_at: chrono::Utc::now(),
+                };
+            }
+        }
         let Some((payload, event_trace_id)) = active.pending_completion.take() else {
             self.fail_atomic_completion(
                 &active,
@@ -1833,21 +2047,53 @@ impl MentatChatApp {
         let Some(storage) = &self.storage else {
             return;
         };
-        if let Ok(conversation) = storage.create_conversation(&NewConversation {
+        match storage.create_conversation(&NewConversation {
             repository_id: None,
             active_snapshot_id: None,
             prompt_profile_id: self.prompt_profile_id,
             persistence: ConversationPersistence::Durable,
         }) {
-            self.conversation = conversation;
+            Ok(conversation) => self.conversation = conversation,
+            Err(error) => {
+                self.status = format!("대화 생성 실패 · 세션 전용: {error}");
+                self.storage = None;
+            }
         }
     }
 
     fn start_new_conversation(&mut self) {
+        if let Some(scope) = self.active_consent_scope.take() {
+            if let Some(storage) = &self.storage {
+                if let Err(error) = storage.revoke_repository_consent(scope) {
+                    self.status = error.to_string();
+                    return;
+                }
+            }
+        }
         if let Some(token) = &self.stream_cancel {
             token.cancel();
         }
-        self.active_turn = None;
+        if let Some(active) = self.active_turn.take() {
+            if let Some(storage) = &self.storage {
+                let update = TurnTerminalUpdate::Failed {
+                    turn_id: active.turn_id,
+                    assistant_message_id: active.assistant_message_id,
+                    error_code: "CONVERSATION_REPLACED".to_string(),
+                    safe_message: "새 대화로 전환하여 이전 요청이 중단되었습니다.".to_string(),
+                    completed_at: chrono::Utc::now(),
+                };
+                if let Err(error) = storage.finish_turn(&update) {
+                    self.status = error.to_string();
+                    return;
+                }
+            }
+        }
+        if let Some(token) = self.repository_cancel.take() {
+            token.cancel();
+        }
+        self.scan_generation = Uuid::new_v4();
+        self.repository_busy = false;
+        self.repository = None;
         self.stream_cancel = None;
         self.mode = ConversationMode::Advisor;
         self.repository_egress_approved = false;
@@ -1855,21 +2101,9 @@ impl MentatChatApp {
         self.audit_by_message.clear();
         self.selected_grounding_message = None;
         self.selected_source = None;
-        self.conversation = self
-            .storage
-            .as_ref()
-            .and_then(|storage| {
-                storage
-                    .create_conversation(&NewConversation {
-                        repository_id: None,
-                        active_snapshot_id: None,
-                        prompt_profile_id: self.prompt_profile_id,
-                        persistence: ConversationPersistence::Durable,
-                    })
-                    .ok()
-            })
-            .unwrap_or_else(|| Conversation::new(self.prompt_profile_id, None, None));
         self.status.clear();
+        self.conversation = Conversation::new(self.prompt_profile_id, None, None);
+        self.ensure_durable_conversation();
     }
 
     fn active_model_label(&self) -> String {
@@ -1944,6 +2178,8 @@ impl eframe::App for MentatChatApp {
             self.request_dirty_action(DirtyPromptAction::CloseApp, ctx);
         }
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.selected_grounding_message = None;
+            self.selected_source = None;
             if let Some(token) = &self.stream_cancel {
                 token.cancel();
             } else {
@@ -1957,7 +2193,7 @@ impl eframe::App for MentatChatApp {
             self.show_chat(ctx);
         }
         self.show_dirty_prompt_confirmation(ctx);
-        if self.active_turn.is_some() || self.provider_busy {
+        if self.active_turn.is_some() || self.provider_busy || self.repository.is_some() {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
     }
@@ -2026,6 +2262,7 @@ fn chat_to_agent_message(message: &ChatMessage) -> Option<AgentMessage> {
 fn restore_message_projections(
     storage: &SqliteStorage,
     conversation: &Conversation,
+    status: &mut String,
 ) -> (HashMap<Uuid, GroundingTrace>, HashMap<Uuid, AnswerBundle>) {
     let mut grounding = HashMap::new();
     let mut audit = HashMap::new();
@@ -2035,12 +2272,20 @@ fn restore_message_projections(
         .filter(|message| message.role == ChatRole::Assistant)
     {
         if let Some(trace_id) = message.grounding_trace_id {
-            if let Ok(Some(trace)) = storage.load_grounding_trace(trace_id) {
-                grounding.insert(message.id, trace);
+            match storage.load_grounding_trace(trace_id) {
+                Ok(Some(trace)) => {
+                    grounding.insert(message.id, trace);
+                }
+                Ok(None) => append_status(status, "저장된 근거를 찾을 수 없습니다."),
+                Err(error) => append_status(status, &format!("근거 복원 실패: {error}")),
             }
         }
-        if let Ok(Some(result)) = storage.load_audit_result_for_turn(message.turn_id) {
-            audit.insert(message.id, result);
+        match storage.load_audit_result_for_turn(message.turn_id) {
+            Ok(Some(result)) => {
+                audit.insert(message.id, result);
+            }
+            Ok(None) => {}
+            Err(error) => append_status(status, &format!("Audit 복원 실패: {error}")),
         }
     }
     (grounding, audit)
@@ -2235,6 +2480,111 @@ fn composer_should_submit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn isolated_app() -> MentatChatApp {
+        let (async_tx, async_rx) = mpsc::unbounded_channel();
+        MentatChatApp {
+            runtime: Arc::new(Runtime::new().unwrap()),
+            backend: Arc::new(MultiProviderAdapter::new()),
+            storage: None,
+            prompt_profile_id: DEFAULT_PROFILE_ID,
+            conversation: Conversation::new(DEFAULT_PROFILE_ID, None, None),
+            provider_setup: ProviderSetupState::new(Default::default()),
+            provider_status: String::new(),
+            provider_busy: false,
+            credential_controller: CredentialController::native(),
+            remember_api_key: false,
+            persona: PersonaKind::DefaultAnalyst,
+            persona_is_custom: false,
+            base_system_preset: SystemPreset::Intermediate,
+            system_prompt_draft: String::new(),
+            persona_prompt_draft: String::new(),
+            prompt_dirty: false,
+            delete_confirmation_open: false,
+            repository: None,
+            repository_busy: false,
+            repository_cancel: None,
+            scan_generation: Uuid::new_v4(),
+            settings_open: false,
+            composer: "second".into(),
+            submit_mode: ComposerSubmitMode::EnterSend,
+            is_pinned: false,
+            async_tx,
+            async_rx,
+            active_turn: None,
+            stream_cancel: None,
+            last_window_size: DEFAULT_WINDOW_SIZE,
+            size_changed_at: None,
+            status: String::new(),
+            global_shortcuts: GlobalShortcutController::disabled_for_test(),
+            pending_dirty_action: None,
+            mode: ConversationMode::Advisor,
+            repository_egress_approved: false,
+            active_consent_scope: None,
+            grounding_by_message: HashMap::new(),
+            audit_by_message: HashMap::new(),
+            selected_grounding_message: None,
+            selected_source: None,
+        }
+    }
+
+    #[test]
+    fn duplicate_submit_and_old_turn_events_cannot_replace_current_message() {
+        let mut app = isolated_app();
+        let turn_id = Uuid::new_v4();
+        let message = ChatMessage::new(
+            app.conversation.id,
+            turn_id,
+            ChatRole::Assistant,
+            0,
+            "",
+            MessageStatus::Pending,
+        );
+        let message_id = message.id;
+        app.conversation.messages.push(message);
+        app.active_turn = Some(ActiveTurn {
+            turn_id,
+            assistant_message_id: message_id,
+            accumulated: String::new(),
+            response_contract: ResponseContract::AdvisorMarkdown,
+            pending_completion: None,
+        });
+        app.submit_chat();
+        assert_eq!(app.active_turn.as_ref().unwrap().turn_id, turn_id);
+        assert_eq!(app.composer, "second");
+        let stale = Uuid::new_v4();
+        app.async_tx
+            .send(AsyncResult::AgentEvent {
+                conversation_id: app.conversation.id,
+                turn_id: stale,
+                event: AgentEvent::TextDelta("old".into()),
+            })
+            .unwrap();
+        app.async_tx
+            .send(AsyncResult::AgentEvent {
+                conversation_id: app.conversation.id,
+                turn_id,
+                event: AgentEvent::TextDelta("current".into()),
+            })
+            .unwrap();
+        app.poll_async();
+        assert_eq!(app.conversation.messages[0].markdown, "current");
+        let old_conversation = app.conversation.id;
+        app.start_new_conversation();
+        app.async_tx
+            .send(AsyncResult::AgentEvent {
+                conversation_id: old_conversation,
+                turn_id,
+                event: AgentEvent::Failed {
+                    error_code: "old".into(),
+                    safe_message: "old".into(),
+                },
+            })
+            .unwrap();
+        app.poll_async();
+        assert!(app.conversation.messages.is_empty());
+        assert!(app.status.is_empty());
+    }
 
     #[test]
     fn vertical_window_defaults_and_invalid_restore_are_bounded() {

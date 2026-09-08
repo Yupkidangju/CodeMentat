@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - CR-UX-001 Implementation
 
+### Fixed — 멀티 감사 2 (2026-09-08)
+
+- 동의 철회 전파, 요청 식별자 검사, 중복 제출/새 대화/scan generation 경계와 watcher 연결을 보강했다.
+- 민감 파일 catalog 제외, 열린 파일 handle 검증, scan 오류 omission, 도구 JSON/SSE 상한과 receipt drop cleanup을 추가했다.
+- Audit 주요 본문을 검증 claim에서 합성하고 대화 삭제 보존본 정리와 storage 실패 표시를 보강했다.
+- UI 밖 delta batch flush, round 텍스트 보존, layer별 reset, Markdown/키보드 동작과 책임 문서를 수정했다.
+
 ### Added
 - production Chat UI→AgentLoop→OpenAI/Gemini native tool round→GroundingTrace 경로와 Advisor Grounding drawer/Audit structured projection을 추가했다.
 - provider가 직렬화한 exact JSON body를 runtime consent/canonical seal/durable receipt와 결속하는 `ProviderBodyEgressGate`와 OpenAI/Gemini loopback 회귀를 추가했다.

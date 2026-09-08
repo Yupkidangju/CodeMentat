@@ -83,6 +83,7 @@ fn tool_input_schema(name: RepositoryToolName) -> serde_json::Value {
 }
 
 pub struct RepositoryToolGateway {
+    stale: std::sync::atomic::AtomicBool,
     reader: Arc<dyn RepositoryReader>,
     snapshot: RepositorySnapshot,
     files: Vec<FileRecord>,
@@ -94,8 +95,10 @@ impl RepositoryToolGateway {
         snapshot: RepositorySnapshot,
         mut files: Vec<FileRecord>,
     ) -> Self {
+        files.retain(|file| !EgressFilter::is_sensitive_filename(&file.relative_path));
         files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
         Self {
+            stale: std::sync::atomic::AtomicBool::new(false),
             reader,
             snapshot,
             files,
@@ -104,6 +107,13 @@ impl RepositoryToolGateway {
 
     pub fn snapshot(&self) -> &RepositorySnapshot {
         &self.snapshot
+    }
+
+    pub fn mark_stale(&self) {
+        self.stale.store(true, std::sync::atomic::Ordering::Release);
+    }
+    pub fn is_stale(&self) -> bool {
+        self.stale.load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub async fn execute(
@@ -119,7 +129,7 @@ impl RepositoryToolGateway {
         }
         validate_call_shape(call.name, &call.arguments)?;
         if call.name != RepositoryToolName::RepoStatus
-            && self.snapshot.status != SnapshotStatus::Ready
+            && (self.snapshot.status != SnapshotStatus::Ready || self.is_stale())
         {
             return Err(tool_error(
                 "REPOSITORY_REINDEX_REQUIRED",
@@ -135,7 +145,7 @@ impl RepositoryToolGateway {
                 serde_json::json!({
                     "repository_id": self.snapshot.repo_id,
                     "snapshot_id": self.snapshot.id,
-                    "status": self.snapshot.status,
+                    "status": if self.is_stale() { SnapshotStatus::Stale } else { self.snapshot.status.clone() },
                     "file_count": self.snapshot.file_count,
                     "total_bytes": self.snapshot.total_bytes,
                 })
@@ -182,14 +192,28 @@ impl RepositoryToolGateway {
                 source
             })
             .collect();
-        Ok(RepositoryToolResult {
+        let mut result = RepositoryToolResult {
             call_id: call.call_id,
             snapshot_id: call.snapshot_id,
             content_bytes: u32::try_from(content.len()).unwrap_or(u32::MAX),
             content,
             source_refs,
             omissions,
-        })
+        };
+        result.omissions.truncate(128);
+        // 전체 result JSON을 예산에 포함한다. 내용이 너무 크면 잘린 JSON 대신 실패시킨다.
+        result.content_bytes = u32::MAX;
+        let size = serde_json::to_vec(&result)
+            .map_err(|_| tool_error("TOOL_RESULT_ENCODE_FAILED", "도구 직렬화 실패"))?
+            .len();
+        if size > MAX_RESULT_BYTES {
+            return Err(tool_error(
+                "TOOL_RESULT_LIMIT_REACHED",
+                "출처와 누락을 포함한 도구 결과가 64KiB를 초과했습니다.",
+            ));
+        }
+        result.content_bytes = size as u32;
+        Ok(result)
     }
 
     fn list_tree(
@@ -298,7 +322,17 @@ impl RepositoryToolGateway {
         let mut refs = Vec::new();
         let mut omissions = Vec::new();
         let query_lower = query.to_lowercase();
-        'files: for file in &self.files {
+        'files: for (index, file) in self.files.iter().enumerate() {
+            if omissions.len() >= 127 {
+                omissions.push(omission(
+                    ToolOmissionReason::EntryLimit,
+                    None,
+                    "OMISSION_LIMIT",
+                    (self.files.len() - index) as u64,
+                    0,
+                ));
+                break;
+            }
             if cancel.is_cancelled() {
                 return Err(MentatError::Cancelled);
             }
@@ -533,7 +567,12 @@ fn source_ref(
         line_start,
         line_end,
         content_hash: file.content_hash.clone(),
-        excerpt: truncate_chars(excerpt, 512),
+        excerpt: truncate_chars(
+            EgressFilter::scan_and_redact_secrets(excerpt)
+                .0
+                .trim_end_matches('\n'),
+            512,
+        ),
     }
 }
 
@@ -648,6 +687,7 @@ mod tests {
             .unwrap();
         assert!(!search.source_refs.is_empty());
         assert!(search.content_bytes <= 64 * 1024);
+        assert!(serde_json::to_vec(&search).unwrap().len() <= search.content_bytes as usize);
 
         let read = gateway
             .execute(
@@ -757,5 +797,32 @@ mod tests {
         assert!(definitions
             .iter()
             .all(|definition| definition.input_schema.is_object()));
+    }
+
+    #[tokio::test]
+    async fn sensitive_files_are_absent_from_every_tool_surface() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "opaque=sentinel").unwrap();
+        std::fs::write(dir.path().join("server.key"), "sentinel").unwrap();
+        let gateway = fixture_for_path(dir.path()).await;
+        assert!(gateway.files.is_empty());
+        for path in [".env", "server.key"] {
+            assert!(gateway
+                .execute(
+                    RepositoryToolCall {
+                        call_id: Uuid::new_v4(),
+                        snapshot_id: gateway.snapshot.id,
+                        name: RepositoryToolName::ReadFileLines,
+                        arguments: RepositoryToolArguments::ReadFileLines {
+                            relative_path: path.into(),
+                            start_line: 1,
+                            end_line: 1
+                        },
+                    },
+                    CancellationToken::new()
+                )
+                .await
+                .is_err());
+        }
     }
 }

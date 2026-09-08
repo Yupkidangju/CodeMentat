@@ -36,6 +36,9 @@ impl Default for ScanLimits {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanOmitReason {
+    WalkError,
+    MetadataError,
+    ReadError,
     FileCountLimit,
     TotalBytesLimit,
     FileTooLarge,
@@ -111,22 +114,6 @@ impl ReadOnlySession {
             root_path: canonical_root,
             profile,
         })
-    }
-
-    fn validate_child_path(&self, rel_path: &Path) -> Result<PathBuf, MentatError> {
-        let full_path = self.root_path.join(rel_path);
-        let canonical_path = full_path.canonicalize().map_err(|e| {
-            MentatError::IoError(format!("경로 확인 실패 {}: {}", full_path.display(), e))
-        })?;
-
-        if !canonical_path.starts_with(&self.root_path) {
-            return Err(MentatError::ExternalPathBlocked(format!(
-                "저장소 루트 밖을 가리키는 경로는 차단됩니다: {}",
-                canonical_path.display()
-            )));
-        }
-
-        Ok(canonical_path)
     }
 
     /// [DBG-F002] Constructs deterministic snapshot directly from already-scanned file records (Single-Scan)
@@ -207,7 +194,13 @@ fn scan_tree(
 
         let entry = match entry {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(_) => {
+                omissions.push(ScanOmission {
+                    relative_path: PathBuf::from("<walk>"),
+                    reason: ScanOmitReason::WalkError,
+                });
+                continue;
+            }
         };
 
         let path = entry.path();
@@ -217,7 +210,14 @@ fn scan_tree(
 
         let meta = match entry.metadata() {
             Ok(m) if m.is_file() => m,
-            _ => continue,
+            Ok(_) => continue,
+            Err(_) => {
+                omissions.push(ScanOmission {
+                    relative_path: path.strip_prefix(&root).unwrap_or(path).to_path_buf(),
+                    reason: ScanOmitReason::MetadataError,
+                });
+                continue;
+            }
         };
 
         let rel_path = match path.strip_prefix(&root) {
@@ -259,6 +259,11 @@ fn scan_tree(
             }
             accumulated_bytes += record.size_bytes;
             records.push(record);
+        } else {
+            omissions.push(ScanOmission {
+                relative_path: rel_path,
+                reason: ScanOmitReason::ReadError,
+            });
         }
     }
 
@@ -288,22 +293,35 @@ impl RepositoryReader for ReadOnlySession {
     }
 
     async fn read_file_content(&self, relative_path: &Path) -> Result<String, MentatError> {
-        let full_path = self.validate_child_path(relative_path)?;
-        let meta = tokio::fs::metadata(&full_path)
-            .await
-            .map_err(|e| MentatError::IoError(format!("파일 메타데이터 조회 실패: {}", e)))?;
+        let root = self.root_path.clone();
+        let relative = relative_path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            use std::io::Read;
+            let file = crate::safe_file::open_beneath(&root, &relative)?;
+            let meta = file
+                .metadata()
+                .map_err(|e| MentatError::IoError(e.to_string()))?;
 
-        // DBG-F003: 10MB max single file read bound
-        if meta.len() > MAX_SINGLE_FILE_BYTES {
-            return Err(MentatError::IoError(format!(
-                "파일 크기({} bytes)가 10MB 한도를 초과하여 읽기가 제한됩니다.",
-                meta.len()
-            )));
-        }
+            // DBG-F003: 10MB max single file read bound
+            if meta.len() > MAX_SINGLE_FILE_BYTES {
+                return Err(MentatError::IoError(format!(
+                    "파일 크기({} bytes)가 10MB 한도를 초과하여 읽기가 제한됩니다.",
+                    meta.len()
+                )));
+            }
 
-        tokio::fs::read_to_string(&full_path)
-            .await
-            .map_err(|e| MentatError::IoError(format!("파일 내용 읽기 실패: {}", e)))
+            let mut bytes = Vec::new();
+            file.take(MAX_SINGLE_FILE_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|e| MentatError::IoError(e.to_string()))?;
+            if bytes.len() as u64 > MAX_SINGLE_FILE_BYTES {
+                return Err(MentatError::IoError("읽기 상한 초과".into()));
+            }
+            String::from_utf8(bytes)
+                .map_err(|_| MentatError::IoError("UTF-8 텍스트가 아닙니다.".into()))
+        })
+        .await
+        .map_err(|e| MentatError::IoError(e.to_string()))?
     }
 
     async fn read_file_lines(

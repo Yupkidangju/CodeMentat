@@ -1,6 +1,16 @@
 # Code Mentat Architecture Decision Records (DESIGN_DECISIONS.md)
 ## 아키텍처 및 디자인 결정 기록
 
+### [DEC-AUDIT-002] 멀티 감사 2의 소비 경로 보정 (2026-09-08)
+
+- 범위: FIN-001~018의 실제 current app 호출 경계를 수정한다. 검증된 OS lock/atomic terminal/batch CAS는 보존한다.
+- app은 UI turn identity, scan generation, cancellation과 storage composition을 맡고 analysis는 도구 조사 round/gateway를 맡는다. 저장 UI는 stream delta를 worker에 전달하고 250ms/4KiB flush 완료 후 terminal을 처리한다.
+- 동의는 취소 토큰을 공유해 UI 철회와 다음 gate/send 경계를 연결한다. 승인 후 future drop은 RAII receipt cleanup을 수행한다.
+- result JSON 전체(출처/누락 포함)에 64KiB/call, 256KiB/turn 예산을 적용한다. 큰 결과는 명시적 실패이며 조용한 예산 우회는 금지한다.
+- privacy backup/quarantine 정리를 live row 삭제보다 먼저 수행한다. 정리 실패 시 live 데이터를 유지해 재시도를 허용한다. 제거 목록은 DeleteReceipt에 남긴다.
+- 파일 읽기와 hash는 열린 handle의 최종 경로 검증 후 같은 handle을 사용한다. Windows GetFinalPathNameByHandleW, Linux `/proc/self/fd`, macOS F_GETPATH를 사용하며 경로 획득 실패는 읽기를 거부한다.
+- 예전 29 Verified 수치를 전체 기능 완료로 확대하지 않는다. 실행 증거와 남은 OS/GUI 검증은 수정 장부에서 관리한다.
+
 - **문서 버전:** 0.2.0-plan (`CR-UX-001` / CR-0)
 - **패키지 버전:** 0.1.0 (CR 문서 계획 버전 `0.2.0-plan`과 별개)
 - **표준 규격:** AI Implementation Documentation Standard Section 7 / D3D Protocol v1.3

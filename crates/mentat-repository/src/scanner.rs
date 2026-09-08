@@ -2,7 +2,6 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use mentat_core::error::MentatError;
 use mentat_core::models::{FileKind, FileRecord};
 use sha2::{Digest, Sha256};
-use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
@@ -176,7 +175,9 @@ impl FileScanner {
             )));
         }
 
-        let metadata = std::fs::metadata(&canonical_path)
+        let mut file = crate::safe_file::open_beneath(&canonical_root, rel_path)?;
+        let metadata = file
+            .metadata()
             .map_err(|e| MentatError::IoError(format!("파일 메타데이터 조회 실패: {}", e)))?;
 
         let size_bytes = metadata.len();
@@ -190,8 +191,6 @@ impl FileScanner {
         }
 
         // DBG-F003: Stream hash directly from the verified canonical file handle
-        let mut file = File::open(&canonical_path)
-            .map_err(|e| MentatError::IoError(format!("파일 열기 실패: {}", e)))?;
 
         let mut hasher = Sha256::new();
         let mut sample_buffer = Vec::new();
@@ -207,6 +206,11 @@ impl FileScanner {
             }
             hasher.update(&chunk[..n]);
             total_read += n as u64;
+            if total_read > crate::session::MAX_SINGLE_FILE_BYTES {
+                return Err(MentatError::IndexingError(
+                    "읽는 중 파일 크기 상한 초과".into(),
+                ));
+            }
 
             if sample_buffer.len() < 2 * 1024 * 1024 {
                 let to_take = n.min(2 * 1024 * 1024 - sample_buffer.len());

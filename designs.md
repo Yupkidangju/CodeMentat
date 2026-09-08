@@ -115,6 +115,7 @@ prompt draft가 dirty인 상태에서 settings/new conversation/app close를 요
 - code block은 별도 가로 scroll과 copy CTA를 갖는다.
 - Markdown image/file/http/svg/data-url 자동 loading은 비활성화한다.
 - link는 text로 보이며 명시적 사용자 click만 platform opener에 전달한다.
+- 멀티 감사 2 보정: 안전한 http/https link는 egui hyperlink click으로 열고, image 자동 로드/unsafe scheme 차단을 유지한다. 목록 marker와 strong/emphasis 스타일을 표시한다. System/Persona 개별 reset과 전체 reset은 draft만 변경한다.
 
 ### 0.8 접근성·키보드
 

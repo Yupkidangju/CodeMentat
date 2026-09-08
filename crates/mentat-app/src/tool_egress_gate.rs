@@ -32,6 +32,14 @@ impl DurableToolEgressGate {
 }
 
 impl ProviderBodyEgressGate for DurableToolEgressGate {
+    fn check_authorized(&self) -> Result<(), MentatError> {
+        let result = self.capability.check_authorized();
+        if result.is_err() {
+            self.storage
+                .revoke_repository_consent(self.capability.scope().id)?;
+        }
+        result
+    }
     fn authorize_exact_body(
         &self,
         request: &AgentRequest,
@@ -158,6 +166,10 @@ impl ProviderBodyEgressGate for DurableToolEgressGate {
     }
 
     fn finish(&self, receipt_ids: &[Uuid], status: ToolEgressStatus) -> Result<(), MentatError> {
+        if self.capability.check_authorized().is_err() {
+            self.storage
+                .revoke_repository_consent(self.capability.scope().id)?;
+        }
         if receipt_ids.is_empty() {
             return Ok(());
         }

@@ -2,7 +2,7 @@
 
 - **상태:** `APPROVED — PRODUCTION PARTIAL / RE-AUDIT PENDING`
 - **기준:** `Code Mentat 자유 대화형 저장소 멘토 전환 변경요청서.md`
-- **현재 구현:** 단발 `InferenceRequest` + AnswerBundle 중심
+- **현재 구현:** app의 turn/storage composition + analysis의 bounded AgentLoop, provider wire adapter
 - **목표 구현:** ConversationOrchestrator + PromptComposer + bounded AgentLoop + 자유 Markdown/GroundingTrace 분리
 - **Prompt 원문 계약:** `PROMPT_CONTRACT.md`
 
@@ -10,7 +10,7 @@
 
 ```mermaid
 flowchart TD
-    UI[Chat UI] --> CO[mentat-analysis ConversationOrchestrator]
+    UI[Chat UI] --> CO[mentat-app turn/storage composition]
     CO --> CS[ConversationStore]
     CO --> PC[PromptComposer]
     PC --> AR[AgentRequest]
@@ -34,7 +34,7 @@ flowchart TD
 
 ## 2. 핵심 타입 계약
 
-아래는 구현 시 의미를 보존해야 하는 설계 계약이다. 중립 conversation/prompt/trace/evidence/tool-invocation 타입과 store ports는 `mentat-core`, AgentRequest/Event/ToolDefinition은 `mentat-inference`, orchestration과 gateway 구현은 `mentat-analysis/src/conversation_orchestrator.rs`에 둔다.
+중립 conversation/prompt/trace/evidence 타입은 `mentat-core`, AgentRequest/Event는 `mentat-inference`, tool round와 gateway는 `mentat-analysis`가 소유한다. app은 UI turn identity, cancellation, storage commit, provider gate의 composition을 소유한다. 대화 이벤트는 conversation/turn ID, scan 결과는 conversation/generation ID로 결속한다.
 
 ```rust
 struct Conversation {
@@ -599,7 +599,7 @@ STALE/Incomplete snapshot에서는 metadata-only `repo_status` 외 신규 Reposi
 | `mentat-persona` | factory prompt resources, PromptComposer, preset migration | AnswerBundle 후처리로 기본 답변 변경 |
 | `mentat-inference` | AgentRequest/Event/capability/ToolDefinition 계약, core tool call/result 참조 | provider wire type |
 | `mentat-inference-openai` | Gemini/OpenAI/OpenRouter native/emulated mapping | repository 직접 접근 |
-| `mentat-analysis` | ConversationOrchestrator, AgentLoop, Tool registry/gateway, budgets, SourceRef/trace builder, dynamic egress | GUI, provider concrete/wire type, provider secret 소유 |
+| `mentat-analysis` | AgentLoop, Tool registry/gateway, budgets, SourceRef/trace builder, dynamic egress | GUI, provider concrete/wire type, provider secret 소유 |
 | `mentat-repository` | 기존 read-only primitives를 gateway에 제공 | write/process capability |
 | `mentat-storage` | conversation/prompt/version/trace/preferences migration | repository-root storage |
 | `mentat-app` | responsive chat/settings/grounding/Audit projection | provider JSON 및 분석 판정 직접 생성 |
@@ -607,7 +607,7 @@ STALE/Incomplete snapshot에서는 metadata-only `repo_status` 외 신규 Reposi
 
 새 crate는 추가하지 않는다. CR-3 구현 중 순환 의존성이 실제로 증명될 경우에만 별도 ADR과 사용자 승인을 요구한다.
 
-현재 의존 방향 `mentat-inference → mentat-core`와 `mentat-analysis → mentat-core + mentat-inference + mentat-repository`를 보존한다. 따라서 neutral conversation/store 계약은 core, AgentRequest/Event는 inference, 둘과 repository를 조율하는 orchestration은 analysis가 소유한다. core가 inference 타입을 참조하거나 provider adapter가 repository를 직접 호출하는 구조는 금지한다.
+현재 의존 방향 `mentat-inference → mentat-core`와 `mentat-analysis → mentat-core + mentat-inference + mentat-repository`를 보존한다. neutral conversation/store 계약은 core, AgentRequest/Event는 inference, 조사 round 조율은 analysis, UI turn/storage/취소의 composition은 app이 소유한다. core가 inference 타입을 참조하거나 provider adapter가 repository를 직접 호출하는 구조는 금지한다.
 
 ## 9. UI projection 경계
 

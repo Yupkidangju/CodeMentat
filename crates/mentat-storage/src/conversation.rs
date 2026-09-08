@@ -166,6 +166,8 @@ impl SqliteStorage {
     }
 
     pub fn delete_conversation(&self, id: Uuid) -> Result<DeleteReceipt, MentatError> {
+        // 보존본이 남으면 live 삭제 성공을 표시하지 않는다. 삭제 재시도도 가능하도록 먼저 정리한다.
+        let removed_artifacts = self.remove_privacy_backups()?;
         let mut conn = self.lock_conn()?;
         let transaction = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -224,7 +226,10 @@ impl SqliteStorage {
         Ok(DeleteReceipt {
             operation_id: Uuid::new_v4(),
             deleted_counts,
-            removed_artifacts: Vec::new(),
+            removed_artifacts: removed_artifacts
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
             completed_at: chrono::Utc::now(),
         })
     }

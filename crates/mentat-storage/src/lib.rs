@@ -29,6 +29,27 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn privacy_cleanup_removes_only_application_backups_and_rejects_unknown_children() {
+        let dir = tempdir().unwrap();
+        let storage = SqliteStorage::open(dir.path().join("mentat.db")).unwrap();
+        let backup = dir.path().join("mentat.db.pre-cr-ux-001-fixture.sqlite");
+        let unrelated = dir.path().join("user.sqlite");
+        std::fs::copy(storage.db_path(), &backup).unwrap();
+        std::fs::write(&unrelated, "user").unwrap();
+        let canonical_backup = backup.canonicalize().unwrap();
+        assert_eq!(
+            storage.remove_privacy_backups().unwrap(),
+            vec![canonical_backup]
+        );
+        assert!(!backup.exists());
+        assert!(unrelated.exists());
+        let quarantine = dir.path().join("mentat.db.quarantine-fixture");
+        std::fs::create_dir_all(quarantine.join("unexpected")).unwrap();
+        assert!(storage.remove_privacy_backups().is_err());
+        assert!(storage.db_path().exists());
+    }
+
+    #[test]
     fn test_sqlite_storage_save_and_list_recent_repos() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("mentat.db");

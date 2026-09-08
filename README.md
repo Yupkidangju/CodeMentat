@@ -8,6 +8,8 @@ Code Mentat는 로컬 소프트웨어 저장소(Repository)를 **완전한 읽�
 
 ### CR-UX-001 구현 상태 / Implementation Status / 実装状況 / 實作狀態 / 实现状态
 
+2026-09-08 전체 기능 감사 후 동의 철회·요청 식별·저장소 신선도·파일/전송 한도·오류 처리 수정은 [수정 장부](docs/MULTI_AUDIT_2_REMEDIATION.md)에 기록합니다. 전체 기능 재감사 판정은 대기 중입니다.
+
 - **한국어:** 세로형 자유 대화 UI가 production AgentLoop와 연결되었습니다. 검증된 모델은 6개 읽기 전용 도구를 사용하며, redaction→사용자 동의→exact-body canonical receipt→Grounding/Audit UI 경계를 통과한 결과만 외부 공급자에 전송합니다.
 - **English:** The vertical chat UI now uses the production AgentLoop. Verified models can use six read-only tools, and repository excerpts reach external providers only through redaction, explicit consent, an exact-body canonical receipt, and Grounding/Audit UI boundaries.
 - **日本語:** 縦型チャット UI を production AgentLoop に接続しました。検証済みモデルは 6 個の読み取り専用ツールを利用でき、リポジトリ抜粋は redaction、明示的同意、exact-body canonical receipt、Grounding/Audit UI を通過した場合のみ外部プロバイダーへ送信されます。

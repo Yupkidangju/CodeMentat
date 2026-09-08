@@ -90,6 +90,7 @@ impl<B: InferenceBackend> AgentLoop<B> {
                 freshness: GroundingFreshness::FreshAtSend,
             });
         let mut total_calls = 0u16;
+        let mut prior_round_text = String::new();
         let mut total_result_bytes = 0u32;
         let mut fingerprints: HashMap<String, u8> = HashMap::new();
 
@@ -98,7 +99,7 @@ impl<B: InferenceBackend> AgentLoop<B> {
                 self.emit(
                     &mut events,
                     AgentEvent::Cancelled {
-                        payload: cancellation_payload(&request.response_contract, String::new()),
+                        payload: cancellation_payload(&request.response_contract, prior_round_text),
                     },
                 );
                 self.attach_receipt_ids(&mut trace)?;
@@ -168,7 +169,9 @@ impl<B: InferenceBackend> AgentLoop<B> {
                             self.emit(
                                 &mut events,
                                 AgentEvent::Completed {
-                                    payload: CompletedPayload::AdvisorMarkdown(full_text),
+                                    payload: CompletedPayload::AdvisorMarkdown(format!(
+                                        "{prior_round_text}{full_text}"
+                                    )),
                                     trace_id: trace.as_ref().map(|trace| trace.id),
                                 },
                             );
@@ -204,7 +207,7 @@ impl<B: InferenceBackend> AgentLoop<B> {
                             AgentEvent::Cancelled {
                                 payload: cancellation_payload(
                                     &request.response_contract,
-                                    round_text,
+                                    format!("{prior_round_text}{round_text}"),
                                 ),
                             },
                         );
@@ -232,6 +235,10 @@ impl<B: InferenceBackend> AgentLoop<B> {
                     "provider round가 terminal event 없이 종료되었습니다.",
                 )
             })?;
+            prior_round_text.push_str(&round_text);
+            if !round_text.is_empty() {
+                request.messages.push(AgentMessage::assistant(round_text));
+            }
             let gateway = self.gateway.as_ref().ok_or_else(|| {
                 loop_error(
                     "REPOSITORY_TOOL_UNAVAILABLE",
@@ -428,6 +435,7 @@ pub fn validate_audit_bundle(
     }
     bundle.request_id = request_id;
     bundle.raw_model_response = None;
+    bundle.direct_answer = crate::AnswerBundleNormalizer::compose_verified_answer(&bundle.claims);
     Ok(bundle)
 }
 
@@ -464,6 +472,11 @@ mod tests {
 
     #[tokio::test]
     async fn local_agent_loop_executes_tool_then_returns_grounded_markdown() {
+        mixed_round_terminal(false).await;
+        mixed_round_terminal(true).await;
+    }
+
+    async fn mixed_round_terminal(cancelled: bool) {
         let dir = tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("src/lib.rs"), "pub fn mentor() {}\n").unwrap();
@@ -482,14 +495,24 @@ mod tests {
         };
         let backend = Arc::new(FakeInferenceBackend {
             scripted_rounds: Arc::new(std::sync::Mutex::new(VecDeque::from([
-                vec![InferenceRoundEvent::ToolCallsRequested {
-                    round: 1,
-                    calls: vec![call],
-                }],
+                vec![
+                    InferenceRoundEvent::TextDelta("조사합니다. ".to_string()),
+                    InferenceRoundEvent::ToolCallsRequested {
+                        round: 1,
+                        calls: vec![call],
+                    },
+                ],
                 vec![
                     InferenceRoundEvent::TextDelta("`mentor`를 확인했습니다.".to_string()),
-                    InferenceRoundEvent::RawCompleted {
-                        full_text: "`mentor`를 확인했습니다.".to_string(),
+                    if cancelled {
+                        InferenceRoundEvent::Failed {
+                            error_code: "CANCELLED".to_string(),
+                            safe_message: "취소".to_string(),
+                        }
+                    } else {
+                        InferenceRoundEvent::RawCompleted {
+                            full_text: "`mentor`를 확인했습니다.".to_string(),
+                        }
                     },
                 ],
             ]))),
@@ -525,14 +548,34 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(
-            outcome.events.last(),
-            Some(AgentEvent::Completed {
+        if !cancelled {
+            assert!(matches!(
+                outcome.events.last(),
+                Some(AgentEvent::Completed {
+                    payload: CompletedPayload::AdvisorMarkdown(text),
+                    ..
+                }) if text.contains("mentor")
+            ));
+        }
+        assert_eq!(outcome.grounding_trace.unwrap().source_refs.len(), 1);
+        let visible: String = outcome
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::TextDelta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        match outcome.events.last().unwrap() {
+            AgentEvent::Completed {
                 payload: CompletedPayload::AdvisorMarkdown(text),
                 ..
-            }) if text.contains("mentor")
-        ));
-        assert_eq!(outcome.grounding_trace.unwrap().source_refs.len(), 1);
+            } => assert_eq!(text, &visible),
+            AgentEvent::Cancelled {
+                payload: CancelledPayload::AdvisorPartialMarkdown(text),
+            } => assert_eq!(text, &visible),
+            event => panic!("unexpected terminal: {event:?}"),
+        }
     }
 
     #[test]
@@ -586,6 +629,8 @@ mod tests {
         .to_string();
 
         let validated = validate_audit_bundle(&raw, Uuid::new_v4(), Some(&trace)).unwrap();
+        assert_ne!(validated.direct_answer, "확인됨");
+        assert!(validated.direct_answer.contains("mentor 함수"));
         assert_eq!(validated.claims.len(), 1);
         assert!(validated.raw_model_response.is_none());
 

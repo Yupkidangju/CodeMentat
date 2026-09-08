@@ -1,6 +1,8 @@
 # Code Mentat Implementation Summary (IMPLEMENTATION_SUMMARY.md)
 ## 코드 멘타트 구현 요약서
 
+2026-09-08 멀티 감사 2 대응: FIN-001~018의 코드 대조, 수정 표면, 테스트 및 미검증 항목은 `docs/MULTI_AUDIT_2_REMEDIATION.md`에 기록한다. 이전 제한 감사 PASS와 29/43 수치는 현재 전체 기능 감사의 PASS를 의미하지 않는다.
+
 - **문서 버전:** 0.2.0-plan (`CR-UX-001`)
 - **패키지 버전:** Cargo workspace `0.1.0` (`0.1.0-dev`는 미릴리스 문서 상태)
 - **표준 규격:** AI Implementation Documentation Standard Section 6

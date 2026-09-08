@@ -150,6 +150,8 @@ Draft
 
 ## 2. CR-UX-001 현재 제품 계약
 
+2026-09-08 멀티 감사 2의 구현 기준 및 결과는 `docs/MULTI_AUDIT_2_REMEDIATION.md`를 따른다. turn은 중복 제출을 거부하고 모든 비동기 결과를 요청 identity에 결속한다. app은 UI/storage composition, analysis는 조사 loop와 gateway를 소유한다. 도구 result 예산은 출처/누락을 포함한 전체 JSON 기준이며 SSE 별도 수신 한도를 적용한다. 이전 29/43 완료 수치는 이번 전체 기능 감사의 재승인을 뜻하지 않는다.
+
 Code Mentat의 목표 제품은 저장소 유무와 무관하게 대화할 수 있고, 저장소 고유 사실이 필요할 때만 bounded read-only tools로 실제 조사하는 멘토다. Advisor Mode 최종 본문은 자유 Markdown이며 증거는 `GroundingTrace`로 분리한다. 2026-08-19 사용자 `CR-UX-001 GO` 승인에 따라 CR-1부터 순차 구현한다.
 
 AppData SQLite는 DB sibling OS process-lifetime exclusive lock을 DB open/migration보다 먼저 획득한다. crash/force-kill 시 kernel이 즉시 lock을 해제하며, lock을 얻은 첫 reopen이 orphan Prepared와 Pending/Streaming을 복구한다. live lock contention은 session-only UI로 fail-closed하고 자동 재시도하지 않는다. DB quarantine은 SQLite corruption 또는 integrity 실패에만 허용한다.

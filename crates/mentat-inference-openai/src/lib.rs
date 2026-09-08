@@ -199,9 +199,16 @@ mod tests {
         statuses: Mutex<Vec<ToolEgressStatus>>,
         reject: bool,
         receipt_id: Uuid,
+        revoke_after_prepare: bool,
     }
 
     impl ProviderBodyEgressGate for RecordingEgressGate {
+        fn check_authorized(&self) -> Result<(), MentatError> {
+            if self.revoke_after_prepare {
+                return Err(MentatError::EgressViolation("철회".into()));
+            }
+            Ok(())
+        }
         fn authorize_exact_body(
             &self,
             _request: &AgentRequest,
@@ -466,6 +473,97 @@ mod tests {
             response_contract: mentat_core::ResponseContract::AdvisorMarkdown,
             limits: mentat_inference::AgentLimits::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn revoked_after_prepare_sends_no_connection_and_finishes_receipt() {
+        let (listener, port) = bind_listener().await;
+        let gate = Arc::new(RecordingEgressGate {
+            revoke_after_prepare: true,
+            receipt_id: Uuid::new_v4(),
+            ..Default::default()
+        });
+        let result = OpenAiAdapter::new()
+            .infer_agent_round(
+                agent_request_with_tool_result(openai_profile(port)),
+                CancellationToken::new(),
+                Some(gate.clone()),
+            )
+            .await;
+        assert!(result.is_err());
+        assert_eq!(
+            *gate.statuses.lock().unwrap(),
+            vec![ToolEgressStatus::Failed]
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_sse_without_newline_is_bounded_in_both_adapters() {
+        use tokio::io::AsyncWriteExt;
+        for gemini in [false, true] {
+            let (listener, port) = bind_listener().await;
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let _ = read_http_request(&mut stream).await;
+                let body = vec![b'x'; 2 * 1024 * 1024];
+                let header = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = stream.write_all(header.as_bytes()).await;
+                let _ = stream.write_all(&body).await;
+            });
+            let mut request = agent_request_with_tool_result(openai_profile(port));
+            request.messages = vec![AgentMessage::user("test")];
+            if gemini {
+                request.profile.provider = ProviderKind::GoogleGemini;
+                request.profile.base_url = format!("http://127.0.0.1:{port}");
+            }
+            let adapter = MultiProviderAdapter::new();
+            let mut stream = adapter
+                .infer_round_stream_guarded(request, CancellationToken::new(), None)
+                .await
+                .unwrap();
+            let mut limited = false;
+            while let Some(event) = stream.next().await {
+                if let InferenceRoundEvent::Failed { error_code, .. } = event {
+                    limited = error_code == "STREAM_LIMIT";
+                }
+            }
+            assert!(limited);
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_send_timeout_finishes_receipt_without_restart() {
+        let (listener, port) = bind_listener().await;
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let gate = Arc::new(RecordingEgressGate {
+            receipt_id: Uuid::new_v4(),
+            ..Default::default()
+        });
+        let adapter = OpenAiAdapter::new();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            adapter.infer_agent_round(
+                agent_request_with_tool_result(openai_profile(port)),
+                CancellationToken::new(),
+                Some(gate.clone()),
+            ),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            *gate.statuses.lock().unwrap(),
+            vec![ToolEgressStatus::OutcomeUnknown]
+        );
+        server.abort();
     }
 
     #[tokio::test]

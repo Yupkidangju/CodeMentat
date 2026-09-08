@@ -6,9 +6,24 @@ const MAX_BLOCKS: usize = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MarkdownBlock {
+    Styled {
+        text: String,
+        strong: bool,
+        emphasis: bool,
+    },
+    Link {
+        label: String,
+        destination: String,
+    },
     Paragraph(String),
-    Heading { level: u8, text: String },
-    Code { language: String, text: String },
+    Heading {
+        level: u8,
+        text: String,
+    },
+    Code {
+        language: String,
+        text: String,
+    },
     Rule,
 }
 
@@ -21,6 +36,9 @@ pub fn parse_markdown_blocks(markdown: &str) -> Vec<MarkdownBlock> {
     let mut link_destination: Option<String> = None;
     let mut depth = 0usize;
     let mut event_count = 0usize;
+    let mut strong = false;
+    let mut emphasis = false;
+    let mut lists: Vec<Option<u64>> = Vec::new();
 
     for event in Parser::new(bounded) {
         event_count += 1;
@@ -42,6 +60,38 @@ pub fn parse_markdown_blocks(markdown: &str) -> Vec<MarkdownBlock> {
             _ => {}
         }
         match event {
+            Event::Start(Tag::List(start)) => {
+                flush_paragraph(&mut blocks, &mut text);
+                lists.push(start);
+            }
+            Event::End(TagEnd::List(_)) => {
+                flush_paragraph(&mut blocks, &mut text);
+                lists.pop();
+            }
+            Event::Start(Tag::Item) => {
+                flush_paragraph(&mut blocks, &mut text);
+                text.push_str(&"  ".repeat(lists.len().saturating_sub(1)));
+                if let Some(Some(number)) = lists.last_mut() {
+                    text.push_str(&format!("{number}. "));
+                    *number += 1;
+                } else {
+                    text.push_str("• ");
+                }
+            }
+            Event::Start(Tag::Strong) => {
+                flush_paragraph(&mut blocks, &mut text);
+                strong = true;
+            }
+            Event::Start(Tag::Emphasis) => {
+                flush_paragraph(&mut blocks, &mut text);
+                emphasis = true;
+            }
+            Event::End(TagEnd::Strong) => {
+                strong = false;
+            }
+            Event::End(TagEnd::Emphasis) => {
+                emphasis = false;
+            }
             Event::Start(Tag::Heading { level, .. }) => {
                 flush_paragraph(&mut blocks, &mut text);
                 heading = Some(heading_level(level));
@@ -67,14 +117,16 @@ pub fn parse_markdown_blocks(markdown: &str) -> Vec<MarkdownBlock> {
                 }
             }
             Event::Start(Tag::Link { dest_url, .. }) => {
+                flush_paragraph(&mut blocks, &mut text);
                 link_destination = Some(dest_url.into_string());
             }
             Event::End(TagEnd::Link) => {
                 if let Some(destination) = link_destination.take() {
                     if is_safe_http_link(&destination) {
-                        text.push_str(" (");
-                        text.push_str(&destination);
-                        text.push(')');
+                        blocks.push(MarkdownBlock::Link {
+                            label: std::mem::take(&mut text),
+                            destination,
+                        });
                     }
                 }
             }
@@ -83,6 +135,12 @@ pub fn parse_markdown_blocks(markdown: &str) -> Vec<MarkdownBlock> {
             Event::Text(value) | Event::Html(value) | Event::InlineHtml(value) => {
                 if let Some((_, code_text)) = code.as_mut() {
                     code_text.push_str(&value);
+                } else if (strong || emphasis) && heading.is_none() && link_destination.is_none() {
+                    blocks.push(MarkdownBlock::Styled {
+                        text: value.into_string(),
+                        strong,
+                        emphasis,
+                    });
                 } else {
                     text.push_str(&value);
                 }
@@ -119,6 +177,23 @@ pub fn parse_markdown_blocks(markdown: &str) -> Vec<MarkdownBlock> {
 pub fn render_markdown(ui: &mut Ui, markdown: &str) {
     for block in parse_markdown_blocks(markdown) {
         match block {
+            MarkdownBlock::Styled {
+                text,
+                strong,
+                emphasis,
+            } => {
+                let mut text = RichText::new(text);
+                if strong {
+                    text = text.strong();
+                }
+                if emphasis {
+                    text = text.italics();
+                }
+                ui.label(text);
+            }
+            MarkdownBlock::Link { label, destination } => {
+                ui.hyperlink_to(label, destination);
+            }
             MarkdownBlock::Paragraph(text) => {
                 ui.add(egui::Label::new(text).wrap());
             }
@@ -215,6 +290,20 @@ mod tests {
             MarkdownBlock::Code { language, text }
                 if language == "rust" && text == "fn main() {}\n"
         ));
+    }
+
+    #[test]
+    fn lists_emphasis_and_explicit_http_links_survive_parsing() {
+        let blocks = parse_markdown_blocks(
+            "1. first\n2. second\n\n**strong** and *emphasis* [link](https://example.com)",
+        );
+        assert!(blocks
+            .iter()
+            .any(|b| matches!(b, MarkdownBlock::Paragraph(t) if t.contains("1. first"))));
+        assert!(blocks
+            .iter()
+            .any(|b| matches!(b, MarkdownBlock::Styled { strong: true, .. })));
+        assert!(blocks.iter().any(|b| matches!(b, MarkdownBlock::Link { destination, .. } if destination == "https://example.com")));
     }
 
     #[test]

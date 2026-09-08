@@ -1,3 +1,4 @@
+mod safe_file;
 pub mod scanner;
 pub mod session;
 pub mod watcher;

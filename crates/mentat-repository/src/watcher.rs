@@ -131,7 +131,7 @@ impl RepositoryWatcher {
                                     continue;
                                 }
                                 if path.is_file() {
-                                    match Self::hash_file(&path) {
+                                    match Self::hash_file(&root, &path) {
                                         Ok(hash) => {
                                             let previous =
                                                 changed_path_hashes.insert(path, hash.clone());
@@ -199,7 +199,7 @@ impl RepositoryWatcher {
             match rx.try_recv() {
                 Ok(true) => Ok(true),
                 Ok(false) | Err(mpsc::TryRecvError::Empty) => Ok(false),
-                Err(mpsc::TryRecvError::Disconnected) => Ok(false),
+                Err(mpsc::TryRecvError::Disconnected) => Ok(true),
             }
         } else {
             self.check_for_changes()
@@ -319,7 +319,7 @@ impl RepositoryWatcher {
                 Ok(meta) if meta.is_file() => {
                     hasher.update(path.to_string_lossy().as_bytes());
                     hasher.update(meta.len().to_le_bytes());
-                    match Self::hash_file(path) {
+                    match Self::hash_file(root, path) {
                         Ok(hash) => hasher.update(hash.as_bytes()),
                         Err(_) => {
                             metadata_errors += 1;
@@ -338,10 +338,12 @@ impl RepositoryWatcher {
         Ok(format!("{:x}", hasher.finalize()))
     }
 
-    fn hash_file(path: &Path) -> Result<String, MentatError> {
+    fn hash_file(root: &Path, path: &Path) -> Result<String, MentatError> {
         use std::io::Read;
-        let mut file = std::fs::File::open(path)
-            .map_err(|e| MentatError::IoError(format!("파일 열기 실패: {e}")))?;
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| MentatError::ExternalPathBlocked("watch 경로가 root 밖입니다.".into()))?;
+        let mut file = crate::safe_file::open_beneath(root, relative)?;
         let mut hasher = Sha256::new();
         let mut buffer = [0u8; 64 * 1024];
         loop {
@@ -360,5 +362,18 @@ impl RepositoryWatcher {
 impl Drop for RepositoryWatcher {
     fn drop(&mut self) {
         self.stop_background();
+    }
+}
+
+#[cfg(test)]
+mod disconnect_tests {
+    use super::*;
+    #[test]
+    fn disconnected_worker_marks_snapshot_unavailable() {
+        let mut watcher = RepositoryWatcher::new(".");
+        let (tx, rx) = mpsc::channel();
+        watcher.change_rx = Some(rx);
+        drop(tx);
+        assert!(watcher.poll_changes().unwrap());
     }
 }

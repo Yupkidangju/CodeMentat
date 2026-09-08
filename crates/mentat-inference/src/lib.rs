@@ -12,6 +12,9 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 pub trait ProviderBodyEgressGate: Send + Sync {
+    fn check_authorized(&self) -> Result<(), MentatError> {
+        Ok(())
+    }
     fn authorize_exact_body(
         &self,
         request: &AgentRequest,
@@ -26,6 +29,37 @@ pub trait ProviderBodyEgressGate: Send + Sync {
     ) -> Result<(), MentatError>;
 
     fn receipt_ids(&self) -> Result<Vec<uuid::Uuid>, MentatError>;
+}
+
+/// 승인 이후 future가 drop되면 전송 불명 receipt를 즉시 종결한다.
+pub struct PendingEgress {
+    gate: Option<Arc<dyn ProviderBodyEgressGate>>,
+    ids: Vec<uuid::Uuid>,
+}
+
+impl PendingEgress {
+    pub fn new(gate: Option<Arc<dyn ProviderBodyEgressGate>>, ids: Vec<uuid::Uuid>) -> Self {
+        Self { gate, ids }
+    }
+    pub fn finish(&mut self, status: mentat_core::ToolEgressStatus) -> Result<(), MentatError> {
+        if !self.ids.is_empty() {
+            if let Some(gate) = &self.gate {
+                gate.finish(&self.ids, status)?;
+            }
+            self.ids.clear();
+        }
+        Ok(())
+    }
+}
+impl Drop for PendingEgress {
+    fn drop(&mut self) {
+        if self
+            .finish(mentat_core::ToolEgressStatus::OutcomeUnknown)
+            .is_err()
+        {
+            tracing::error!("receipt terminal 복구 실패: 재시작 reconciliation 필요");
+        }
+    }
 }
 
 #[async_trait]
@@ -154,5 +188,51 @@ pub trait InferenceBackend: Send + Sync {
 
     fn estimate_tokens(&self, text: &str) -> usize {
         text.len().div_ceil(4)
+    }
+}
+
+#[cfg(test)]
+mod receipt_cleanup_tests {
+    use super::*;
+    use std::sync::Mutex;
+    struct Gate(Mutex<Vec<mentat_core::ToolEgressStatus>>);
+    impl ProviderBodyEgressGate for Gate {
+        fn authorize_exact_body(
+            &self,
+            _: &AgentRequest,
+            _: &str,
+            _: &[u8],
+        ) -> Result<Vec<uuid::Uuid>, MentatError> {
+            Ok(vec![])
+        }
+        fn receipt_ids(&self) -> Result<Vec<uuid::Uuid>, MentatError> {
+            Ok(vec![])
+        }
+        fn finish(
+            &self,
+            _: &[uuid::Uuid],
+            status: mentat_core::ToolEgressStatus,
+        ) -> Result<(), MentatError> {
+            self.0.lock().unwrap().push(status);
+            Ok(())
+        }
+    }
+    #[test]
+    fn drop_ends_uncertain_batch_once_and_success_does_not_repeat() {
+        let gate = Arc::new(Gate(Mutex::new(vec![])));
+        drop(PendingEgress::new(
+            Some(gate.clone()),
+            vec![uuid::Uuid::new_v4()],
+        ));
+        let mut success = PendingEgress::new(Some(gate.clone()), vec![uuid::Uuid::new_v4()]);
+        success.finish(mentat_core::ToolEgressStatus::Sent).unwrap();
+        drop(success);
+        assert_eq!(
+            *gate.0.lock().unwrap(),
+            vec![
+                mentat_core::ToolEgressStatus::OutcomeUnknown,
+                mentat_core::ToolEgressStatus::Sent
+            ]
+        );
     }
 }

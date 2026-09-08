@@ -441,6 +441,7 @@ impl OpenAiAdapter {
             yield InferenceEvent::Started { request_id: req_id };
             let mut full_text = String::new();
             let mut byte_buffer = Vec::new();
+            let mut received_bytes = 0usize;
 
             loop {
                 tokio::select! {
@@ -451,6 +452,11 @@ impl OpenAiAdapter {
                     chunk_opt = byte_stream.next() => {
                         match chunk_opt {
                             Some(Ok(bytes)) => {
+                                received_bytes = received_bytes.saturating_add(bytes.len());
+                                if received_bytes > 4 * 1024 * 1024 {
+                                    yield InferenceEvent::Failed { error_code: "STREAM_LIMIT".to_string(), message: "응답 크기 상한을 초과했습니다.".to_string() };
+                                    return;
+                                }
                                 byte_buffer.extend_from_slice(&bytes);
                                 while let Some(pos) = byte_buffer.iter().position(|&b| b == b'\n') {
                                     let line_bytes = &byte_buffer[..pos];
@@ -529,6 +535,9 @@ impl OpenAiAdapter {
                 message: error.to_string(),
             }
         })?;
+        if cancel_token.is_cancelled() {
+            return Err(MentatError::Cancelled);
+        }
         let receipt_ids = if request_has_tool_results(&request) {
             let gate = egress_gate
                 .as_ref()
@@ -540,6 +549,8 @@ impl OpenAiAdapter {
         } else {
             Vec::new()
         };
+        let mut pending_egress =
+            mentat_inference::PendingEgress::new(egress_gate.clone(), receipt_ids);
         let mut headers = Self::authorization_headers(profile)?;
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if profile.provider == ProviderKind::OpenRouter {
@@ -561,19 +572,26 @@ impl OpenAiAdapter {
             ))
             .body(exact_body)
             .send();
+        if let Some(gate) = &egress_gate {
+            if let Err(error) = gate.check_authorized() {
+                pending_egress.finish(ToolEgressStatus::Failed)?;
+                return Err(error);
+            }
+        }
+        if cancel_token.is_cancelled() {
+            pending_egress.finish(ToolEgressStatus::Failed)?;
+            return Err(MentatError::Cancelled);
+        }
         let response = tokio::select! {
+            biased;
             _ = cancel_token.cancelled() => {
-                if let Some(gate) = &egress_gate {
-                    gate.finish(&receipt_ids, ToolEgressStatus::OutcomeUnknown)?;
-                }
+                pending_egress.finish(ToolEgressStatus::OutcomeUnknown)?;
                 return Err(MentatError::Cancelled);
             }
             result = send_future => match result {
                 Ok(response) => response,
                 Err(error) => {
-                    if let Some(gate) = &egress_gate {
-                        gate.finish(&receipt_ids, ToolEgressStatus::OutcomeUnknown)?;
-                    }
+                    pending_egress.finish(ToolEgressStatus::OutcomeUnknown)?;
                     return Err(MentatError::BackendError {
                         code: "HTTP_SEND_ERROR".to_string(),
                         message: error.to_string(),
@@ -581,9 +599,7 @@ impl OpenAiAdapter {
                 }
             }
         };
-        if let Some(gate) = &egress_gate {
-            gate.finish(&receipt_ids, ToolEgressStatus::Sent)?;
-        }
+        pending_egress.finish(ToolEgressStatus::Sent)?;
         if !response.status().is_success() {
             let status = response.status();
             return Err(MentatError::BackendError {
@@ -602,6 +618,7 @@ impl OpenAiAdapter {
             let mut full_text = String::new();
             let mut byte_buffer = Vec::new();
             let mut pending = BTreeMap::<u64, PendingOpenAiToolCall>::new();
+            let mut received_bytes = 0usize;
             loop {
                 tokio::select! {
                     _ = cancel_token.cancelled() => {
@@ -613,6 +630,14 @@ impl OpenAiAdapter {
                     }
                     chunk = byte_stream.next() => match chunk {
                         Some(Ok(bytes)) => {
+                            received_bytes = received_bytes.saturating_add(bytes.len());
+                            if received_bytes > 4 * 1024 * 1024 || byte_buffer.len().saturating_add(bytes.len()) > 1024 * 1024 {
+                                yield InferenceRoundEvent::Failed {
+                                    error_code: "STREAM_LIMIT".to_string(),
+                                    safe_message: "응답 크기 상한을 초과했습니다.".to_string(),
+                                };
+                                return;
+                            }
                             byte_buffer.extend_from_slice(&bytes);
                             while let Some(position) = byte_buffer.iter().position(|byte| *byte == b'\n') {
                                 let line = String::from_utf8_lossy(&byte_buffer[..position]).trim().to_string();
@@ -665,6 +690,10 @@ impl OpenAiAdapter {
                                         }
                                         if let Some(arguments) = tool_delta.pointer("/function/arguments").and_then(|value| value.as_str()) {
                                             entry.arguments.push_str(arguments);
+                                        }
+                                        if entry.arguments.len() > 64 * 1024 || pending.len() > 24 {
+                                            yield InferenceRoundEvent::Failed { error_code: "TOOL_ARGUMENT_LIMIT".to_string(), safe_message: "도구 인자 한도 초과".to_string() };
+                                            return;
                                         }
                                     }
                                 }

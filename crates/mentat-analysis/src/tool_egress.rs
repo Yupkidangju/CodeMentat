@@ -11,6 +11,7 @@ pub const TOOL_EGRESS_SEAL_VERSION: &str = "CM_TOOL_EGRESS_V1";
 pub struct RuntimeConsentCapability {
     scope: RepositoryConsentScope,
     nonce: [u8; 32],
+    revoked: tokio_util::sync::CancellationToken,
 }
 
 impl RuntimeConsentCapability {
@@ -19,7 +20,26 @@ impl RuntimeConsentCapability {
         seed.extend_from_slice(Uuid::new_v4().as_bytes());
         seed.extend_from_slice(Uuid::new_v4().as_bytes());
         let nonce: [u8; 32] = Sha256::digest(seed).into();
-        Self { scope, nonce }
+        Self {
+            scope,
+            nonce,
+            revoked: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+
+    pub fn with_revocation(mut self, revoked: tokio_util::sync::CancellationToken) -> Self {
+        self.revoked = revoked;
+        self
+    }
+
+    pub fn check_authorized(&self) -> Result<(), MentatError> {
+        if self.revoked.is_cancelled() || self.scope.revoked_at.is_some() {
+            return Err(egress_error(
+                "TOOL_EGRESS_CONSENT_REVOKED",
+                "저장소 전송 권한이 철회되었습니다.",
+            ));
+        }
+        Ok(())
     }
 
     pub fn scope(&self) -> &RepositoryConsentScope {
@@ -49,6 +69,7 @@ impl ToolEgressSealer {
         envelope: &ToolEgressEnvelope,
     ) -> Result<ToolEgressReceipt, MentatError> {
         let scope = capability.scope();
+        capability.check_authorized()?;
         if capability.nonce == [0u8; 32] {
             return Err(egress_error(
                 "TOOL_EGRESS_CAPABILITY_INVALID",
@@ -316,5 +337,16 @@ mod tests {
         let mut receipt = ToolEgressSealer::prepare(&capability, &envelope).unwrap();
         receipt.id = Uuid::new_v4();
         assert!(ToolEgressSealer::verify(&receipt).is_err());
+    }
+
+    #[test]
+    fn revoked_shared_token_blocks_next_body_approval() {
+        let (capability, envelope) = fixture();
+        let token = tokio_util::sync::CancellationToken::new();
+        let capability = capability.with_revocation(token.clone());
+        assert!(ToolEgressSealer::prepare(&capability, &envelope).is_ok());
+        token.cancel();
+        assert!(capability.check_authorized().is_err());
+        assert!(ToolEgressSealer::prepare(&capability, &envelope).is_err());
     }
 }

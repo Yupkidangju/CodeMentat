@@ -8,6 +8,30 @@ use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use uuid::Uuid;
 
 impl SqliteStorage {
+    pub fn mark_snapshot_changed(&self, snapshot_id: Uuid) -> Result<(), MentatError> {
+        let freshness = serde_json::to_string(&GroundingFreshness::ChangedAfterSend {
+            detected_at: chrono::Utc::now(),
+        })
+        .map_err(|e| storage_error("FRESHNESS_ENCODE", &e.to_string()))?;
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| storage_error("FRESHNESS_BEGIN", &e.to_string()))?;
+        tx.execute(
+            "UPDATE grounding_traces SET freshness = ?1 WHERE snapshot_id = ?2",
+            params![freshness, snapshot_id.to_string()],
+        )
+        .map_err(|e| storage_error("FRESHNESS_TRACE", &e.to_string()))?;
+        tx.execute("UPDATE chat_messages SET grounding_freshness = ?1 WHERE grounding_trace_id IN (SELECT id FROM grounding_traces WHERE snapshot_id = ?2)", params![freshness, snapshot_id.to_string()]).map_err(|e| storage_error("FRESHNESS_MESSAGE", &e.to_string()))?;
+        tx.commit()
+            .map_err(|e| storage_error("FRESHNESS_COMMIT", &e.to_string()))
+    }
+    pub fn revoke_repository_consent(&self, id: Uuid) -> Result<(), MentatError> {
+        self.lock_conn()?.execute("UPDATE repository_consent_scopes SET revoked_at = COALESCE(revoked_at, ?1) WHERE id = ?2",
+            params![chrono::Utc::now().to_rfc3339(), id.to_string()])
+            .map_err(|e| storage_error("CONSENT_REVOKE_FAILED", &e.to_string()))?;
+        Ok(())
+    }
     pub fn prepare_grounding_trace(&self, trace: &GroundingTrace) -> Result<(), MentatError> {
         let mut conn = self.lock_conn()?;
         let transaction = conn

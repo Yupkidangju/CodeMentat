@@ -182,7 +182,7 @@ If evidence is missing, classify the claim as Unknown. Do not invent files or ha
         });
     }
 
-    fn compose_verified_answer(claims: &[Claim]) -> String {
+    pub fn compose_verified_answer(claims: &[Claim]) -> String {
         let lines: Vec<String> = claims
             .iter()
             .filter(|claim| claim.classification != ClaimClassification::Unknown)

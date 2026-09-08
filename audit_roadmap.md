@@ -1,5 +1,7 @@
 # Code Mentat CR-UX-001 감사 로드맵
 
+2026-09-08 최신 전체 기능 감사는 `docs/multi_audit/2/final_audit_report_2.md`의 HOLD다. 과거 제한된 remediation PASS는 전체 기능 PASS가 아니다. 현재 수정·검증 근거는 `docs/MULTI_AUDIT_2_REMEDIATION.md`를 따른다.
+
 - **문서 버전:** 2.0.0-plan
 - **참조 표준:** `AI_AUDIT_DOC_STANDARD.md`
 - **기존 baseline 감사:** `docs/audit/audit_report_17.md` — `PASS WITH KNOWN RISKS`

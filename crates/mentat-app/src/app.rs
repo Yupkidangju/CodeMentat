@@ -1120,6 +1120,9 @@ impl eframe::App for MentatApp {
                     |ui| {
                         for omission in &self.scan_omissions {
                             let reason = match omission.reason {
+                                ScanOmitReason::WalkError => "탐색 실패",
+                                ScanOmitReason::MetadataError => "메타데이터 오류",
+                                ScanOmitReason::ReadError => "읽기 실패",
                                 ScanOmitReason::FileTooLarge => "FileTooLarge",
                                 ScanOmitReason::TotalBytesLimit => "TotalBytesLimit",
                                 ScanOmitReason::FileCountLimit => "FileCountLimit",

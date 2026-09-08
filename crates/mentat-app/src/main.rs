@@ -5,6 +5,7 @@ mod credential_state;
 #[allow(dead_code)]
 mod hotkeys;
 mod provider_setup;
+mod stream_store;
 mod theme;
 mod tool_egress_gate;
 mod widgets;
