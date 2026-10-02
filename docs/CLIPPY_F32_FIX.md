@@ -28,5 +28,16 @@ cargo mentat-build build --platform current --profile release
 - ignored 항목: native credential store smoke와 100k/2GiB benchmark. 이번 범위에서 실행하지 않았다.
 - 6-target release build-plan dry-run: PASS (exit 0).
 - Windows locked release build: PASS (exit 0, Rust 1.99.0 optimized build, 1m 47s).
-- diff 검토: 코드 변경은 17개 `_f32` 접미사뿐이며 폭 값이 동일하다. Cargo manifest/lockfile/CI 설정은 기준 commit과 동일하다.
+- Clippy 수정 commit의 diff 검토: 코드 변경은 17개 `_f32` 접미사뿐이며 폭 값이 동일하다. Cargo manifest/lockfile/CI 설정은 기준 commit과 동일하다.
 - 비Windows 실제 빌드와 exact-commit CI는 draft PR에서 확인한다.
+
+## macOS 응답 크기 회귀 fixture 보정
+
+- 근거: `4f32f4a`의 CI run `36993285438`에서 세 OS의 strict Clippy는 통과했으나 macOS `model_verification_rejects_oversized_untrusted_response`가 서버 body write의 `ConnectionReset`으로 실패했다.
+- 원인: production `parse_bounded_json`은 과대 `Content-Length`를 body 읽기 전에 거부한다. fixture는 거부 후에도 1MiB+1 body 전체 write 성공을 요구하여 OS TCP 버퍼·종료 동작에 의존했다.
+- 범위: 해당 테스트만 과대 header를 보내고 oneshot으로 verification 완료까지 연결을 유지한다. body를 보내지 않으므로 reset write 경합을 없애며, 5초 timeout과 기존 `MODEL_VERIFY_RESPONSE_TOO_LARGE` assertion으로 body를 기다리지 않는 early rejection을 확인한다.
+- 불변조건: production adapter, 응답 크기 제한, 오류 코드, 테스트 실행 및 CI lint 정책을 유지한다. 테스트 skip이나 보안 동작 변경은 하지 않는다.
+- 검증 순서: targeted 회귀 → fixture의 광고 크기를 허용 경계로 바꾼 임시 negative control이 실패하는지 확인 후 복원 → fmt/strict Clippy/workspace tests/Windows release → 기존 draft PR의 새 commit CI terminal 결과 확인.
+- 로컬 결과 (Rust 1.99.0): targeted 회귀 PASS. 광고 크기를 1MiB로 바꾼 negative control은 5.01초 뒤 `MODEL_VERIFY_READ_ERROR`와 요구한 `MODEL_VERIFY_RESPONSE_TOO_LARGE`의 불일치로 exit 101; 과대 header fixture를 즉시 복원했다.
+- 복원 후 전체 fmt/strict Clippy/workspace tests (199 passed, 2 ignored)/6-target dry-run/Windows locked release (19.89초) 모두 exit 0.
+- 변경 검토: `lib.rs`의 production 영역과 두 provider adapter, Cargo manifest/lockfile, CI 설정은 변경하지 않았다. 새 테스트 skip은 없으며 기존 보안 assertion을 유지한다.
