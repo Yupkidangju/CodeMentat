@@ -994,7 +994,7 @@ impl eframe::App for MentatApp {
 
         let frame = Frame::none()
             .fill(MentatTheme::BG_BASE)
-            .stroke(Stroke::new(1.0, MentatTheme::BORDER_COLOR))
+            .stroke(Stroke::new(1.0_f32, MentatTheme::BORDER_COLOR))
             .rounding(Rounding::same(4.0))
             .inner_margin(egui::Margin::same(8.0));
 
