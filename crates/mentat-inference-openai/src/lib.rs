@@ -1037,22 +1037,30 @@ mod tests {
     async fn model_verification_rejects_oversized_untrusted_response() {
         use tokio::io::AsyncWriteExt;
         let (listener, port) = bind_listener().await;
+        let (verification_done_tx, verification_done_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
             let _ = read_http_request(&mut stream).await;
-            let body = vec![b'x'; 1024 * 1024 + 1];
+            let response_length = 1024 * 1024 + 1;
             let headers = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
+                response_length
             );
             stream.write_all(headers.as_bytes()).await.expect("headers");
-            stream.write_all(&body).await.expect("body");
+            // 과대 header만으로 거부해야 하므로 body 없이 연결을 유지한다.
+            // 거부 뒤 body write 성공을 요구하면 macOS에서 정상 disconnect가 reset으로 보인다.
+            let _ = verification_done_rx.await;
         });
 
         let adapter = OpenAiAdapter::new();
         let mut profile = openai_profile(port);
         profile.model = "dynamic-alpha".to_string();
-        let result = adapter.verify_model(&profile).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            adapter.verify_model(&profile),
+        )
+        .await
+        .expect("oversized Content-Length must be rejected without reading the body");
         match result {
             Err(MentatError::BackendError { code, .. }) => {
                 assert_eq!(code, "MODEL_VERIFY_RESPONSE_TOO_LARGE")
@@ -1060,6 +1068,9 @@ mod tests {
             Err(other) => panic!("unexpected error: {other:?}"),
             Ok(_) => panic!("oversized verification response must fail closed"),
         }
+        verification_done_tx
+            .send(())
+            .expect("server must wait for verification");
         server.await.expect("server");
     }
 

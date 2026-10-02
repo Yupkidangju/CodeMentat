@@ -66,34 +66,34 @@ impl MentatTheme {
         visuals.warn_fg_color = Self::STATUS_CONFLICT;
         visuals.error_fg_color = Self::STATUS_ERROR;
         visuals.selection.bg_fill = Self::BG_SELECTION;
-        visuals.selection.stroke = Stroke::new(1.0, Self::BORDER_FOCUS);
-        visuals.window_stroke = Stroke::new(1.0, Self::BORDER_COLOR);
+        visuals.selection.stroke = Stroke::new(1.0_f32, Self::BORDER_FOCUS);
+        visuals.window_stroke = Stroke::new(1.0_f32, Self::BORDER_COLOR);
         visuals.window_rounding = egui::Rounding::same(4.0);
         visuals.menu_rounding = egui::Rounding::same(3.0);
 
         visuals.widgets.noninteractive.bg_fill = Self::BG_CARD;
-        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Self::BORDER_COLOR);
-        visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Self::TEXT_PRIMARY);
+        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, Self::BORDER_COLOR);
+        visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, Self::TEXT_PRIMARY);
         visuals.widgets.noninteractive.rounding = egui::Rounding::same(3.0);
 
         visuals.widgets.inactive.bg_fill = Self::BG_CARD;
-        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Self::BORDER_COLOR);
-        visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, Self::TEXT_PRIMARY);
+        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Self::BORDER_COLOR);
+        visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, Self::TEXT_PRIMARY);
         visuals.widgets.inactive.rounding = egui::Rounding::same(3.0);
 
         visuals.widgets.hovered.bg_fill = Self::BG_HOVER;
-        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Self::BORDER_FOCUS);
-        visuals.widgets.hovered.fg_stroke = Stroke::new(1.5, Self::TEXT_PRIMARY);
+        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, Self::BORDER_FOCUS);
+        visuals.widgets.hovered.fg_stroke = Stroke::new(1.5_f32, Self::TEXT_PRIMARY);
         visuals.widgets.hovered.rounding = egui::Rounding::same(3.0);
 
         visuals.widgets.active.bg_fill = Self::BG_ACTIVE;
-        visuals.widgets.active.bg_stroke = Stroke::new(1.0, Self::BORDER_FOCUS);
-        visuals.widgets.active.fg_stroke = Stroke::new(1.5, Self::TEXT_PRIMARY);
+        visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, Self::BORDER_FOCUS);
+        visuals.widgets.active.fg_stroke = Stroke::new(1.5_f32, Self::TEXT_PRIMARY);
         visuals.widgets.active.rounding = egui::Rounding::same(3.0);
 
         visuals.widgets.open.bg_fill = Self::BG_ACTIVE;
-        visuals.widgets.open.bg_stroke = Stroke::new(1.0, Self::BORDER_FOCUS);
-        visuals.widgets.open.fg_stroke = Stroke::new(1.5, Self::TEXT_PRIMARY);
+        visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, Self::BORDER_FOCUS);
+        visuals.widgets.open.fg_stroke = Stroke::new(1.5_f32, Self::TEXT_PRIMARY);
         visuals.widgets.open.rounding = egui::Rounding::same(3.0);
 
         ctx.set_visuals(visuals);

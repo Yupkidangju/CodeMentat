@@ -137,7 +137,7 @@ impl<'a> PillBar<'a> {
                                 .strong(),
                         )
                         .fill(MentatTheme::BG_CARD)
-                        .stroke(Stroke::new(1.0, MentatTheme::STATUS_ERROR))
+                        .stroke(Stroke::new(1.0_f32, MentatTheme::STATUS_ERROR))
                         .rounding(Rounding::same(3.0));
                         let close_response = ui
                             .add_sized(vec2(64.0, ROW_HEIGHT), close_btn)
@@ -219,7 +219,7 @@ impl<'a> PillBar<'a> {
                                 .strong(),
                         )
                         .fill(MentatTheme::BG_CARD)
-                        .stroke(Stroke::new(1.0, MentatTheme::BORDER_COLOR))
+                        .stroke(Stroke::new(1.0_f32, MentatTheme::BORDER_COLOR))
                         .rounding(Rounding::same(3.0))
                         .truncate();
                         let repo_response = ui
@@ -245,7 +245,7 @@ impl<'a> PillBar<'a> {
                         } else {
                             MentatTheme::BG_WARNING
                         })
-                        .stroke(Stroke::new(1.0, read_only_color))
+                        .stroke(Stroke::new(1.0_f32, read_only_color))
                         .rounding(Rounding::same(3.0));
                         ui.add_sized(vec2(READ_ONLY_WIDTH, ROW_HEIGHT), read_only_btn)
                             .on_hover_text(format!(
@@ -279,7 +279,7 @@ impl<'a> PillBar<'a> {
                                     .size(13.0),
                             )
                             .fill(MentatTheme::BG_INFO)
-                            .stroke(Stroke::new(1.0, MentatTheme::STATUS_INFERENCING))
+                            .stroke(Stroke::new(1.0_f32, MentatTheme::STATUS_INFERENCING))
                             .rounding(Rounding::same(3.0));
                             if ui
                                 .add_sized(vec2(QUICK_CHIP_WIDTH, ROW_HEIGHT), chip_btn)
