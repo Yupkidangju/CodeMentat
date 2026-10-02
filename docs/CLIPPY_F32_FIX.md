@@ -41,3 +41,12 @@ cargo mentat-build build --platform current --profile release
 - 로컬 결과 (Rust 1.99.0): targeted 회귀 PASS. 광고 크기를 1MiB로 바꾼 negative control은 5.01초 뒤 `MODEL_VERIFY_READ_ERROR`와 요구한 `MODEL_VERIFY_RESPONSE_TOO_LARGE`의 불일치로 exit 101; 과대 header fixture를 즉시 복원했다.
 - 복원 후 전체 fmt/strict Clippy/workspace tests (199 passed, 2 ignored)/6-target dry-run/Windows locked release (19.89초) 모두 exit 0.
 - 변경 검토: `lib.rs`의 production 영역과 두 provider adapter, Cargo manifest/lockfile, CI 설정은 변경하지 않았다. 새 테스트 skip은 없으며 기존 보안 assertion을 유지한다.
+
+## macOS watcher 무시 경로 회귀 수정
+
+- 사용자 승인: 기존 draft PR #1에서 남은 macOS watcher 실패를 수정하고 exact-commit CI를 완료한다. 병합·배포는 수행하지 않는다.
+- 기준: `d796ab6`, CI run `36994850356`의 `test_dbg_f002_ignored_paths_and_access_events_do_not_mark_stale` 실패.
+- 목표: 무시 경로 변경은 STALE을 만들지 않고 실제 tracked 변경은 감지한다. unknown/rescan/ignore-control/worker 오류·disconnect의 fail-closed 정책을 유지한다.
+- 진단 순서: test-only event/root/disposition 로그로 macOS 실제 실패 event를 확인 → 원인에 맞는 최소 수정과 regression → 전체 fmt/Clippy/tests/build 검증 → 같은 draft PR의 exact-commit CI terminal 확인.
+- 가설: notify macOS backend의 canonical event 경로와 입력 root의 별칭 차이, 또는 OS가 전달한 상위 디렉터리/제어 event가 원인일 수 있다. event 증거 전에는 확정하지 않는다.
+- 임시 진단 로그는 최종 수정에서 제거한다. CI 설정, lint 강도, 응답 크기 security assertion과 기존 watcher assertion은 완화·skip하지 않는다.

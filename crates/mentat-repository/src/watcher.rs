@@ -111,7 +111,12 @@ impl RepositoryWatcher {
                 while !stop_flag.load(Ordering::Relaxed) {
                     match event_rx.recv_timeout(Duration::from_millis(50)) {
                         Ok(Ok(event)) => {
-                            match classify_event(&root, &event) {
+                            let disposition = classify_event(&root, &event);
+                            #[cfg(test)]
+                            eprintln!(
+                                "watcher_event root={root:?} event={event:?} disposition={disposition:?}"
+                            );
+                            match disposition {
                                 WatcherEventDisposition::Ignore => continue,
                                 WatcherEventDisposition::Rescan => {
                                     if tx.send(true).is_err() {
