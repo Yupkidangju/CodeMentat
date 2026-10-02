@@ -1,5 +1,7 @@
 # CR-UX-001 보안 및 프라이버시 계약
 
+> 2026-10-02 개발 검증 예외: 사용자가 승인한 `.env.local`에서 Gemini 키를 읽을 수 있다. 이 파일은 평문이며 Git와 저장소 도구 catalog에서 제외한다. 키 값은 DB/로그에 기록하지 않는다. 배포 기본 저장은 OS credential store다. Gemini 서명된 functionCall part는 해당 inference 요청에서만 보존하고 권한·인자는 typed executor가 별도로 검증한다.
+
 - **상태:** `APPROVED — IMPLEMENTATION ACTIVE`
 - **보호 대상:** 읽기 전용 저장소, 사용자 대화/프롬프트, API 자격 증명, 외부 전송 범위, 출처 무결성
 - **신뢰 모델:** 사용자와 앱의 immutable capability는 신뢰, provider 응답·저장소 콘텐츠·사용자 편집 prompt는 권한 상승 입력으로 신뢰하지 않음

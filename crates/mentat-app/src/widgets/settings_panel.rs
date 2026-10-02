@@ -136,6 +136,17 @@ impl<'a> SettingsPanel<'a> {
         ui.add_space(6.0);
         ui.label(RichText::new("모델").strong());
         let mut selected_model = self.profile.model.clone();
+        let filter_id = egui::Id::new("mentor_model_filter");
+        let mut filter = ui.data_mut(|data| data.get_temp::<String>(filter_id).unwrap_or_default());
+        if !self.available_models.is_empty() {
+            ui.add(
+                egui::TextEdit::singleline(&mut filter)
+                    .hint_text("모델 이름 검색…")
+                    .desired_width(ui.available_width()),
+            );
+            ui.data_mut(|data| data.insert_temp(filter_id, filter.clone()));
+        }
+        let query = filter.to_lowercase();
         ui.add_enabled_ui(!self.available_models.is_empty() && !self.is_busy, |ui| {
             ComboBox::from_id_salt("model_select")
                 .width(ui.available_width())
@@ -145,7 +156,10 @@ impl<'a> SettingsPanel<'a> {
                     &selected_model
                 })
                 .show_ui(ui, |ui| {
-                    for model in self.available_models {
+                    for model in self.available_models.iter().filter(|model| {
+                        model.id.to_lowercase().contains(&query)
+                            || model.display_name.to_lowercase().contains(&query)
+                    }) {
                         ui.selectable_value(
                             &mut selected_model,
                             model.id.clone(),
@@ -231,9 +245,9 @@ fn provider_label(provider: ProviderKind) -> &'static str {
 
 fn stage_label(stage: ProviderSetupStage) -> &'static str {
     match stage {
-        ProviderSetupStage::Draft => "Draft · API와 모델 목록을 확인하세요.",
-        ProviderSetupStage::ModelsDiscovered => "ModelsDiscovered · 모델을 선택하세요.",
-        ProviderSetupStage::ModelVerified => "ModelVerified · 활성화할 수 있습니다.",
-        ProviderSetupStage::Active => "Active · 현재 프로그램 AI입니다.",
+        ProviderSetupStage::Draft => "연결 준비 · API와 모델 목록을 확인하세요.",
+        ProviderSetupStage::ModelsDiscovered => "목록 준비 · 모델을 선택하세요.",
+        ProviderSetupStage::ModelVerified => "확인 완료 · 활성화할 수 있습니다.",
+        ProviderSetupStage::Active => "사용 중 · 현재 프로그램 AI입니다.",
     }
 }

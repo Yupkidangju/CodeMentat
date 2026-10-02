@@ -1,5 +1,16 @@
 # Code Mentat 빌드 및 패키징 가이드 (BUILD_GUIDE.md)
 
+### 실제 저장소 멘토 루프 검증
+
+프로젝트 루트에서 개발용 `.env.local`에 Gemini 키만 한 줄(또는 `GEMINI_API_KEY=값`)로 저장할 수 있다. 모델 이름은 API 모델 목록에서 확인한 값을 명령 인자로 지정한다.
+
+```powershell
+cargo run --locked -p mentat-app -- --mentor-check --model <모델-ID>
+cargo run --locked -p mentat-app -- --mentor-smoke --model <모델-ID>
+```
+
+smoke는 실제 유료 provider 호출을 포함하는 명시 실행 명령이다. 앱을 종료한 상태에서 실행한다. 전용 fixture를 `target/mentor-smoke-<UUID>`에 만든 후 production adapter·AgentLoop·gateway·durable gate로 탐색과 후속 질문을 실행한다. API 키/답변 원문을 콘솔에 출력하지 않고 도구·근거 수와 성공 여부만 표시한다. 사용자 앱의 대화 DB에 fixture 대화를 삽입하지 않는다.
+
 동일 사용자 AppData의 `mentat.db`는 DB open 전 OS process-lifetime exclusive lock으로 단일 process만 사용한다. 두 번째 실행은 `STORAGE_RUNTIME_OWNED`로 session-only가 되며 자동 재시도하지 않는다. crash/force-kill 뒤 첫 재실행은 sleep 없이 lock을 얻어 recovery한다. busy/locked/permission 오류는 손상 복구나 quarantine을 시작하지 않는다.
 
 - **문서 버전:** 1.0.0

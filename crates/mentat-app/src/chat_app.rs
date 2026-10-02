@@ -37,11 +37,17 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [312.5, 660.0];
-pub const MIN_WINDOW_SIZE: [f32; 2] = [240.0, 360.0];
+pub const DEFAULT_WINDOW_SIZE: [f32; 2] = [560.0, 760.0];
+pub const MIN_WINDOW_SIZE: [f32; 2] = [360.0, 480.0];
 const DEFAULT_PROFILE_ID: Uuid = Uuid::from_u128(0x434f_4445_4d45_4e54_4154_0000_0000_0001);
 
 enum AsyncResult {
+    RepositoryFolderSelected {
+        conversation_id: Uuid,
+        generation: Uuid,
+        path: Option<std::path::PathBuf>,
+        ctx: egui::Context,
+    },
     Catalog {
         requested: mentat_inference::BackendProfile,
         result: Result<ModelCatalog, mentat_core::MentatError>,
@@ -104,6 +110,7 @@ pub struct MentatChatApp {
     provider_setup: ProviderSetupState,
     provider_status: String,
     provider_busy: bool,
+    auto_connect_profile: Option<mentat_inference::BackendProfile>,
     credential_controller: CredentialController,
     remember_api_key: bool,
     persona: PersonaKind,
@@ -240,6 +247,21 @@ impl MentatChatApp {
                 }
             }
         }
+        if saved_backend.provider == mentat_inference::ProviderKind::GoogleGemini
+            && saved_backend.api_key.is_none()
+        {
+            match crate::local_credentials::configured_gemini_key() {
+                Ok(Some(key)) => {
+                    saved_backend.api_key = Some(key);
+                    append_status(
+                        &mut status,
+                        ".env.local에서 Gemini 키를 불러왔습니다. 설정에서 모델을 확인하세요.",
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => append_status(&mut status, &error.to_string()),
+            }
+        }
         let preferences = match storage.as_ref().map(SqliteStorage::load_ui_preferences) {
             Some(Ok(preferences)) => preferences,
             Some(Err(error)) => {
@@ -286,7 +308,10 @@ impl MentatChatApp {
             .map(|storage| restore_message_projections(storage, &conversation, &mut status))
             .unwrap_or_default();
 
-        Self {
+        let auto_connect_profile = (!saved_backend.model.is_empty()
+            && (!saved_backend.provider.requires_api_key() || saved_backend.api_key.is_some()))
+        .then(|| saved_backend.clone());
+        let mut app = Self {
             runtime,
             backend,
             storage,
@@ -295,6 +320,7 @@ impl MentatChatApp {
             provider_setup: ProviderSetupState::new(saved_backend),
             provider_status: String::new(),
             provider_busy: false,
+            auto_connect_profile,
             credential_controller,
             remember_api_key,
             persona: restored_persona,
@@ -328,12 +354,28 @@ impl MentatChatApp {
             audit_by_message,
             selected_grounding_message: None,
             selected_source: None,
+        };
+        if app.auto_connect_profile.is_some() {
+            app.begin_model_discovery();
+        }
+        app
+    }
+
+    fn handle_close_requests(&mut self, ctx: &egui::Context) {
+        let native_close = ctx.input(|input| input.viewport().close_requested());
+        let shortcut =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Q));
+        if native_close && self.prompt_dirty {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+        }
+        if shortcut || native_close {
+            self.request_dirty_action(DirtyPromptAction::CloseApp, ctx);
         }
     }
 
     fn show_header(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("chat_header")
-            .exact_height(46.0)
+            .exact_height(68.0)
             .show(ctx, |ui| {
                 let drag = ui
                     .horizontal(|ui| {
@@ -342,11 +384,29 @@ impl MentatChatApp {
                             if ui.button("×").on_hover_text("닫기 (Ctrl+Q)").clicked() {
                                 self.request_dirty_action(DirtyPromptAction::CloseApp, ctx);
                             }
-                            if ui.button("⚙").on_hover_text("설정").clicked() {
-                                self.settings_open = !self.settings_open;
+                            if ui
+                                .button(if self.settings_open {
+                                    "대화로"
+                                } else {
+                                    "설정"
+                                })
+                                .clicked()
+                            {
+                                if self.settings_open {
+                                    self.request_dirty_action(
+                                        DirtyPromptAction::CloseSettings,
+                                        ctx,
+                                    );
+                                } else {
+                                    self.settings_open = !self.settings_open;
+                                }
                             }
                             if ui
-                                .button(if self.is_pinned { "◆" } else { "◇" })
+                                .button(if self.is_pinned {
+                                    "핀 켜짐"
+                                } else {
+                                    "핀 꺼짐"
+                                })
                                 .on_hover_text("항상 위")
                                 .clicked()
                             {
@@ -361,7 +421,7 @@ impl MentatChatApp {
                                     self.status = format!("핀 설정 저장 실패: {error}");
                                 }
                             }
-                            if ui.button("+").on_hover_text("새 대화").clicked() {
+                            if ui.button("새 대화").clicked() {
                                 self.request_dirty_action(DirtyPromptAction::NewConversation, ctx);
                             }
                         });
@@ -370,162 +430,94 @@ impl MentatChatApp {
                 if drag.dragged() {
                     ctx.send_viewport_cmd(ViewportCommand::StartDrag);
                 }
-                ui.label(
-                    RichText::new(self.active_model_label())
-                        .size(11.0)
-                        .color(MentatTheme::TEXT_MUTED),
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(self.active_model_label())
+                            .size(13.0)
+                            .color(MentatTheme::TEXT_MUTED),
+                    )
+                    .truncate(),
                 );
             });
     }
 
     fn show_chat(&mut self, ctx: &egui::Context) {
+        self.show_repository_bar(ctx);
         egui::TopBottomPanel::bottom("chat_composer")
             .resizable(false)
             .show(ctx, |ui| {
                 ui.add_space(4.0);
-                let response = ui.add(
+                ui.label(RichText::new("질문").strong());
+                let response = ui.add_sized(
+                    [ui.available_width(), 88.0],
                     egui::TextEdit::multiline(&mut self.composer)
-                        .desired_rows(3)
-                        .hint_text("메시지를 입력하세요. Shift+Enter: 줄바꿈")
+                        .id(egui::Id::new("mentor_composer"))
+                        .desired_rows(4)
+                        .hint_text("코드 위치, 설계 이유, 다음 작업을 물어보세요…")
                         .lock_focus(true),
                 );
-                let ime_event = ui.input(|input| {
-                    input
-                        .events
-                        .iter()
-                        .any(|event| matches!(event, egui::Event::Ime(_)))
-                });
-                let (enter, shift, ctrl) = ui.input(|input| {
-                    (
-                        input.key_pressed(egui::Key::Enter),
-                        input.modifiers.shift,
-                        input.modifiers.ctrl,
-                    )
-                });
                 let keyboard_submit = response.has_focus()
-                    && composer_should_submit(self.submit_mode, enter, shift, ctrl, ime_event);
+                    && ui.input(|input| {
+                        composer_key_events_should_submit(self.submit_mode, &input.events)
+                    });
                 ui.horizontal(|ui| {
                     if let Some(active) = &self.active_turn {
                         ui.label(
                             RichText::new(format!(
-                                "응답 중 · {}자",
+                                "탐색·응답 중 · {}자",
                                 active.accumulated.chars().count()
                             ))
                             .small()
                             .color(MentatTheme::STATUS_INFERENCING),
                         );
-                        if ui.button("취소").clicked() {
+                        if ui.button("중지").clicked() {
                             if let Some(token) = &self.stream_cancel {
                                 token.cancel();
                             }
                         }
                     } else {
-                        ui.label(RichText::new("읽기 전용 멘토").small());
+                        ui.label(
+                            RichText::new(submit_mode_label(self.submit_mode))
+                                .small()
+                                .color(MentatTheme::TEXT_MUTED),
+                        );
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let send = ui
                             .add_enabled(
-                                self.active_turn.is_none() && !self.composer.trim().is_empty(),
+                                self.active_turn.is_none()
+                                    && !self.repository_busy
+                                    && !self.composer.trim().is_empty(),
                                 egui::Button::new("전송"),
                             )
                             .clicked();
                         if send || keyboard_submit {
                             self.submit_chat();
+                            response.request_focus();
                         }
                     });
                 });
                 if !self.status.is_empty() {
-                    ui.label(
-                        RichText::new(&self.status)
-                            .small()
-                            .color(MentatTheme::STATUS_CONFLICT),
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(&self.status)
+                                .small()
+                                .color(MentatTheme::STATUS_CONFLICT),
+                        )
+                        .wrap(),
                     );
                 }
                 ui.add_space(2.0);
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui.add_enabled(!self.repository_busy && self.active_turn.is_none(), egui::Button::new("저장소 연결 / 재인덱싱")).clicked() { self.begin_repository_scan(); }
-                if self.repository_busy && ui.button("스캔 취소").clicked() {
-                    if let Some(token) = &self.repository_cancel { token.cancel(); }
-                }
-            });
             ScrollArea::vertical()
                 .id_salt("conversation_timeline")
                 .stick_to_bottom(true)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     if self.conversation.messages.is_empty() {
-                        ui.add_space(24.0);
-                        ui.heading("무엇을 같이 살펴볼까요?");
-                        ui.label("저장소가 없어도 자유롭게 대화할 수 있습니다.");
-                        ui.add_space(8.0);
-                        if self.repository_busy {
-                            ui.label("저장소를 읽기 전용으로 인덱싱하는 중…");
-                        } else if self.repository.is_none() && ui.button("저장소 연결").clicked()
-                        {
-                            self.begin_repository_scan();
-                        }
-                    }
-                    if let Some(repository) = &self.repository {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format!(
-                                    "R/O · {}",
-                                    repository.session.profile().display_name
-                                ))
-                                .small()
-                                .color(MentatTheme::STATUS_READ_ONLY),
-                            );
-                            ui.label(
-                                RichText::new(format!(
-                                    "{} files · {:?}",
-                                    repository.snapshot.file_count, repository.snapshot.status
-                                ))
-                                .small()
-                                .color(MentatTheme::TEXT_MUTED),
-                            );
-                        });
-                        let repository_capable = self
-                            .provider_setup
-                            .active_capabilities()
-                            .is_some_and(|capabilities| capabilities.repository_advisor_capable)
-                            && repository.snapshot.status == mentat_core::SnapshotStatus::Ready;
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(
-                                &mut self.mode,
-                                ConversationMode::Advisor,
-                                "Advisor",
-                            );
-                            ui.add_enabled_ui(repository_capable, |ui| {
-                                ui.selectable_value(
-                                    &mut self.mode,
-                                    ConversationMode::Audit,
-                                    "Audit",
-                                );
-                            });
-                        });
-                        if !repository_capable && self.mode == ConversationMode::Audit {
-                            self.mode = ConversationMode::Advisor;
-                        }
-                        if self
-                            .provider_setup
-                            .active_profile()
-                            .is_some_and(|profile| profile.provider.requires_api_key())
-                            && repository_capable
-                        {
-                            let consent_changed = ui.checkbox(
-                                &mut self.repository_egress_approved,
-                                "이 세션에서 필요한 저장소 발췌의 공급자 전송 허용",
-                            )
-                            .on_hover_text(
-                                "현재 대화·snapshot·provider·model에만 결속됩니다. 변경 시 자동 해제됩니다.",
-                            ).changed();
-                            if consent_changed && !self.repository_egress_approved {
-                                if let Some(token) = &self.stream_cancel { token.cancel(); }
-                            }
-                        }
+                        self.show_onboarding(ui);
                     }
                     let mut open_grounding = None;
                     for message in &self.conversation.messages {
@@ -554,6 +546,101 @@ impl MentatChatApp {
         self.show_grounding_drawer(ctx);
     }
 
+    fn show_repository_bar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("mentor_connections").show(ctx, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button(if self.provider_setup.active_profile().is_some() { "AI 변경" } else { "AI 연결" }).clicked() {
+                    self.settings_open = true;
+                }
+                let repo_label = self.repository.as_ref().map(|binding| {
+                    format!("{} · {}개 파일 · {}", binding.session.profile().display_name,
+                        binding.snapshot.file_count,
+                        if binding.gateway.is_stale() { "변경됨" } else { "읽기 전용" })
+                }).unwrap_or_else(|| "저장소를 연결하면 코드 근거로 답합니다".to_string());
+                let available = (ui.available_width() - 115.0).max(100.0);
+                ui.add_sized([available, 22.0], egui::Label::new(repo_label).truncate());
+                if ui.add_enabled(!self.repository_busy && self.active_turn.is_none(),
+                    egui::Button::new(if self.repository.is_some() { "다시 읽기" } else { "저장소 연결" })).clicked() {
+                    self.begin_repository_scan(ui.ctx());
+                }
+            });
+            if self.repository_busy {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("저장소를 읽는 중…");
+                    if ui.button("중지").clicked() {
+                        if let Some(token) = &self.repository_cancel { token.cancel(); }
+                    }
+                });
+            }
+            if let Some(repository) = &self.repository {
+                if repository.snapshot.status != mentat_core::SnapshotStatus::Ready {
+                    ui.label(RichText::new("저장소가 변경되었거나 일부 파일을 읽지 못했습니다. 다시 읽어 주세요.")
+                        .color(MentatTheme::STATUS_CONFLICT));
+                }
+                let capable = self.provider_setup.active_capabilities()
+                    .is_some_and(|cap| cap.repository_advisor_capable);
+                if !capable {
+                    ui.label("현재 AI는 일반 대화만 지원합니다. 설정에서 저장소 도구 호환성을 확인하세요.");
+                } else if self.provider_setup.active_profile().is_some_and(|profile| profile.provider.requires_api_key())
+                    && ui.checkbox(&mut self.repository_egress_approved, "필요한 코드 발췌를 선택한 AI에 보내기")
+                        .on_hover_text("민감 파일과 키는 제외합니다. 이 대화·저장소·AI 선택에만 적용됩니다.").changed()
+                        && !self.repository_egress_approved {
+                        if let Some(token) = &self.stream_cancel { token.cancel(); }
+                }
+            }
+        });
+    }
+
+    fn show_onboarding(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(20.0);
+        ui.heading("코드를 함께 살펴보는 멘토");
+        ui.label("궁금한 점을 물으면 저장소에서 근거를 찾아 설명합니다.");
+        ui.add_space(16.0);
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+            if self.provider_setup.active_profile().is_none() {
+                ui.label(RichText::new("1. 사용할 AI 연결").strong());
+                ui.label("공급자와 모델을 선택하고 호환성을 확인합니다.");
+                if ui.button("AI 설정 열기").clicked() {
+                    self.settings_open = true;
+                }
+            } else {
+                ui.label(RichText::new("1. AI 준비됨").strong());
+            }
+            ui.add_space(12.0);
+            ui.label(
+                RichText::new(if self.repository.is_some() {
+                    "2. 저장소 준비됨"
+                } else {
+                    "2. 읽을 저장소 선택"
+                })
+                .strong(),
+            );
+            ui.label("파일을 읽고 검색합니다. 코드를 변경하거나 명령을 실행하지 않습니다.");
+            if self.repository.is_none()
+                && ui
+                    .add_enabled(!self.repository_busy, egui::Button::new("저장소 선택"))
+                    .clicked()
+            {
+                self.begin_repository_scan(ui.ctx());
+            }
+        });
+        ui.add_space(18.0);
+        ui.label(RichText::new("이렇게 물어보세요").strong());
+        for question in [
+            "이 프로젝트의 진입점과 전체 구조를 설명해 줘",
+            "이 기능을 고치려면 어느 파일부터 읽으면 좋을까?",
+            "앞서 설명한 구조에서 주의할 점을 알려 줘",
+        ] {
+            if ui.add(egui::Button::new(question).wrap()).clicked() {
+                self.composer = question.to_string();
+                ui.ctx()
+                    .memory_mut(|memory| memory.request_focus(egui::Id::new("mentor_composer")));
+            }
+        }
+    }
+
     fn show_grounding_drawer(&mut self, ctx: &egui::Context) {
         let Some(message_id) = self.selected_grounding_message else {
             return;
@@ -563,24 +650,27 @@ impl MentatChatApp {
             return;
         };
         let mut open = true;
-        egui::Window::new("Grounding")
+        egui::Window::new("답변의 코드 근거")
             .open(&mut open)
             .default_width(300.0)
             .resizable(true)
             .show(ctx, |ui| {
                 ui.label(
                     RichText::new(format!(
-                        "{:?} · tool {} · receipt {}",
-                        trace.freshness,
-                        trace.tool_calls.len(),
-                        trace.egress_receipt_ids.len()
+                        "{} · 도구 {}회",
+                        match &trace.freshness {
+                            GroundingFreshness::FreshAtSend => "답변 생성 당시 코드",
+                            GroundingFreshness::ChangedAfterSend { .. } => "답변 이후 코드 변경됨",
+                            GroundingFreshness::StaleBeforeSend => "다시 읽기가 필요한 코드",
+                        },
+                        trace.tool_calls.len()
                     ))
                     .small()
                     .color(MentatTheme::TEXT_MUTED),
                 );
                 ui.separator();
                 if trace.source_refs.is_empty() {
-                    ui.label("표시할 SourceRef가 없습니다.");
+                    ui.label("이 답변에는 인용된 코드가 없습니다.");
                 }
                 for source in &trace.source_refs {
                     let label = format!(
@@ -597,7 +687,7 @@ impl MentatChatApp {
                     ui.separator();
                     ui.label(
                         RichText::new(format!(
-                            "{} · lines {}-{}",
+                            "{} · {}–{}행",
                             source.relative_path.display(),
                             source.line_start,
                             source.line_end
@@ -605,7 +695,10 @@ impl MentatChatApp {
                         .strong(),
                     );
                     ScrollArea::horizontal().show(ui, |ui| {
-                        ui.monospace(&source.excerpt);
+                        ui.add(
+                            egui::Label::new(RichText::new(&source.excerpt).monospace())
+                                .wrap_mode(egui::TextWrapMode::Extend),
+                        );
                     });
                 }
             });
@@ -657,6 +750,9 @@ impl MentatChatApp {
                     }
                 }
                 self.provider_setup.reconcile_edit(&previous);
+                if previous != self.provider_setup.draft_profile {
+                    self.auto_connect_profile = None;
+                }
                 if self.persona != previous_persona {
                     if let Ok(catalog) = FactoryPromptCatalog::load() {
                         self.persona_prompt_draft = catalog.persona(self.persona).to_string();
@@ -728,7 +824,9 @@ impl MentatChatApp {
                 ui.add_space(14.0);
                 ui.separator();
                 ui.add_space(10.0);
-                self.show_prompt_settings(ui);
+                ui.collapsing("고급 · 설명 스타일과 프롬프트", |ui| {
+                    self.show_prompt_settings(ui)
+                });
             });
         });
     }
@@ -1148,10 +1246,31 @@ impl MentatChatApp {
         });
     }
 
-    fn begin_repository_scan(&mut self) {
-        let Some(path) = PlatformManager::pick_folder() else {
+    fn begin_repository_scan(&mut self, ctx: &egui::Context) {
+        if self.repository_busy {
             return;
-        };
+        }
+        self.repository_busy = true;
+        self.scan_generation = Uuid::new_v4();
+        let generation = self.scan_generation;
+        let conversation_id = self.conversation.id;
+        let tx = self.async_tx.clone();
+        let ctx = ctx.clone();
+        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(
+            egui::viewport::WindowLevel::Normal,
+        ));
+        self.runtime.spawn_blocking(move || {
+            let path = PlatformManager::pick_folder();
+            let _ = tx.send(AsyncResult::RepositoryFolderSelected {
+                conversation_id,
+                generation,
+                path,
+                ctx,
+            });
+        });
+    }
+
+    fn scan_repository_path(&mut self, path: std::path::PathBuf) {
         if let Ok(app_data) = PlatformManager::get_app_data_dir() {
             if let Err(error) = PlatformManager::validate_storage_isolation(&app_data, &path) {
                 self.status = error.to_string();
@@ -1236,7 +1355,7 @@ impl MentatChatApp {
     }
 
     fn submit_chat(&mut self) {
-        if self.active_turn.is_some() {
+        if self.active_turn.is_some() || self.repository_busy {
             return;
         }
         let Some(profile) = self.provider_setup.active_profile().cloned() else {
@@ -1644,6 +1763,26 @@ impl MentatChatApp {
         }
         while let Ok(result) = self.async_rx.try_recv() {
             match result {
+                AsyncResult::RepositoryFolderSelected {
+                    conversation_id,
+                    generation,
+                    path,
+                    ctx,
+                } => {
+                    ctx.send_viewport_cmd(ViewportCommand::WindowLevel(if self.is_pinned {
+                        egui::viewport::WindowLevel::AlwaysOnTop
+                    } else {
+                        egui::viewport::WindowLevel::Normal
+                    }));
+                    if conversation_id != self.conversation.id || generation != self.scan_generation
+                    {
+                        continue;
+                    }
+                    self.repository_busy = false;
+                    if let Some(path) = path {
+                        self.scan_repository_path(path);
+                    }
+                }
                 AsyncResult::Catalog { requested, result } => {
                     self.provider_busy = false;
                     match result {
@@ -1652,7 +1791,14 @@ impl MentatChatApp {
                             match self.provider_setup.accept_catalog(&requested, catalog) {
                                 Ok(()) => {
                                     self.provider_status =
-                                        format!("활성 가능 모델 {count}개를 불러왔습니다.")
+                                        format!("활성 가능 모델 {count}개를 불러왔습니다.");
+                                    if self.auto_connect_profile.as_ref() == Some(&requested) {
+                                        if self.provider_setup.draft_profile.model.is_empty() {
+                                            self.auto_connect_profile = None;
+                                        } else {
+                                            self.begin_model_verification();
+                                        }
+                                    }
                                 }
                                 Err(error) => self.provider_status = error,
                             }
@@ -1672,7 +1818,17 @@ impl MentatChatApp {
                                 Ok(()) => {
                                     self.provider_status =
                                         "텍스트 생성 및 프로그램 AI 호환성이 확인되었습니다."
-                                            .to_string()
+                                            .to_string();
+                                    if self.auto_connect_profile.as_ref() == Some(&requested) {
+                                        self.auto_connect_profile = None;
+                                        match self.provider_setup.activate() {
+                                            Ok(()) => {
+                                                self.provider_status =
+                                                    "이전 AI를 확인하고 다시 연결했습니다.".into()
+                                            }
+                                            Err(error) => self.provider_status = error,
+                                        }
+                                    }
                                 }
                                 Err(error) => self.provider_status = error,
                             }
@@ -2173,10 +2329,7 @@ impl eframe::App for MentatChatApp {
         if let Some(visible) = self.global_shortcuts.take_visibility_request() {
             ctx.send_viewport_cmd(ViewportCommand::Visible(visible));
         }
-        let close = ctx.input(|input| input.modifiers.ctrl && input.key_pressed(egui::Key::Q));
-        if close {
-            self.request_dirty_action(DirtyPromptAction::CloseApp, ctx);
-        }
+        self.handle_close_requests(ctx);
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.selected_grounding_message = None;
             self.selected_source = None;
@@ -2229,7 +2382,7 @@ fn open_storage() -> Result<SqliteStorage, mentat_core::MentatError> {
     SqliteStorage::open(app_data.join("mentat.db"))
 }
 
-fn factory_seed(catalog: &FactoryPromptCatalog) -> FactoryPromptSeed {
+pub(crate) fn factory_seed(catalog: &FactoryPromptCatalog) -> FactoryPromptSeed {
     let system = catalog.system(SystemPreset::Intermediate);
     let persona = catalog.persona(PersonaKind::DefaultAnalyst);
     FactoryPromptSeed {
@@ -2306,7 +2459,7 @@ fn fail_started_turn(
     });
 }
 
-fn build_agent_request(
+pub(crate) fn build_agent_request(
     conversation_id: Uuid,
     turn_id: Uuid,
     profile: mentat_inference::BackendProfile,
@@ -2355,39 +2508,59 @@ fn append_status(status: &mut String, message: &str) {
 }
 
 fn render_message(ui: &mut egui::Ui, message: &ChatMessage, audit: Option<&AnswerBundle>) {
-    ui.group(|ui| {
-        let role = match message.role {
-            ChatRole::User => "나",
-            ChatRole::Assistant => "MENTAT",
-        };
-        ui.label(RichText::new(role).strong().size(12.0));
-        if let Some(audit) = audit {
-            render_audit_result(ui, audit);
-        } else if message.markdown.is_empty() {
-            ui.label(RichText::new("응답 준비 중…").italics());
-        } else if message.role == ChatRole::Assistant {
-            render_markdown(ui, &message.markdown);
+    egui::Frame::none()
+        .fill(if message.role == ChatRole::User {
+            MentatTheme::BG_CARD
         } else {
-            ui.add(egui::Label::new(&message.markdown).wrap());
-        }
-        match &message.status {
-            MessageStatus::Cancelled => {
+            MentatTheme::BG_BASE
+        })
+        .inner_margin(egui::Margin::same(12.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let role = match message.role {
+                ChatRole::User => "나",
+                ChatRole::Assistant => "MENTAT",
+            };
+            ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new("취소됨")
-                        .small()
+                    RichText::new(role)
+                        .strong()
+                        .size(13.0)
                         .color(MentatTheme::TEXT_MUTED),
                 );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if !message.markdown.is_empty() && ui.small_button("복사").clicked() {
+                        ui.ctx().copy_text(message.markdown.clone());
+                    }
+                });
+            });
+            if let Some(audit) = audit {
+                render_audit_result(ui, audit);
+            } else if message.markdown.is_empty() {
+                ui.label(RichText::new("응답 준비 중…").italics());
+            } else if message.role == ChatRole::Assistant {
+                render_markdown(ui, &message.markdown);
+            } else {
+                ui.add(egui::Label::new(&message.markdown).wrap());
             }
-            MessageStatus::Failed { error_code } => {
-                ui.label(
-                    RichText::new(format!("실패 · {error_code}"))
-                        .small()
-                        .color(MentatTheme::STATUS_ERROR),
-                );
+            match &message.status {
+                MessageStatus::Cancelled => {
+                    ui.label(
+                        RichText::new("취소됨")
+                            .small()
+                            .color(MentatTheme::TEXT_MUTED),
+                    );
+                }
+                MessageStatus::Failed { error_code } => {
+                    ui.label(
+                        RichText::new(format!("실패 · {error_code}"))
+                            .small()
+                            .color(MentatTheme::STATUS_ERROR),
+                    );
+                }
+                _ => {}
             }
-            _ => {}
-        }
-    });
+        });
 }
 
 fn render_audit_result(ui: &mut egui::Ui, result: &AnswerBundle) {
@@ -2477,6 +2650,21 @@ fn composer_should_submit(
     }
 }
 
+fn composer_key_events_should_submit(mode: ComposerSubmitMode, events: &[egui::Event]) -> bool {
+    let ime = events
+        .iter()
+        .any(|event| matches!(event, egui::Event::Ime(_)));
+    events.iter().any(|event| match event {
+        egui::Event::Key {
+            key: egui::Key::Enter,
+            pressed: true,
+            modifiers,
+            ..
+        } => composer_should_submit(mode, true, modifiers.shift, modifiers.ctrl, ime),
+        _ => false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2493,6 +2681,7 @@ mod tests {
             provider_status: String::new(),
             provider_busy: false,
             credential_controller: CredentialController::native(),
+            auto_connect_profile: None,
             remember_api_key: false,
             persona: PersonaKind::DefaultAnalyst,
             persona_is_custom: false,
@@ -2526,6 +2715,92 @@ mod tests {
             selected_grounding_message: None,
             selected_source: None,
         }
+    }
+
+    #[test]
+    fn restored_model_activates_only_after_matching_verification() {
+        let mut app = isolated_app();
+        app.provider_setup.draft_profile.model = "dynamic".into();
+        let profile = app.provider_setup.draft_profile.clone();
+        app.provider_setup
+            .accept_catalog(
+                &profile,
+                ModelCatalog::from_untrusted(vec![mentat_inference::AvailableModel::new(
+                    "dynamic", "Dynamic",
+                )]),
+            )
+            .unwrap();
+        app.auto_connect_profile = Some(profile.clone());
+        let event = || AsyncResult::Verification {
+            requested: profile.clone(),
+            result: Ok((
+                ModelVerification {
+                    compatible: true,
+                    message: "ok".into(),
+                    latency_ms: None,
+                },
+                AgentCapabilities {
+                    chat_capable: true,
+                    native_tool_capable: true,
+                    emulated_tool_capable: false,
+                    repository_advisor_capable: true,
+                },
+            )),
+        };
+        assert!(app.provider_setup.active_profile().is_none());
+        app.async_tx.send(event()).unwrap();
+        app.poll_async();
+        assert_eq!(app.provider_setup.active_profile(), Some(&profile));
+        app.provider_setup = ProviderSetupState::new(profile.clone());
+        app.auto_connect_profile = Some(profile.clone());
+        app.provider_setup.draft_profile.model = "different".into();
+        app.async_tx.send(event()).unwrap();
+        app.poll_async();
+        assert!(app.provider_setup.active_profile().is_none());
+    }
+
+    #[test]
+    fn native_close_is_blocked_only_for_dirty_edits_and_cancels_clean_tasks() {
+        for dirty in [false, true] {
+            let mut app = isolated_app();
+            app.prompt_dirty = dirty;
+            let cancel = CancellationToken::new();
+            app.stream_cancel = Some(cancel.clone());
+            let ctx = egui::Context::default();
+            let mut input = egui::RawInput::default();
+            input
+                .viewports
+                .get_mut(&egui::ViewportId::ROOT)
+                .unwrap()
+                .events
+                .push(egui::ViewportEvent::Close);
+            let output = ctx.run(input, |ctx| app.handle_close_requests(ctx));
+            let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+            assert_eq!(
+                commands
+                    .iter()
+                    .any(|command| matches!(command, ViewportCommand::CancelClose)),
+                dirty
+            );
+            assert_eq!(cancel.is_cancelled(), !dirty);
+            if !dirty {
+                assert!(commands
+                    .iter()
+                    .any(|command| matches!(command, ViewportCommand::Close)));
+            }
+        }
+    }
+
+    #[test]
+    fn repository_selection_keeps_draft_and_cannot_start_a_turn() {
+        let mut app = isolated_app();
+        app.repository_busy = true;
+        app.composer = "선택한 저장소를 설명해 줘".into();
+        app.submit_chat();
+        assert!(app.conversation.messages.is_empty());
+        assert_eq!(app.composer, "선택한 저장소를 설명해 줘");
+        assert!(!app.settings_open);
+        assert!(app.active_turn.is_none());
     }
 
     #[test]
@@ -2588,8 +2863,8 @@ mod tests {
 
     #[test]
     fn vertical_window_defaults_and_invalid_restore_are_bounded() {
-        assert_eq!(DEFAULT_WINDOW_SIZE, [312.5, 660.0]);
-        assert_eq!(MIN_WINDOW_SIZE, [240.0, 360.0]);
+        assert_eq!(DEFAULT_WINDOW_SIZE, [560.0, 760.0]);
+        assert_eq!(MIN_WINDOW_SIZE, [360.0, 480.0]);
         assert_eq!(clamp_window_size([f32::NAN, -1.0]), DEFAULT_WINDOW_SIZE);
         assert_eq!(clamp_window_size([100.0, 100.0]), MIN_WINDOW_SIZE);
     }
@@ -2623,6 +2898,32 @@ mod tests {
             false,
             true,
             false
+        ));
+    }
+
+    #[test]
+    fn composer_uses_key_modifiers_when_modifier_is_released_in_the_same_frame() {
+        let event = |modifiers| egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        let released = egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        assert!(composer_key_events_should_submit(
+            ComposerSubmitMode::CtrlEnterSend,
+            &[event(egui::Modifiers::CTRL), released.clone()]
+        ));
+        assert!(!composer_key_events_should_submit(
+            ComposerSubmitMode::EnterSend,
+            &[event(egui::Modifiers::SHIFT), released]
         ));
     }
 

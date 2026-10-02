@@ -1,4 +1,6 @@
 # Code Mentat Implementation Summary (IMPLEMENTATION_SUMMARY.md)
+
+2026-10-02 멘토 개선: `chat_app.rs`에서 연결/대화/입력과 비동기 폴더 선택을 조합한다. `mentor_harness.rs`의 opt-in smoke는 동일 request builder와 durable gate를 실제 provider로 실행하며 `local_credentials.rs`는 사용자 개발 키 파일을 읽는다. Gemini 어댑터의 signed function part와 Markdown inline/참고 문구 렌더러를 보완했다. 실제 UI/API/저장소/맥락 유지 검증 근거는 [멘토 개선 장부](docs/MENTOR_SIMPLIFICATION.md)를 따른다.
 ## 코드 멘타트 구현 요약서
 
 2026-09-08 멀티 감사 2 대응: FIN-001~018의 코드 대조, 수정 표면, 테스트 및 미검증 항목은 `docs/MULTI_AUDIT_2_REMEDIATION.md`에 기록한다. 이전 제한 감사 PASS와 29/43 수치는 현재 전체 기능 감사의 PASS를 의미하지 않는다.

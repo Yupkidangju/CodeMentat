@@ -369,8 +369,8 @@ pub struct UiPreferences {
 impl Default for UiPreferences {
     fn default() -> Self {
         Self {
-            width_points: 312.5,
-            height_points: 660.0,
+            width_points: 560.0,
+            height_points: 760.0,
             submit_mode: ComposerSubmitMode::EnterSend,
             always_on_top: true,
             layout_revision: 2,

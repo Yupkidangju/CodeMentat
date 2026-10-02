@@ -1,5 +1,7 @@
 # CR-UX-001 목표 시스템 아키텍처
 
+2026-10-02 기본 제품 계약은 [저장소 멘토 개선](docs/MENTOR_SIMPLIFICATION.md)이다. app은 연결/대화/입력 UI와 비동기 폴더 선택·재시작 AI 연결을 조합하고 analysis AgentLoop는 읽기 전용 도구 라운드를 실행한다. inference의 opaque ProviderToolParts는 Gemini의 원본 functionCall/서명을 해당 요청 history에서만 보존하며 executor 권한이나 저장된 근거가 되지 않는다.
+
 - **상태:** `APPROVED — PRODUCTION PARTIAL / RE-AUDIT PENDING`
 - **기준:** `Code Mentat 자유 대화형 저장소 멘토 전환 변경요청서.md`
 - **현재 구현:** app의 turn/storage composition + analysis의 bounded AgentLoop, provider wire adapter

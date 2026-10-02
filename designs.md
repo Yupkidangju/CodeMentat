@@ -1,4 +1,6 @@
 # Code Mentat UI/UX Design Specification (designs.md)
+
+> 2026-10-02: 현재 기본 화면 계약과 검증 기준은 [저장소 멘토 개선](docs/MENTOR_SIMPLIFICATION.md)의 화면 설계를 따른다.
 ## 코드 멘타트 디자인 명세서
 
 - **문서 버전:** 2.0.0-implementation (`CR-UX-001`)

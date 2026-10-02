@@ -4,6 +4,8 @@ mod chat_app;
 mod credential_state;
 #[allow(dead_code)]
 mod hotkeys;
+mod local_credentials;
+mod mentor_harness;
 mod provider_setup;
 mod stream_store;
 mod theme;
@@ -19,6 +21,18 @@ fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt::init();
 
     let rt = Arc::new(Runtime::new().expect("Tokio 런타임 초기화 실패"));
+    if std::env::args().any(|arg| arg == "--mentor-smoke" || arg == "--mentor-check") {
+        if let Err(error) = rt.block_on(mentor_harness::run()) {
+            let code = match error {
+                mentat_core::MentatError::BackendError { code, .. } => code,
+                mentat_core::MentatError::PlatformError(message) => message,
+                _ => "MENTOR_HARNESS_FAILED".to_string(),
+            };
+            eprintln!("Mentor 검증 실패: {code}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
 
     let initial_preferences = chat_app::initial_ui_preferences();
     let mut viewport = egui::ViewportBuilder::default()
@@ -29,7 +43,7 @@ fn main() -> eframe::Result<()> {
         ])
         .with_min_inner_size(chat_app::MIN_WINDOW_SIZE)
         .with_resizable(true)
-        .with_decorations(false)
+        .with_decorations(true)
         .with_transparent(false);
     if initial_preferences.always_on_top {
         viewport = viewport.with_always_on_top();

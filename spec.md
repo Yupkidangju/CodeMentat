@@ -1,4 +1,6 @@
 # Code Mentat Canonical Specification (spec.md)
+
+> 2026-10-02 최신 사용자 목표: [저장소 멘토 개선 계약](docs/MENTOR_SIMPLIFICATION.md). 기본 제품 흐름은 질의→읽기 전용 탐색→자연어 조언→대화 맥락 유지이며、아래 baseline/CR의 관리 기능보다 이 계약을 우선한다.
 ## 코드 멘타트 활성 실행 명세서 및 마스터 요구사항 추적 매트릭스
 
 - **문서 버전:** 0.2.0-plan (`CR-UX-001` / CR-0)

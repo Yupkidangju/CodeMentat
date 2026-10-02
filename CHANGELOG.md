@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - CR-UX-001 Implementation
 
+### Changed — 저장소 멘토 개선 (2026-10-02)
+
+- 연결 상태·대화·입력을 분리하고 온보딩, 질문 예시, 전체 폭 입력, 명시적 설정 복귀, 답변 복사를 추가했다. 기본 새 창 폭과 본문 글자를 키우고 OS 창 크기 조작을 지원한다.
+- Markdown 강조·inline code·링크를 문단 내에서 렌더링한다.
+- Gemini JSON Schema 선언과 signed function call 재전송을 수정해 실제 3.8 Flash 탐색→읽기→답변→후속 질문을 검증했다. capability probe 오류를 숨기지 않는다.
+- 개발용 사용자 승인 `.env.local` 키 읽기와 실제 provider smoke 명령을 추가했다.
+
 ### Fixed — 멀티 감사 2 (2026-09-08)
 
 - 동의 철회 전파, 요청 식별자 검사, 중복 제출/새 대화/scan generation 경계와 watcher 연결을 보강했다.

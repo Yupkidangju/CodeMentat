@@ -1,4 +1,10 @@
 # Code Mentat Architecture Decision Records (DESIGN_DECISIONS.md)
+
+## DEC-MENTOR-001 — 질의·탐색·답변·맥락 유지로 기본 사용 흐름 정리 (2026-10-02)
+
+사용자 최신 목표에 따라 대화·연결 상태·입력을 분리하고 상세 프롬프트/Audit 관리는 기본 화면에서 숨긴다. 기존 bounded AgentLoop/읽기 gateway/receipt·atomic terminal을 재사용해 새 agent framework나 자동 compaction을 도입하지 않는다. 실제 Gemini 3.8에서 HTTP400을 재현해 일반 JSON Schema 전용 선언과 opaque signed function part 전달을 수정했다. 해당 metadata는 executor 인자·권한과 분리하고 UI/근거/DB에 노출하지 않는다.
+
+재시작은 저장된 모델을 목록과 프로브로 재검증한 뒤 연결하며 stale 검증으로 활성화하지 않는다. 사용자가 승인한 개발용 `.env.local` 읽기는 명시적 예외이고, 기본 native credential 보관 계약은 유지한다. 검증 명령은 production adapter/AgentLoop/gateway/durable gate의 전용 fixture 실행으로 닫는다. 근거와 현재 결과는 [멘토 개선 장부](docs/MENTOR_SIMPLIFICATION.md)에 기록한다.
 ## 아키텍처 및 디자인 결정 기록
 
 ### [DEC-AUDIT-002] 멀티 감사 2의 소비 경로 보정 (2026-09-08)
