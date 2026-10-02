@@ -344,6 +344,7 @@ mod tests {
             messages: vec![
                 AgentMessage::user("status"),
                 AgentMessage {
+                    provider_parts: None,
                     role: AgentRole::Assistant,
                     content: AgentMessageContent::ToolCalls(vec![
                         RepositoryToolCall {
@@ -361,6 +362,7 @@ mod tests {
                     ]),
                 },
                 AgentMessage {
+                    provider_parts: None,
                     role: AgentRole::Tool,
                     content: AgentMessageContent::ToolResult(RepositoryToolResult {
                         call_id,
@@ -372,6 +374,7 @@ mod tests {
                     }),
                 },
                 AgentMessage {
+                    provider_parts: None,
                     role: AgentRole::Tool,
                     content: AgentMessageContent::ToolResult(RepositoryToolResult {
                         call_id: second_call_id,

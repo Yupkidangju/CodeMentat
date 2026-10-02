@@ -136,10 +136,18 @@ impl InferenceBackend for MultiProviderAdapter {
         let stream = self
             .infer_round_stream_guarded(request, CancellationToken::new(), None)
             .await;
-        let Ok(mut stream) = stream else {
-            return Ok(AgentCapabilities::CHAT_ONLY);
-        };
+        let mut stream = stream?;
         while let Some(event) = stream.next().await {
+            if let InferenceRoundEvent::Failed {
+                error_code,
+                safe_message,
+            } = &event
+            {
+                return Err(MentatError::BackendError {
+                    code: error_code.clone(),
+                    message: safe_message.clone(),
+                });
+            }
             if let InferenceRoundEvent::ToolCallsRequested { calls, .. } = event {
                 let native = calls.len() == 1
                     && calls[0].name == mentat_core::RepositoryToolName::RepoStatus
@@ -447,10 +455,12 @@ mod tests {
             messages: vec![
                 AgentMessage::user("status"),
                 AgentMessage {
+                    provider_parts: None,
                     role: AgentRole::Assistant,
                     content: AgentMessageContent::ToolCalls(vec![call]),
                 },
                 AgentMessage {
+                    provider_parts: None,
                     role: AgentRole::Tool,
                     content: AgentMessageContent::ToolResult(RepositoryToolResult {
                         call_id,
@@ -823,6 +833,36 @@ mod tests {
                 ..
             }) if text == "근거 확인 완료"
         ));
+    }
+
+    #[test]
+    fn gemini_preserves_signed_function_parts_ids_and_json_schema() {
+        let mut request = agent_request_with_tool_result(openai_profile(1));
+        request.tools = mentat_analysis::repository_tools::repository_tool_definitions();
+        let signed = request
+            .messages
+            .iter_mut()
+            .find(|message| matches!(message.content, AgentMessageContent::ToolCalls(_)))
+            .unwrap();
+        let calls = match &signed.content {
+            AgentMessageContent::ToolCalls(calls) => calls,
+            _ => unreachable!(),
+        };
+        let part = serde_json::json!({
+            "functionCall": {"name": calls[0].name.wire_name(), "args": {"query": "mentor", "path_filter": null, "limit": 10}, "id": "native-function-17"},
+            "thoughtSignature": "opaque-fixture-signature"
+        });
+        signed.provider_parts = Some(mentat_inference::ProviderToolParts(vec![part.clone()]));
+        let body = crate::agent_wire::gemini_body(&request).unwrap();
+        assert_eq!(body["contents"][1]["parts"][0], part);
+        assert_eq!(
+            body["contents"][2]["parts"][0]["functionResponse"]["id"],
+            "native-function-17"
+        );
+        let declaration = &body["tools"][0]["functionDeclarations"][0];
+        assert!(declaration.get("parametersJsonSchema").is_some());
+        assert!(declaration.get("parameters").is_none());
+        assert!(!format!("{:?}", request.messages).contains("opaque-fixture-signature"));
     }
 
     #[tokio::test]

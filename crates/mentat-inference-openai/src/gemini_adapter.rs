@@ -643,6 +643,7 @@ impl GeminiAdapter {
             let mut full_text = String::new();
             let mut byte_buffer = Vec::new();
             let mut tool_calls = Vec::new();
+            let mut provider_parts = Vec::new();
             let mut received_bytes = 0usize;
             loop {
                 tokio::select! {
@@ -693,8 +694,11 @@ impl GeminiAdapter {
                                             };
                                             return;
                                         };
-                                        match parse_repository_tool_call(name, &args, None, snapshot_id) {
-                                            Ok(call) => tool_calls.push(call),
+                                        match parse_repository_tool_call(name, &args, function.get("id").and_then(|value| value.as_str()), snapshot_id) {
+                                            Ok(call) => {
+                                                provider_parts.push(part.clone());
+                                                tool_calls.push(call);
+                                            },
                                             Err(_) => {
                                                 yield InferenceRoundEvent::Failed {
                                                     error_code: "AGENT_TOOL_SCHEMA_INVALID".to_string(),
@@ -721,6 +725,7 @@ impl GeminiAdapter {
             if tool_calls.is_empty() {
                 yield InferenceRoundEvent::RawCompleted { full_text };
             } else {
+                yield InferenceRoundEvent::ProviderToolParts(mentat_inference::ProviderToolParts(provider_parts));
                 yield InferenceRoundEvent::ToolCallsRequested { round: 0, calls: tool_calls };
             }
         };

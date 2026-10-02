@@ -118,9 +118,11 @@ impl<B: InferenceBackend> AgentLoop<B> {
                 .await?;
             let mut round_text = String::new();
             let mut tool_calls = None;
+            let mut provider_parts = None;
             let mut terminal = None;
             while let Some(event) = stream.next().await {
                 match event {
+                    InferenceRoundEvent::ProviderToolParts(parts) => provider_parts = Some(parts),
                     InferenceRoundEvent::Started { .. } => {}
                     InferenceRoundEvent::ThinkingDelta(delta) => {
                         self.emit(&mut events, AgentEvent::ThinkingDelta(delta));
@@ -257,6 +259,7 @@ impl<B: InferenceBackend> AgentLoop<B> {
             request.messages.push(AgentMessage {
                 role: mentat_inference::AgentRole::Assistant,
                 content: AgentMessageContent::ToolCalls(calls.clone()),
+                provider_parts,
             });
             let call_count = u16::try_from(calls.len()).unwrap_or(u16::MAX);
             for (index, call) in calls.into_iter().enumerate() {
@@ -300,6 +303,7 @@ impl<B: InferenceBackend> AgentLoop<B> {
                 request.messages.push(AgentMessage {
                     role: mentat_inference::AgentRole::Tool,
                     content: AgentMessageContent::ToolResult(result),
+                    provider_parts: None,
                 });
                 self.emit(
                     &mut events,

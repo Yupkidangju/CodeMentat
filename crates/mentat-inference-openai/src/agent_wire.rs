@@ -73,6 +73,7 @@ pub(crate) fn openai_body(request: &AgentRequest) -> Result<Value, MentatError> 
 pub(crate) fn gemini_body(request: &AgentRequest) -> Result<Value, MentatError> {
     let mut contents = Vec::new();
     let mut call_names = std::collections::HashMap::new();
+    let mut native_ids = std::collections::HashMap::new();
     for message in &request.messages {
         match (&message.role, &message.content) {
             (AgentRole::User, AgentMessageContent::Text(text)) => {
@@ -82,6 +83,30 @@ pub(crate) fn gemini_body(request: &AgentRequest) -> Result<Value, MentatError> 
                 contents.push(json!({"role": "model", "parts": [{"text": text}]}));
             }
             (AgentRole::Assistant, AgentMessageContent::ToolCalls(calls)) => {
+                if let Some(parts) = &message.provider_parts {
+                    if parts.0.len() != calls.len() {
+                        return Err(wire_error(
+                            "PROVIDER_CONTINUATION_INVALID",
+                            "도구와 provider part 개수가 다릅니다.",
+                        ));
+                    }
+                    for (call, part) in calls.iter().zip(&parts.0) {
+                        if part.pointer("/functionCall/name").and_then(Value::as_str)
+                            != Some(call.name.wire_name())
+                        {
+                            return Err(wire_error(
+                                "PROVIDER_CONTINUATION_INVALID",
+                                "provider part 도구 이름이 다릅니다.",
+                            ));
+                        }
+                        call_names.insert(call.call_id, call.name.wire_name().to_string());
+                        if let Some(id) = part.pointer("/functionCall/id").and_then(Value::as_str) {
+                            native_ids.insert(call.call_id, id.to_string());
+                        }
+                    }
+                    contents.push(json!({"role": "model", "parts": parts.0}));
+                    continue;
+                }
                 let parts: Vec<_> = calls
                     .iter()
                     .map(|call| {
@@ -103,10 +128,14 @@ pub(crate) fn gemini_body(request: &AgentRequest) -> Result<Value, MentatError> 
                 })?;
                 let response = serde_json::to_value(result)
                     .map_err(|error| wire_error("AGENT_TOOL_ENCODE_FAILED", &error.to_string()))?;
-                contents.push(json!({"role": "user", "parts": [{"functionResponse": {
+                let mut part = json!({"functionResponse": {
                     "name": name,
                     "response": response,
-                }}]}));
+                }});
+                if let Some(id) = native_ids.get(&result.call_id) {
+                    part["functionResponse"]["id"] = json!(id);
+                }
+                contents.push(json!({"role": "user", "parts": [part]}));
             }
             _ => {
                 return Err(wire_error(
@@ -192,7 +221,7 @@ fn gemini_tool(definition: &ToolDefinition) -> Value {
     json!({
         "name": definition.name,
         "description": definition.description,
-        "parameters": definition.input_schema,
+        "parametersJsonSchema": definition.input_schema,
     })
 }
 

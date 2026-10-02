@@ -274,6 +274,18 @@ pub enum AgentMessageContent {
 pub struct AgentMessage {
     pub role: AgentRole,
     pub content: AgentMessageContent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_parts: Option<ProviderToolParts>,
+}
+
+/// Provider의 서명된 도구 part는 executor 인자와 분리해 해당 요청에서만 재전송한다.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderToolParts(pub Vec<serde_json::Value>);
+
+impl std::fmt::Debug for ProviderToolParts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ProviderToolParts({} opaque parts)", self.0.len())
+    }
 }
 
 impl AgentMessage {
@@ -281,6 +293,7 @@ impl AgentMessage {
         Self {
             role: AgentRole::User,
             content: AgentMessageContent::Text(text.into()),
+            provider_parts: None,
         }
     }
 
@@ -288,6 +301,7 @@ impl AgentMessage {
         Self {
             role: AgentRole::Assistant,
             content: AgentMessageContent::Text(text.into()),
+            provider_parts: None,
         }
     }
 }
@@ -325,6 +339,7 @@ pub struct AgentRequest {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum InferenceRoundEvent {
+    ProviderToolParts(ProviderToolParts),
     Started {
         request_id: Uuid,
     },

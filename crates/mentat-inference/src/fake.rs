@@ -301,6 +301,7 @@ mod tests {
             profile: BackendProfile::default(),
             effective_system_prompt: "system".to_string(),
             messages: vec![AgentMessage {
+                provider_parts: None,
                 role: AgentRole::Tool,
                 content: AgentMessageContent::ToolResult(mentat_core::RepositoryToolResult {
                     call_id: Uuid::new_v4(),
