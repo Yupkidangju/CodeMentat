@@ -6,6 +6,8 @@ const MAX_BLOCKS: usize = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MarkdownBlock {
+    ParagraphEnd,
+    InlineCode(String),
     Styled {
         text: String,
         strong: bool,
@@ -132,7 +134,10 @@ pub fn parse_markdown_blocks(markdown: &str) -> Vec<MarkdownBlock> {
             }
             Event::Start(Tag::Image { .. }) => text.push_str("[이미지 자동 로드 차단: "),
             Event::End(TagEnd::Image) => text.push(']'),
-            Event::Text(value) | Event::Html(value) | Event::InlineHtml(value) => {
+            Event::Html(value) | Event::InlineHtml(value) => {
+                text.push_str(readable_html(&value).trim_matches('\n'));
+            }
+            Event::Text(value) => {
                 if let Some((_, code_text)) = code.as_mut() {
                     code_text.push_str(&value);
                 } else if (strong || emphasis) && heading.is_none() && link_destination.is_none() {
@@ -146,9 +151,12 @@ pub fn parse_markdown_blocks(markdown: &str) -> Vec<MarkdownBlock> {
                 }
             }
             Event::Code(value) => {
-                text.push('`');
-                text.push_str(&value);
-                text.push('`');
+                if heading.is_some() {
+                    text.push_str(&value);
+                } else {
+                    flush_paragraph(&mut blocks, &mut text);
+                    blocks.push(MarkdownBlock::InlineCode(value.into_string()));
+                }
             }
             Event::SoftBreak => text.push(' '),
             Event::HardBreak => text.push('\n'),
@@ -161,6 +169,7 @@ pub fn parse_markdown_blocks(markdown: &str) -> Vec<MarkdownBlock> {
             }
             Event::End(TagEnd::Paragraph | TagEnd::Item) => {
                 flush_paragraph(&mut blocks, &mut text);
+                blocks.push(MarkdownBlock::ParagraphEnd);
             }
             _ => {}
         }
@@ -175,8 +184,22 @@ pub fn parse_markdown_blocks(markdown: &str) -> Vec<MarkdownBlock> {
 }
 
 pub fn render_markdown(ui: &mut Ui, markdown: &str) {
+    let mut inline = Vec::new();
     for block in parse_markdown_blocks(markdown) {
+        if matches!(
+            block,
+            MarkdownBlock::Paragraph(_)
+                | MarkdownBlock::Styled { .. }
+                | MarkdownBlock::Link { .. }
+                | MarkdownBlock::InlineCode(_)
+        ) {
+            inline.push(block);
+            continue;
+        }
+        render_inline(ui, &mut inline);
         match block {
+            MarkdownBlock::ParagraphEnd => continue,
+            MarkdownBlock::InlineCode(_) => unreachable!(),
             MarkdownBlock::Styled {
                 text,
                 strong,
@@ -239,12 +262,86 @@ pub fn render_markdown(ui: &mut Ui, markdown: &str) {
         }
         ui.add_space(4.0);
     }
+    render_inline(ui, &mut inline);
+}
+
+fn render_inline(ui: &mut Ui, blocks: &mut Vec<MarkdownBlock>) {
+    if blocks.is_empty() {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for block in blocks.drain(..) {
+            let (text, strong, emphasis, code) = match block {
+                MarkdownBlock::Paragraph(text) => (text, false, false, false),
+                MarkdownBlock::Styled {
+                    text,
+                    strong,
+                    emphasis,
+                } => (text, strong, emphasis, false),
+                MarkdownBlock::InlineCode(text) => (text, false, false, true),
+                MarkdownBlock::Link { label, destination } => {
+                    ui.hyperlink_to(label, destination);
+                    continue;
+                }
+                _ => unreachable!(),
+            };
+            for word in text.split_inclusive(char::is_whitespace) {
+                let mut rich = RichText::new(word);
+                if strong {
+                    rich = rich.strong();
+                }
+                if emphasis {
+                    rich = rich.italics();
+                }
+                if code {
+                    rich = rich
+                        .monospace()
+                        .background_color(ui.visuals().code_bg_color);
+                }
+                ui.add(egui::Label::new(rich).wrap());
+            }
+        }
+    });
+    ui.add_space(4.0);
 }
 
 fn flush_paragraph(blocks: &mut Vec<MarkdownBlock>, text: &mut String) {
     if !text.is_empty() {
         blocks.push(MarkdownBlock::Paragraph(std::mem::take(text)));
     }
+}
+
+fn readable_html(mut html: &str) -> String {
+    let mut output = String::new();
+    while let Some(start) = html.find('<') {
+        output.push_str(&html[..start]);
+        let Some(end) = html[start..].find('>').map(|end| start + end) else {
+            output.push_str(&html[start..]);
+            return output;
+        };
+        let tag = &html[start..=end];
+        let name = tag[1..tag.len() - 1]
+            .trim()
+            .trim_start_matches('/')
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if matches!(
+            name.as_str(),
+            "details" | "summary" | "strong" | "em" | "b" | "i"
+        ) {
+            if matches!(name.as_str(), "details" | "summary") {
+                output.push('\n');
+            }
+        } else {
+            output.push_str(tag);
+        }
+        html = &html[end + 1..];
+    }
+    output.push_str(html);
+    output
 }
 
 fn heading_level(level: HeadingLevel) -> u8 {
@@ -278,6 +375,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn inline_emphasis_does_not_turn_one_sentence_into_multiple_rows() {
+        let ctx = egui::Context::default();
+        let mut height = 0.0;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(560.0, 300.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    height = ui
+                        .scope(|ui| render_markdown(ui, "Hello **bold** and *italic* world."))
+                        .response
+                        .rect
+                        .height();
+                });
+            },
+        );
+        assert!(height < 40.0, "one sentence occupied {height}pt");
+    }
+
+    #[test]
     fn fenced_code_is_a_dedicated_non_wrapping_block() {
         let blocks = parse_markdown_blocks("## 제목\n\n```rust\nfn main() {}\n```");
 
@@ -286,7 +408,7 @@ mod tests {
             MarkdownBlock::Heading { level: 2, text } if text == "제목"
         ));
         assert!(matches!(
-            &blocks[1],
+            blocks.iter().find(|block| matches!(block, MarkdownBlock::Code { .. })).unwrap(),
             MarkdownBlock::Code { language, text }
                 if language == "rust" && text == "fn main() {}\n"
         ));
@@ -314,5 +436,17 @@ mod tests {
         assert!(text.contains("이미지 자동 로드 차단"));
         assert!(!text.contains("file:///secret"));
         assert!(!text.contains("javascript:alert"));
+    }
+
+    #[test]
+    fn harmless_html_layout_tags_show_reference_text_without_raw_tags() {
+        let blocks = parse_markdown_blocks("<details>\n<summary><strong>참고 코드</strong></summary>\n\n```rust\nfn main() {}\n```\n</details>");
+        let display = format!("{blocks:?}");
+        assert!(display.contains("참고 코드"));
+        assert!(!display.contains("<details>"));
+        assert!(!display.contains("<summary>"));
+        assert!(blocks
+            .iter()
+            .any(|block| matches!(block, MarkdownBlock::Code { .. })));
     }
 }
