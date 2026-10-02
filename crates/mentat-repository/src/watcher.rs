@@ -90,6 +90,15 @@ impl RepositoryWatcher {
         let worker = std::thread::Builder::new()
             .name("mentat-watcher".to_string())
             .spawn(move || {
+                // FSEvents의 canonical 경로와 동일한 root로 경계·ignore 판정을 수행한다.
+                // 경로 해석은 worker에서 하고 실패 시 snapshot을 fail-closed로 무효화한다.
+                let root = match root.canonicalize() {
+                    Ok(root) => root,
+                    Err(_) => {
+                        let _ = tx.send(true);
+                        return;
+                    }
+                };
                 let (event_tx, event_rx) = mpsc::channel();
                 let mut watcher = match notify::recommended_watcher(
                     move |result: notify::Result<notify::Event>| {
@@ -111,12 +120,7 @@ impl RepositoryWatcher {
                 while !stop_flag.load(Ordering::Relaxed) {
                     match event_rx.recv_timeout(Duration::from_millis(50)) {
                         Ok(Ok(event)) => {
-                            let disposition = classify_event(&root, &event);
-                            #[cfg(test)]
-                            eprintln!(
-                                "watcher_event root={root:?} event={event:?} disposition={disposition:?}"
-                            );
-                            match disposition {
+                            match classify_event(&root, &event) {
                                 WatcherEventDisposition::Ignore => continue,
                                 WatcherEventDisposition::Rescan => {
                                     if tx.send(true).is_err() {

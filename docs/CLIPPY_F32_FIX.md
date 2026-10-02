@@ -1,4 +1,4 @@
-# Rust 1.99 부동소수점 리터럴 CI 수정
+# Rust 1.99 CI와 macOS 회귀 수정
 
 - 기준: `367cff669b610930015a7ad785ef640684b4c6c9`, CI run `36985788020`.
 - 목표: `float_literal_f32_fallback` 진단 17건을 없애고 strict Clippy 게이트를 통과한다.
@@ -50,3 +50,8 @@ cargo mentat-build build --platform current --profile release
 - 진단 순서: test-only event/root/disposition 로그로 macOS 실제 실패 event를 확인 → 원인에 맞는 최소 수정과 regression → 전체 fmt/Clippy/tests/build 검증 → 같은 draft PR의 exact-commit CI terminal 확인.
 - 가설: notify macOS backend의 canonical event 경로와 입력 root의 별칭 차이, 또는 OS가 전달한 상위 디렉터리/제어 event가 원인일 수 있다. event 증거 전에는 확정하지 않는다.
 - 임시 진단 로그는 최종 수정에서 제거한다. CI 설정, lint 강도, 응답 크기 security assertion과 기존 watcher assertion은 완화·skip하지 않는다.
+- 확인된 원인: 진단 commit `696df70`, CI run `37032519662`에서 입력 root는 `/var/...`이고 `target/build.pdb`와 `.env` event는 `/private/var/...`였다. `Create(File)`과 `Modify(Data(Content))` 모두 경로 prefix 불일치 때문에 `Rescan`으로 분류되었다.
+- 수정: worker에서 root를 한 번 canonicalize한 뒤 같은 root로 notify 등록·event 분류·ignore 판정·안전한 파일 hash를 수행한다. canonicalize 실패는 기존 watch 실패와 같이 STALE을 전달한다. UI thread/constructor의 비동기·nonblocking 계약을 유지한다.
+- 회귀: 별칭 root에서 무시 쓰기 후 tracked 변경·ignore-control 변경을 확인하고, 사용 불가 root가 fail-closed인지 확인한다. 기존 Any/Other/Rescan/Access/ignore-control 회귀에 empty/outside-root event도 추가한다.
+- 로컬 Rust 1.99.0 최종 검증: fmt, strict workspace Clippy, workspace tests (201 passed, 0 failed, 2 existing ignored), 6-target dry-run, Windows locked release (28.55초) 모두 exit 0.
+- 검토: classifier·constructor·polling·hash·disconnect 코드는 동일하고, canonicalization은 worker에서만 수행한다. 임시 event 로그를 제거했다. manifest/lockfile/CI 및 응답 크기 production 구현의 변경은 없다.

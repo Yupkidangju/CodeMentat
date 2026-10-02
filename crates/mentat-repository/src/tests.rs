@@ -395,6 +395,37 @@ fn test_dbg_f002_ignored_paths_and_access_events_do_not_mark_stale() {
 }
 
 #[test]
+fn test_dbg_f002_aliased_root_keeps_ignore_and_change_detection() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir(root.join("anchor")).unwrap();
+    fs::create_dir(root.join("target")).unwrap();
+    fs::write(root.join(".gitignore"), "/target\n.env\n").unwrap();
+    let alias = root.join("anchor").join("..");
+    assert_eq!(alias.canonicalize().unwrap(), root.canonicalize().unwrap());
+    let mut watcher = crate::watcher::RepositoryWatcher::new(&alias);
+    watcher.spawn_background();
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    fs::write(root.join("target/build.txt"), "ignored").unwrap();
+    fs::write(root.join(".env"), "IGNORED=1").unwrap();
+    assert!(!has_change_within(
+        &mut watcher,
+        std::time::Duration::from_millis(600)
+    ));
+    fs::write(root.join("tracked.rs"), "fn tracked() {}\n").unwrap();
+    assert!(wait_for_change(&mut watcher));
+}
+
+#[test]
+fn test_dbg_f002_unavailable_watch_root_marks_snapshot_stale() {
+    let dir = tempdir().unwrap();
+    let mut watcher = crate::watcher::RepositoryWatcher::new(dir.path().join("missing"));
+    watcher.spawn_background();
+    assert!(wait_for_change(&mut watcher));
+}
+
+#[test]
 fn test_dbg_f002_rescan_unknown_and_ignore_control_events_fail_closed() {
     use crate::watcher::{classify_event, WatcherEventDisposition};
     use notify::event::{AccessKind, Flag, ModifyKind};
@@ -406,6 +437,9 @@ fn test_dbg_f002_rescan_unknown_and_ignore_control_events_fail_closed() {
     let rescan = Event::new(EventKind::Other).set_flag(Flag::Rescan);
     let other = Event::new(EventKind::Other);
     let access = Event::new(EventKind::Access(AccessKind::Any));
+    let missing_paths = Event::new(EventKind::Modify(ModifyKind::Any));
+    let outside_root = Event::new(EventKind::Modify(ModifyKind::Any))
+        .add_path(root.parent().unwrap().join("outside.rs"));
     let exclude_change =
         Event::new(EventKind::Modify(ModifyKind::Any)).add_path(root.join(".git/info/exclude"));
 
@@ -424,6 +458,14 @@ fn test_dbg_f002_rescan_unknown_and_ignore_control_events_fail_closed() {
     );
     assert_eq!(
         classify_event(root, &exclude_change),
+        WatcherEventDisposition::Rescan
+    );
+    assert_eq!(
+        classify_event(root, &missing_paths),
+        WatcherEventDisposition::Rescan
+    );
+    assert_eq!(
+        classify_event(root, &outside_root),
         WatcherEventDisposition::Rescan
     );
 }
